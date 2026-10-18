@@ -254,6 +254,7 @@ def test_overlapping_gate_questions_share_out_the_subject_and_sit_together():
     assert [r["question"] for r in ranked] == ["Mother words?", "Pet names?", "Big names?", "Puns?"]
     pets = ranked[1]
     assert pets["covers"] == ["c3"] and pets["in_gate"]
+    assert pets["chapters"] == 1  # counted again without Mamsie's chapter
     assert pets["shares"] == [{"subject": "Mamsie", "question": "Mother words?"}]
     assert "mamsie" in ranked[0]["covers"]
 
@@ -264,6 +265,23 @@ def test_overlapping_gate_questions_share_out_the_subject_and_sit_together():
            "dropped": [], "unaccounted": [], "unknown": [], "duplicated": []} for c in categories],
            "glossary": [], "translation_notes": []}
     assert "Overlaps question 1: Mamsie follows that answer" in dcons.render_report(doc)
+
+
+def test_a_gate_question_left_with_no_subjects_leaves_the_gate():
+    categories = [
+        _category("titles-honorifics", rules=[_gate_rule("Mother words?", ["mamsie", "c0"])]),
+        _category("names", rules=[_gate_rule("Pet names?", ["Mamsie"]), _gate_rule("Big names?", ["c1"])]),
+    ]
+    subjects = {"mamsie": ["chapter_01"], "Mamsie": ["chapter_01"],
+                "c0": ["chapter_02", "chapter_03"], "c1": ["chapter_04"]}
+    for cat in categories:
+        cat["subjects"] = subjects
+    ranked = dcons.rank_gate_questions(categories, cap=2)
+    assert [r["question"] for r in ranked] == ["Mother words?", "Big names?", "Pet names?"]
+    assert [r["in_gate"] for r in ranked] == [True, True, False]
+    emptied = ranked[2]
+    assert emptied["covers"] == [] and emptied["chapters"] == 0
+    assert emptied["shares"] == [{"subject": "Mamsie", "question": "Mother words?"}]
 
 
 def test_a_name_and_its_sex_are_two_questions():

@@ -10,8 +10,9 @@ alignment, so a candidate cannot be anchored to an ``es_idx``. It carries short
 verbatim ``quotes`` instead, and ``scan_commit`` checks each one against the
 chapter text: a candidate with no quote that is found is ``unusable``.
 
-**Only house-wide rules go into the prompt.** ``load_house_rules`` and never
-``load_style_rules``: on a finished book the per-book ``style_rules.json`` holds
+**Only house-wide rules go into the prompt.** ``rules_for(...,
+audience=AUDIENCE_DECISIONS)`` (house rules in scope, every enforce mode) and
+never ``load_style_rules``: on a finished book the per-book ``style_rules.json`` holds
 the very decisions the scan is meant to find, and a replay that shows it to the
 scanner measures nothing. A new book has no sidecar yet either way.
 

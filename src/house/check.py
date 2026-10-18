@@ -24,7 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
-from src.house import PROJECTS_DIR, book_slug, read_body
+from src.house import book_slug, project_dir_for, read_body
 from src.house.match import count_word
 
 #: A glossary term counts as "not followed" when its renderings appear in fewer
@@ -152,20 +152,23 @@ def check_glossary(project_dir: Path, precedent: dict) -> list[dict[str, Any]]:
 MIN_SIBLING_USES = 3
 
 
-def sibling_usage(project_dir: Path, precedent: dict) -> list[dict[str, Any]]:
+def sibling_usage(
+    project_dir: Path, precedent: dict, *, chunk_memo: Optional[dict[str, list]] = None
+) -> list[dict[str, Any]]:
     """The book's own renderings that its siblings' committed text does not use.
 
     Catches a split no sibling glossary records: game-legs renders a racing heat
     as manga while gaudenzia's translation says serie, and only gaudenzia's
     chunks show it. Names and places are skipped; they belong to each book.
     """
-    from src.house.precedent import _sibling_chunks, bare, concordance
+    from src.house.precedent import bare, concordance, sibling_chunks
 
     rows = []
-    sibs = [s for s in precedent.get("siblings") or [] if (PROJECTS_DIR / s["slug"]).is_dir()]
-    if not sibs:
+    dirs = {s["slug"]: project_dir_for(s["slug"]) for s in precedent.get("siblings") or []}
+    dirs = {slug: d for slug, d in dirs.items() if d is not None}
+    if not dirs:
         return rows
-    chunks = {s["slug"]: _sibling_chunks(PROJECTS_DIR / s["slug"]) for s in sibs}
+    chunks = {slug: sibling_chunks(slug, d, chunk_memo) for slug, d in dirs.items()}
     for term in _glossary_terms(project_dir):
         if str(term.get("type") or "") in ("character", "place"):
             continue
@@ -237,7 +240,8 @@ def promotion_candidates(project_dir: Path) -> list[dict[str, Any]]:
         english_of: dict[str, str] = {}
         display: dict[tuple[str, str], str] = {}
         for member in group["members"]:
-            for term in _glossary_terms(PROJECTS_DIR / member):
+            member_dir = project_dir_for(member)
+            for term in (_glossary_terms(member_dir) if member_dir else []):
                 # A domain shares vocabulary: its names and places are each book's own.
                 if group["kind"] != "series" and str(term.get("type") or "") in ("character", "place"):
                     continue
@@ -258,13 +262,17 @@ def promotion_candidates(project_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def drift(project_dir: Path, precedent: dict) -> list[dict[str, Any]]:
-    """Sibling renderings that changed since this book's precedent snapshot."""
-    from src.house.precedent import build_precedent, leading_rendering
+def drift(snapshot: Optional[dict], fresh: dict) -> list[dict[str, Any]]:
+    """Sibling renderings that changed since this book's precedent snapshot.
 
+    ``fresh`` is the precedent as the siblings stand now; a book with no
+    snapshot has nothing to have drifted from.
+    """
+    from src.house.precedent import leading_rendering
+
+    precedent = snapshot or {}
     if not precedent.get("built_at"):
         return []
-    fresh = build_precedent(project_dir, write=False)
     rows = []
     for key, entry in (precedent.get("glossary") or {}).items():
         then = leading_rendering(entry)
@@ -276,22 +284,28 @@ def drift(project_dir: Path, precedent: dict) -> list[dict[str, Any]]:
 
 
 def run_check(project_dir: Path) -> dict[str, Any]:
-    from src.house.precedent import load_precedent
+    from src.house.precedent import build_precedent, cached_precedent
 
     project_dir = Path(project_dir)
-    precedent = load_precedent(project_dir)
+    # One build and one read of the siblings' chunks serve every section. The
+    # snapshot is never written here: a check run before drafting would freeze
+    # the baseline that drift is measured against.
+    chunk_memo: dict[str, list] = {}
+    fresh = build_precedent(project_dir, write=False, chunk_memo=chunk_memo)
+    snapshot = cached_precedent(project_dir)
+    precedent = snapshot or fresh
     glossary = check_glossary(project_dir, precedent)
     report = {
         "project": project_dir.name,
-        "precedent_built_at": precedent.get("built_at"),
+        "precedent_built_at": snapshot.get("built_at") if snapshot else None,
         "siblings": [s["slug"] for s in precedent.get("siblings") or []],
         "style": check_style(project_dir, precedent),
         "address": check_address(project_dir, precedent),
         "glossary": glossary,
-        "sibling_usage": sibling_usage(project_dir, precedent),
+        "sibling_usage": sibling_usage(project_dir, precedent, chunk_memo=chunk_memo),
         "committed": check_committed(project_dir),
         "promotion_candidates": promotion_candidates(project_dir),
-        "drift": drift(project_dir, precedent),
+        "drift": drift(snapshot, fresh),
     }
     report["counts"] = {
         "style": len(report["style"]),

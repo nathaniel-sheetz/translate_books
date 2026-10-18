@@ -1071,7 +1071,9 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
     # default and left out of the answers takes its pre-filled answer, so no
     # section the house settles is ever blank.
     from src.house.precedent import load_precedent
-    from src.house.prefill import overrides_from_answers, style_house_context
+    from src.house.prefill import (
+        STYLE_OVERRIDE_REASON, overrides_from_answers, overrides_to_lift, style_house_context,
+    )
     from src.judges.context import set_book_override
 
     prefills: dict = {}
@@ -1087,12 +1089,16 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
 
     # A house-settled question answered differently turns that rule off for
     # this book: it leaves the translator prefix and the judge context, and the
-    # book's own answer goes into its guide as usual.
+    # book's own answer goes into its guide as usual. Answered the house's way
+    # again on a re-run, the rule comes back on.
+    house_restored = overrides_to_lift(project_dir, ans, allq)
+    for o in house_restored:
+        set_book_override(project_dir, o["rule_id"], off=False)
     house_overrides = overrides_from_answers(prefills, ans, allq)
     for o in house_overrides:
         set_book_override(
             project_dir, o["rule_id"],
-            reason=f"style answer {o['question']}: {o['answer']}",
+            reason=f"{STYLE_OVERRIDE_REASON}{o['question']}: {o['answer']}",
         )
 
     # Older runs without style_prefill.json: fill dialect from the locale.
@@ -1148,6 +1154,7 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         "unanswered": unanswered,
         "address_summary_loaded": bool(address_summary),
         "house_overrides": house_overrides,
+        "house_restored": house_restored,
         "sections": _prompt_sections(prompt, {
             "sample": source, "house_context": house_context, "address_summary": address_summary,
             "hotspots": hotspots_block,
@@ -1761,7 +1768,7 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
         .replace("{{forms_of_address}}", forms_of_address
                  or "(not answered — infer the register from the sample chapters)")
         .replace("{{house_address}}", house_address or "(none)")
-        .replace("{{series_precedent}}", series_block or "(this book is in no series)")
+        .replace("{{series_precedent}}", series_block or "(no earlier book in a series shares this book's characters)")
         .replace("{{sample_chapters}}", sample_block)
     )
     prompt_path = hdir / "address_map_prompt.txt"
@@ -5364,6 +5371,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "carryforward_path": "path to write glossary terms surfaced while drafting: [{term, why, type_guess}]",
         "address_summary_loaded": "whether an approved address map supplied the FORMS OF ADDRESS section",
         "house_overrides": "list of {rule_id, question, answer}: house rules this book's answers departed from, now turned off for this book in its style_rules.json (they leave its translator prefix and judge context). Relay them at the gate",
+        "house_restored": "list of {rule_id, question, answer}: house rules this book had turned off over a style answer, now answered the house's way again and turned back on. Relay them at the gate",
         "instructions": "what to do next",
     },
     "style-guide commit": {

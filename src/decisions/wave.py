@@ -48,7 +48,7 @@ def load_manifest(path: Path, *, missing: str) -> tuple[Optional[dict[str, Any]]
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"unreadable manifest {path}: {exc}"
-    if not isinstance(doc.get("jobs"), list):
+    if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), list):
         return None, f"manifest {path} has no 'jobs' list"
     return doc, None
 

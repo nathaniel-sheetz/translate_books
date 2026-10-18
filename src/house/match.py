@@ -50,6 +50,12 @@ def term_occurs(term: str, text_lower: str) -> bool:
 
 
 @lru_cache(maxsize=4096)
+def _lowered(text: str) -> str:
+    """``text.lower()``, kept: the same book and chunks are tested against many terms."""
+    return text.lower()
+
+
+@lru_cache(maxsize=4096)
 def _word_pattern(term_lower: str) -> re.Pattern:
     variants = term_variants(term_lower)
     if term_lower.endswith("y"):
@@ -69,6 +75,14 @@ def word_occurs(term: str, text: str) -> bool:
     """
     term_lower = (term or "").strip().lower()
     if not term_lower:
+        return False
+    # Every variant starts with the term's first word (less a final y, for
+    # "ies"). The pattern opens with a lookbehind, so a search is tried at every
+    # position of a whole book; a substring miss rules the term out first.
+    stem = term_lower.split()[0]
+    if " " not in term_lower and stem.endswith("y"):
+        stem = stem[:-1]
+    if stem and stem not in _lowered(text):
         return False
     return _word_pattern(term_lower).search(text) is not None
 
@@ -104,7 +118,7 @@ def any_trigger(triggers: list[str], text: str) -> bool:
 def count_word(word: str, text: str) -> int:
     """Whole-word, case-insensitive occurrences of ``word`` (and its plural) in ``text``."""
     word = (word or "").strip()
-    if not word:
+    if not word or word.lower() not in _lowered(text):
         return 0
     pattern = r"(?<![^\W\d_])" + re.escape(word) + r"(?:e?s)?(?![^\W\d_])"
     return len(re.findall(pattern, text, flags=re.IGNORECASE))

@@ -488,19 +488,31 @@ def rank_gate_questions(categories: list[dict[str, Any]], cap: int = GATE_CAP) -
     so one grandfather's speech can count as 16 subjects while reaching no
     further than the chapters he talks in. The first ``cap`` are ``in_gate``;
     the rest are answered by their recommendation unless the editor opens them.
+
+    Linking can take subjects off a question, so its chapter count is taken
+    again afterwards, and a question left covering nothing (every subject went
+    to a higher one) goes to the end, out of the gate.
     """
+    subjects_of = {cat["category"]: cat["subjects"] for cat in categories}
+
+    def reach(r: dict[str, Any]) -> int:
+        return len({ch for name in r["covers"] for ch in subjects_of[r["category"]].get(name, [])})
+
     ranked = []
     for cat in categories:
         for r in cat["rules"]:
             if r["destination"] != "decisions_gate":
                 continue
-            chapters = {ch for name in r["covers"] for ch in cat["subjects"].get(name, [])}
-            ranked.append({**r, "category": cat["category"], "chapters": len(chapters)})
+            entry = {**r, "category": cat["category"]}
+            ranked.append({**entry, "chapters": reach(entry)})
     ranked.sort(key=lambda r: (-r["chapters"], -len(r["covers"])))
     ranked = link_overlapping_gate_questions(ranked)
+    for r in ranked:
+        r["chapters"] = reach(r)
+    ranked = [r for r in ranked if r["covers"]] + [r for r in ranked if not r["covers"]]
     for i, r in enumerate(ranked):
         r["rank"] = i + 1
-        r["in_gate"] = i < cap
+        r["in_gate"] = i < cap and bool(r["covers"])
     return ranked
 
 

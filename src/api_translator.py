@@ -762,11 +762,30 @@ def place_house_blocks(prompt: str, template: str, house_rules: str, house_notes
         at = prompt.find(_CACHE_PREFIX_SPLIT_MARKER)
         if at >= 0:
             prompt = prompt[:at] + house_rules + "\n\n" + prompt[at:]
+        else:
+            _warn_house_dropped("house_rules", "GLOSSARY TERMS")
     if house_notes and "{{house_notes}}" not in template:
         at = prompt.find(_SOURCE_SECTION_MARKER)
         if at >= 0:
             prompt = prompt[:at] + house_notes + "\n\n" + prompt[at:]
+        else:
+            _warn_house_dropped("house_notes", "SOURCE TEXT TO TRANSLATE")
     return prompt
+
+
+_HOUSE_DROP_WARNED: set[str] = set()
+
+
+def _warn_house_dropped(slot: str, marker: str) -> None:
+    """Say once per process that a template had nowhere to put a house block."""
+    if slot in _HOUSE_DROP_WARNED:
+        return
+    _HOUSE_DROP_WARNED.add(slot)
+    logger.warning(
+        "prompts/translation.txt has no {{%s}} slot and no %s section; the house "
+        "block is left out of the translator prompt. Add the slot to the template.",
+        slot, marker,
+    )
 
 
 def build_translation_prompt_parts(
@@ -831,8 +850,6 @@ def apply_translation(
     change is logged to ``project_dir``'s ``house_fixes.jsonl``; with no
     ``project_dir`` the every-book ones still apply.
     """
-    from src.house.mechanical import fix_translation
-
     chunk.translated_text = fix_translation(
         prose.strip(), project_dir=project_dir, chunk_id=chunk.id, writer=writer
     )

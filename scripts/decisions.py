@@ -2,9 +2,8 @@
 """
 Scan a book's English source for the translation decisions it will force.
 
-The scan half of the decisions stage (``src/decisions/``). Not yet wired into
-``harness.py``: it runs standalone until its recall has been checked against
-``comparisons/decision-archaeology/gold.jsonl``.
+The decisions stage (``src/decisions/``): scan, consolidate, and house-rule
+proposals. Not yet wired into ``harness.py``; it runs standalone.
 
 Subcommands, each printing exactly one JSON object with a ``_schema`` block:
 

@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.house import PROJECTS_DIR, book_slug, read_body
+from src.house import book_slug, project_dir_for, read_body
 from src.house.groups import SERIES, siblings
 from src.house.match import count_word, word_occurs
 
@@ -260,6 +260,17 @@ def _sibling_chunks(sibling_dir: Path) -> list[tuple[str, str]]:
     return rows
 
 
+def sibling_chunks(
+    slug: str, sibling_dir: Path, memo: Optional[dict[str, list]] = None
+) -> list[tuple[str, str]]:
+    """:func:`_sibling_chunks`, read once per ``memo`` (keyed by slug)."""
+    if memo is None:
+        return _sibling_chunks(sibling_dir)
+    if slug not in memo:
+        memo[slug] = _sibling_chunks(sibling_dir)
+    return memo[slug]
+
+
 def concordance(
     english: str, forms: list[str], chunks: list[tuple[str, str]]
 ) -> Optional[dict[str, Any]]:
@@ -336,8 +347,14 @@ def committed_uses(entry: dict[str, Any]) -> Optional[int]:
 # build / load
 # ---------------------------------------------------------------------------
 
-def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
-    """Build the index from the book's siblings, and cache it unless ``write`` is off."""
+def build_precedent(
+    project_dir: Path, *, write: bool = True, chunk_memo: Optional[dict[str, list]] = None
+) -> dict[str, Any]:
+    """Build the index from the book's siblings, and cache it unless ``write`` is off.
+
+    ``chunk_memo`` (see :func:`sibling_chunks`) lets a caller that reads the
+    siblings' chunks again afterwards read them once.
+    """
     from src.house.lexicon import entries_for
     from src.house.groups import group_ids_of
 
@@ -353,8 +370,8 @@ def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
     chunks_by_sibling: dict[str, list[tuple[str, str]]] = {}
 
     for sib in sibs:
-        sdir = PROJECTS_DIR / sib["slug"]
-        if not sdir.is_dir():
+        sdir = project_dir_for(sib["slug"])
+        if sdir is None:
             continue
         for qid, ans in _sibling_style(sdir).items():
             style.setdefault(qid, []).append({**ans, "slug": sib["slug"], "kind": sib["kind"]})
@@ -386,7 +403,7 @@ def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
             if rules:
                 global_rules.append({"from": sib["slug"], "text": rules})
 
-        chunks_by_sibling[sib["slug"]] = _sibling_chunks(sdir)
+        chunks_by_sibling[sib["slug"]] = sibling_chunks(sib["slug"], sdir, chunk_memo)
 
     # Concordance for every term a sibling glossary or the lexicon brings to
     # this book, over every sibling's committed text.
@@ -425,12 +442,17 @@ def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
     return doc
 
 
+def cached_precedent(project_dir: Path) -> Optional[dict[str, Any]]:
+    """The book's precedent snapshot, or ``None`` when it has none (or an old schema)."""
+    cached = _read_json(cache_path(project_dir))
+    return cached if isinstance(cached, dict) and cached.get("schema") == SCHEMA else None
+
+
 def load_precedent(project_dir: Path, *, rebuild: bool = False) -> dict[str, Any]:
     """The cached snapshot, built on first use (or when ``rebuild``)."""
-    path = cache_path(project_dir)
     if not rebuild:
-        cached = _read_json(path)
-        if isinstance(cached, dict) and cached.get("schema") == SCHEMA:
+        cached = cached_precedent(project_dir)
+        if cached is not None:
             return cached
     return build_precedent(project_dir)
 

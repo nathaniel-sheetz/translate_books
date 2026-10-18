@@ -22,7 +22,8 @@ straight through, so you never count positions. Nothing here is answered yet —
 domain siblings"), or the setup locale (es-mx → `mexican_spanish`). Present each as a
 confirm/override default, not a blank ask, and show its `divergence` (other sources that answered
 differently) beside it. If the user answers a house-rule question differently, that rule is turned
-off for this book only at `prepare-draft` (its `house_overrides`); relay that. `house_covered`
+off for this book only at `prepare-draft` (its `house_overrides`); relay that. Answered the
+house's way again on a re-run, the rule comes back on (`house_restored`); relay that too. `house_covered`
 lists questions a global house rule answers: the translator already reads that rule with every
 chunk, so the guide must not restate it. (b) `forms_of_address` has a first-class informal-tú
 option (id `t_dominates_informal` — the `ú` is dropped by the slug rule); prefer that id over

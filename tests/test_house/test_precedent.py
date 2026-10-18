@@ -106,6 +106,34 @@ def test_overrides_from_answers_names_the_rule(house):
     assert prefill.overrides_from_answers(pre, {"dialect": "Mexican Spanish"}, [DIALECT_Q]) == []
 
 
+def test_only_an_override_a_style_answer_wrote_is_lifted(house):
+    from src.judges.context import set_book_override
+
+    book = make_book(house, "plain")
+    set_book_override(book, "mexican-spanish", reason="set in Madrid")
+    assert prefill.overrides_to_lift(book, {"dialect": "mexican_spanish"}, [DIALECT_Q]) == []
+
+    set_book_override(book, "mexican-spanish", off=False)
+    set_book_override(book, "mexican-spanish", reason="style answer dialect: Castilian Spanish")
+    assert prefill.overrides_to_lift(book, {"dialect": "castilian_spanish"}, [DIALECT_Q]) == []
+    assert prefill.overrides_to_lift(book, {"dialect": "Mexican Spanish"}, [DIALECT_Q]) == [
+        {"rule_id": "mexican-spanish", "question": "dialect", "answer": "Mexican Spanish"},
+    ]
+
+
+def test_a_book_in_a_grouping_folder_is_found_and_counts_as_a_sibling(house):
+    from src.house import project_dir_for
+
+    nested = make_book(house / ".hardy", "hardy-1", glossary=[{"english": "roadster", "spanish": "descapotable"}])
+    book = make_book(house, "hardy-2", source="The roadster sped off.")
+    assert project_dir_for("hardy-1") == nested
+    assert project_dir_for("hardy-2") == book
+    for bad in ("", ".", "..", ".hardy/hardy-1", "missing"):
+        assert project_dir_for(bad) is None
+    prec = precedent.build_precedent(book, write=False)
+    assert precedent.leading_rendering(prec["glossary"]["roadster"])["spanish"] == "descapotable"
+
+
 def test_word_occurs_needs_whole_words():
     from src.house.match import word_occurs
 
@@ -115,6 +143,17 @@ def test_word_occurs_needs_whole_words():
     assert word_occurs("smuggler", "a smugglers’ quarrel")
     assert word_occurs("pony", "two ponies grazed")
     assert word_occurs("Mr. Hardy", "said Mr.\nHardy")
+    # The substring pre-check in front of the pattern rules nothing true out.
+    assert word_occurs("old man", "the OLD\n  MAN nodded")
+    assert word_occurs("Story", "two stories")
+    assert not word_occurs("pony", "")
+
+
+def test_count_word_counts_whole_words_and_plurals():
+    from src.house.match import count_word
+
+    assert count_word("heat", "The Heats ran. A heat. Heated words.") == 2
+    assert count_word("heat", "") == 0
 
 
 def test_prefill_skips_absent_and_never_used_renderings_and_shows_the_sense(house):

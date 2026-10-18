@@ -86,6 +86,40 @@ def test_committed_text_that_ignores_the_glossary_is_listed(house):
     assert row["english"] == "saucepan" and row["chunks_without_rendering"] == ["chapter_01_chunk_001"]
 
 
+def test_join_refuses_to_overwrite_an_unreadable_groups_file(house):
+    groups.GROUPS_FILE.write_text("{bad json", encoding="utf-8")
+    with pytest.raises(ValueError, match="unreadable"):
+        groups.join_group("book", "misty", kind="series")
+    assert groups.GROUPS_FILE.read_text(encoding="utf-8") == "{bad json"
+
+
+def test_adopt_checks_the_group_and_decline_takes_only_open_proposals(house, tmp_path, monkeypatch):
+    monkeypatch.setattr(proposals, "PROPOSALS_FILE", tmp_path / "proposals.jsonl")
+    [pid] = proposals.record_proposals("book-a", [{"category": "speech-typography", "proposals": [
+        {"rule": "Italics stay italics.", "subjects": ["italic emphasis"]},
+    ]}])
+    for scope in ("group:", "group:nope"):
+        with pytest.raises(ValueError, match="no group"):
+            proposals.adopt(pid, scope=scope)
+    assert proposals.adopt(pid, scope="group:hardy", rule_id="italics")["scope"] == "group:hardy"
+    with pytest.raises(ValueError, match="already adopted"):
+        proposals.decline(pid)
+
+
+def test_house_check_takes_no_snapshot_and_reports_drift_against_one(house):
+    from src.house import precedent
+
+    make_book(house, "old-horse", glossary=[{"english": "halter", "spanish": "jáquima"}])
+    book = make_book(house, "new-horse", source="the halter")
+    report = check.run_check(book)
+    assert not precedent.cache_path(book).exists()
+    assert report["precedent_built_at"] is None and report["drift"] == []
+
+    precedent.load_precedent(book)  # drafting takes the snapshot
+    make_book(house, "old-horse", glossary=[{"english": "halter", "spanish": "ronzal"}])
+    assert check.run_check(book)["drift"] == [{"english": "halter", "snapshot": "jáquima", "now": "ronzal"}]
+
+
 # ── harness gates ──────────────────────────────────────────────────────────
 
 def _harness_book(house, slug: str, source: str):
@@ -118,6 +152,25 @@ def test_prepare_draft_turns_off_a_rule_the_answers_depart_from(house):
     prompt = (book / ".harness" / "style_guide_prompt.txt").read_text(encoding="utf-8")
     assert "HOUSE RULES ALREADY IN THE TRANSLATOR'S PROMPT" in prompt
     assert "Write Mexican Spanish." not in prompt  # off for this book now
+
+
+def test_prepare_draft_turns_the_rule_back_on_when_the_house_answer_returns(house):
+    from src.judges.context import load_book_overrides
+
+    book = _harness_book(house, "plain", "A plain story.\n")
+    flow.style_guide_prepare_questions(str(book))
+    write_json(book / ".harness" / "style_answers.json", {"dialect": "castilian_spanish"})
+    flow.style_guide_prepare_draft(str(book))
+    assert "mexican-spanish" in load_book_overrides(book)
+
+    flow.style_guide_prepare_questions(str(book))  # the rule is off, so its prefill names no rule
+    write_json(book / ".harness" / "style_answers.json", {"dialect": "mexican_spanish"})
+    out = flow.style_guide_prepare_draft(str(book))
+    assert [(o["rule_id"], o["question"]) for o in out["house_restored"]] == [("mexican-spanish", "dialect")]
+    assert out["house_overrides"] == []
+    assert "mexican-spanish" not in load_book_overrides(book)
+    prompt = (book / ".harness" / "style_guide_prompt.txt").read_text(encoding="utf-8")
+    assert "Write Mexican Spanish." in prompt
 
 
 def test_glossary_prepare_prefills_and_commit_reports_departures(house):

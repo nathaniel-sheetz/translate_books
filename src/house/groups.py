@@ -110,14 +110,19 @@ def _editable_doc() -> dict[str, Any]:
     Seeding from the example rather than from nothing keeps a clone's first
     ``group join`` from silently discarding the example's groups the operator
     has been reading all along.
+
+    Raises ``ValueError`` when the operator's file exists but does not parse:
+    writing over it would replace every group with the one being edited.
     """
     about = ""
     if GROUPS_FILE.exists():
         try:
             loaded = json.loads(GROUPS_FILE.read_text(encoding="utf-8"))
-            about = str(loaded.get("about") or "") if isinstance(loaded, dict) else ""
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{GROUPS_FILE} is unreadable ({exc}); fix it by hand first") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{GROUPS_FILE} is not a JSON object; fix it by hand first")
+        about = str(loaded.get("about") or "")
     doc: dict[str, Any] = {"version": 1}
     if about:
         doc["about"] = about

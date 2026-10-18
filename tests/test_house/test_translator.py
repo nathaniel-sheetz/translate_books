@@ -60,6 +60,18 @@ def test_a_template_without_slots_still_gets_both_blocks():
     assert placed.index(_CACHE_PREFIX_SPLIT_MARKER) < placed.index("NOTES-BLOCK") < placed.index("SOURCE TEXT")
 
 
+def test_a_template_with_nowhere_for_the_blocks_warns_once(caplog, monkeypatch):
+    import src.api_translator as api
+
+    monkeypatch.setattr(api, "_HOUSE_DROP_WARNED", set())
+    with caplog.at_level("WARNING", logger="src.api_translator"):
+        assert place_house_blocks("bare", "bare", "RULES-BLOCK", "NOTES-BLOCK") == "bare"
+        place_house_blocks("bare", "bare", "RULES-BLOCK", "NOTES-BLOCK")
+    warned = [r.getMessage() for r in caplog.records if "house block" in r.getMessage()]
+    assert len(warned) == 2
+    assert any("house_rules" in m for m in warned) and any("house_notes" in m for m in warned)
+
+
 def test_rio_fix_leaves_sonrio_crio_and_rio_alone():
     text = "—Claro —rió Ben. Rió otra vez, sonrió y se crió junto al río."
     fixed, changes = apply_fixes(text, RIO)

@@ -38,7 +38,7 @@ class TranslatorHouse:
 
     def rules_block(self) -> str:
         """The framed HOUSE RULES section, or ``""`` when there are none."""
-        lines = [_line(r) for r in self.global_rules if str(r.get("rule") or "").strip()]
+        lines = [_line(r) for r in self.global_rules if str(r.get("rule") or r.get("text") or "").strip()]
         if not lines:
             return ""
         return (

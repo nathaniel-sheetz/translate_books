@@ -140,7 +140,7 @@ def style_house_context(project_dir: Path, precedent: Optional[dict] = None) -> 
     series siblings' guides as reference. Domain siblings share vocabulary,
     not voice, so their guides are left out.
     """
-    from src.house import PROJECTS_DIR
+    from src.house import project_dir_for
     from src.house.prompt import load_translator_house
     from src.utils.file_io import load_style_guide
 
@@ -163,7 +163,10 @@ def style_house_context(project_dir: Path, precedent: Optional[dict] = None) -> 
     for sib in (precedent or {}).get("siblings") or []:
         if sib.get("kind") != SERIES:
             continue
-        path = PROJECTS_DIR / sib["slug"] / "style.json"
+        sdir = project_dir_for(sib["slug"])
+        if sdir is None:
+            continue
+        path = sdir / "style.json"
         try:
             content = load_style_guide(path).content.strip()
         except Exception:  # noqa: BLE001 - a sibling without a usable guide adds nothing
@@ -390,4 +393,41 @@ def overrides_from_answers(
         key, label = normalize_answer(by_id.get(qid), answers[qid])
         if key != entry["house_answer"]:
             out.append({"rule_id": entry["rule_id"], "question": qid, "answer": label})
+    return out
+
+
+#: How ``prepare_draft`` words the reason when a style answer turns a rule off.
+STYLE_OVERRIDE_REASON = "style answer "
+
+
+def overrides_to_lift(
+    project_dir: Path, answers: dict[str, Any], questions: list[dict]
+) -> list[dict[str, str]]:
+    """House rules this book turned off over a style answer it no longer gives.
+
+    The other half of :func:`overrides_from_answers`. A rule that is off is not
+    in the prefills, so changing the answer back would otherwise leave it off
+    for good. Only overrides a style answer wrote are lifted (their reason names
+    the question); one written by hand stays. Returns ``[{rule_id, question, answer}]``.
+    """
+    from src.judges.context import load_book_overrides, load_house_rules, rule_settles
+
+    off = load_book_overrides(project_dir)
+    if not off:
+        return []
+    by_id = {q["id"]: q for q in questions if q.get("id")}
+    out = []
+    for rule in load_house_rules():
+        rule_id = str(rule.get("id") or "").strip()
+        reason = str((off.get(rule_id) or {}).get("reason") or "")
+        if not reason.startswith(STYLE_OVERRIDE_REASON):
+            continue
+        qid = reason[len(STYLE_OVERRIDE_REASON):].split(":", 1)[0].strip()
+        house_answer = rule_settles(rule).get(f"style:{qid}")
+        if house_answer is None or qid not in answers:
+            continue
+        house_key, _ = normalize_answer(by_id.get(qid), house_answer)
+        key, label = normalize_answer(by_id.get(qid), answers[qid])
+        if key == house_key:
+            out.append({"rule_id": rule_id, "question": qid, "answer": label})
     return out

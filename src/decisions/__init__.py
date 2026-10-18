@@ -1,11 +1,12 @@
 """
 The decisions stage: find the book-wide translation calls before translation.
 
-Phase 2 of the decision-taxonomy plan. Today only the scan exists
-(:mod:`src.decisions.scan`): one headless job per English chapter, read against
-the taxonomy in ``prompts/decisions_taxonomy.json``, producing candidate
-decisions. Merging them into ranked cards, the rulings ledger and the harness
-wiring come after the scan's recall has been checked against the mined gold set.
+Phase 2 of the decision-taxonomy plan. The scan (:mod:`src.decisions.scan`)
+runs one headless job per English chapter, read against the taxonomy in
+``prompts/decisions_taxonomy.json``, producing candidate decisions. The
+consolidate step (:mod:`src.decisions.consolidate`) runs one job per category,
+folding those candidates into ranked gate questions, routed items and house-rule
+proposals. The rulings ledger and the harness wiring come later.
 """
 
 from pathlib import Path

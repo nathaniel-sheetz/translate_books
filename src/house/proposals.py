@@ -144,8 +144,18 @@ def adopt(
         raise ValueError(f"no proposal {pid!r}")
     if proposal["status"] != OPEN:
         raise ValueError(f"proposal {pid} is already {proposal['status']}")
-    if scope != EVERY_BOOK and not scope.startswith("group:"):
-        raise ValueError(f"scope must be {EVERY_BOOK!r} or 'group:<id>', not {scope!r}")
+    if scope != EVERY_BOOK:
+        if not scope.startswith("group:"):
+            raise ValueError(f"scope must be {EVERY_BOOK!r} or 'group:<id>', not {scope!r}")
+        from src.house.groups import load_groups
+
+        group_id = scope[len("group:"):].strip()
+        known = load_groups()
+        if group_id not in known:
+            raise ValueError(
+                f"no group {group_id!r} (known: {', '.join(sorted(known)) or '(none yet)'})"
+            )
+        scope = f"group:{group_id}"
     if enforce is not None and enforce not in context.ENFORCE_MODES:
         raise ValueError(f"enforce must be one of {context.ENFORCE_MODES}")
 
@@ -188,6 +198,8 @@ def decline(pid: str, *, reason: str = "") -> dict[str, Any]:
     proposal = next((p for p in load_proposals() if p["id"] == pid), None)
     if proposal is None:
         raise ValueError(f"no proposal {pid!r}")
+    if proposal["status"] != OPEN:
+        raise ValueError(f"proposal {pid} is already {proposal['status']}")
     _append([{
         "id": pid, "kind": "status", "status": DECLINED, "reason": reason,
         "ts": datetime.now().isoformat(timespec="seconds"),

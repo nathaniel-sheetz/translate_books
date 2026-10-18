@@ -83,7 +83,7 @@ def pair(a: str, b: str, ab: str, ba: str) -> dict:
 def house(tmp_path, monkeypatch):
     """Rules, lexicon and groups under tmp_path; projects live in tmp_path/projects."""
     import src.house as house_pkg
-    from src.house import check, groups, lexicon, precedent
+    from src.house import groups, lexicon
     from src.judges import context
 
     projects = tmp_path / "projects"
@@ -97,6 +97,5 @@ def house(tmp_path, monkeypatch):
             "hardy": {"kind": "series", "members": ["hardy-2", "hardy-1", "hardy-3"]},
         }
     }))
-    for module in (house_pkg, precedent, check):
-        monkeypatch.setattr(module, "PROJECTS_DIR", projects)
+    monkeypatch.setattr(house_pkg, "PROJECTS_DIR", projects)
     return projects

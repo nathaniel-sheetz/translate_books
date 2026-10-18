@@ -34,11 +34,20 @@ EVERY_BOOK = "every_book"
 
 
 def project_dir_for(slug: Optional[str]) -> Optional[Path]:
-    """``projects/<slug>`` when it exists, else ``None``."""
-    if not slug:
+    """The book's folder, else ``None``.
+
+    ``projects/<slug>``, or a book nested in a grouping folder
+    (``projects/.macdonald/<slug>``) found the way the harness finds it. A slug
+    is a single folder name: anything carrying a path separator is refused.
+    """
+    if not slug or slug in (".", "..") or Path(slug).name != slug:
         return None
     path = PROJECTS_DIR / slug
-    return path if path.is_dir() else None
+    if path.is_dir():
+        return path
+    from src.harness.state import _iter_nested_match
+
+    return next(_iter_nested_match(PROJECTS_DIR, slug), None)
 
 
 def book_slug(project_dir: Optional[Path]) -> Optional[str]:
