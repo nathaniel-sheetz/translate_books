@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.house import EVERY_BOOK, PROMPTS_DIR, REPO_ROOT, in_scope
-from src.house.match import term_occurs
+from src.house.match import word_occurs
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +103,10 @@ def entries_for(
 ) -> list[dict[str, Any]]:
     """The entries in scope for a book in ``groups``, present in ``source_text`` when given."""
     lexicon = load_lexicon() if lexicon is None else lexicon
-    lowered = source_text.lower() if source_text is not None else None
     return [
         e for e in lexicon
         if in_scope(e["scope"], groups)
-        and (lowered is None or term_occurs(e["english"], lowered))
+        and (source_text is None or word_occurs(e["english"], source_text))
     ]
 
 

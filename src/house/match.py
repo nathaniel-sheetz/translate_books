@@ -49,6 +49,30 @@ def term_occurs(term: str, text_lower: str) -> bool:
     return any(v in text_lower for v in term_variants(term_lower))
 
 
+@lru_cache(maxsize=4096)
+def _word_pattern(term_lower: str) -> re.Pattern:
+    variants = term_variants(term_lower)
+    if term_lower.endswith("y"):
+        variants += [term_lower[:-1] + "ies", term_lower[:-1] + "ied"]
+    alternation = "|".join(
+        re.escape(v).replace(r"\ ", r"\s+") for v in sorted(set(variants), key=len, reverse=True)
+    )
+    return re.compile(r"(?<![^\W\d_])(?:" + alternation + r")(?![^\W\d_])", re.IGNORECASE)
+
+
+def word_occurs(term: str, text: str) -> bool:
+    """Whether ``term`` or a common variant of it occurs in ``text`` as whole words.
+
+    For deciding whether a book uses a word at all (house precedent, the
+    lexicon), where :func:`term_occurs`'s substring test is wrong: it finds
+    "oars" in "hoarsely" and "Napoli" in "Indianapolis".
+    """
+    term_lower = (term or "").strip().lower()
+    if not term_lower:
+        return False
+    return _word_pattern(term_lower).search(text) is not None
+
+
 @lru_cache(maxsize=256)
 def _compiled(pattern: str) -> re.Pattern | None:
     try:

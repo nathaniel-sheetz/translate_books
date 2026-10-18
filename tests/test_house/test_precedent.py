@@ -104,3 +104,42 @@ def test_overrides_from_answers_names_the_rule(house):
         {"rule_id": "mexican-spanish", "question": "dialect", "answer": "Castilian Spanish"},
     ]
     assert prefill.overrides_from_answers(pre, {"dialect": "Mexican Spanish"}, [DIALECT_Q]) == []
+
+
+def test_word_occurs_needs_whole_words():
+    from src.house.match import word_occurs
+
+    assert not word_occurs("oars", "he said hoarsely")
+    assert not word_occurs("Napoli", "the road to Indianapolis")
+    assert not word_occurs("dam", "the damp cellar")
+    assert word_occurs("smuggler", "a smugglers’ quarrel")
+    assert word_occurs("pony", "two ponies grazed")
+    assert word_occurs("Mr. Hardy", "said Mr.\nHardy")
+
+
+def test_prefill_skips_absent_and_never_used_renderings_and_shows_the_sense(house):
+    make_book(house, "old-horse",
+              glossary=[{"english": "oars", "spanish": "remos"},
+                        {"english": "queer", "spanish": "billetes falsos"},
+                        {"english": "wheel", "spanish": "timón"}],
+              chunks=[("A queer noise. He took the wheel of the boat.", "Un ruido raro. Tomó el timón del bote.")])
+    book = make_book(house, "new-horse", source="Made in Indianapolis.\n\nHe spoke hoarsely. A queer wheel.")
+    prec = precedent.build_precedent(book)
+    filled, _, _ = prefill.glossary_prefills(book, book.joinpath("source.txt").read_text(), prec)
+
+    by_english = {p["english"]: p for p in filled}
+    # oars: only inside "hoarsely"; queer: the sibling's prose has it and never its rendering.
+    assert set(by_english) == {"wheel"}
+    assert by_english["wheel"]["example"] == "He took the wheel of the boat."
+    assert 'e.g. "He took the wheel of the boat."' in prefill.format_glossary_prefill(filled, [])
+
+
+def test_a_snapshot_from_an_older_schema_is_rebuilt(house):
+    import json
+
+    make_book(house, "old-horse", glossary=[{"english": "halter", "spanish": "jáquima"}])
+    book = make_book(house, "new-horse", source="the halter")
+    path = precedent.cache_path(book)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"glossary": {}, "built_at": "then"}), encoding="utf-8")
+    assert "halter" in precedent.load_precedent(book)["glossary"]

@@ -69,3 +69,17 @@ def read_source(project_dir: Optional[Path]) -> Optional[str]:
         return path.read_text(encoding="utf-8")
     except OSError:
         return None
+
+
+def read_body(project_dir: Optional[Path]) -> Optional[str]:
+    """The book's chapters without the front matter, else ``source.txt``.
+
+    For "does this book use the word": a copyright page's "Made in the United
+    States of America" is not a use of "United States".
+    """
+    if project_dir is None:
+        return None
+    from src.utils.source_text import load_clean_source_text
+
+    text, _, _ = load_clean_source_text(Path(project_dir))
+    return text or read_source(project_dir)

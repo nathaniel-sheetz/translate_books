@@ -170,12 +170,12 @@ def house_vocabulary_text(project_dir: Optional[Path]) -> str:
     """
     if project_dir is None:
         return "(no book given)"
-    from src.house import book_slug, read_source
+    from src.house import book_slug, read_body
     from src.house.groups import group_ids_of
     from src.house.lexicon import entries_for, format_entry
     from src.house.precedent import format_concordance, leading_rendering, load_precedent, style_votes
 
-    source = read_source(project_dir)
+    source = read_body(project_dir)
     parts: list[str] = []
     lexicon = entries_for(group_ids_of(book_slug(project_dir)), source)
     if lexicon:

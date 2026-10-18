@@ -185,7 +185,8 @@ def glossary_prefills(
 
     - ``prefilled``: ``{english, translation, alternatives, type, origin, evidence}``
       for every house lexicon entry with a rendering and every sibling glossary
-      term whose English occurs in the source. The lexicon wins over siblings.
+      term whose English occurs in the source, unless the siblings' committed text
+      has the word and never their rendering. The lexicon wins over siblings.
     - ``candidates_only``: lexicon entries with no rendering (always raise them).
     - ``divergence``: ``{english, chosen, chosen_origin, other, other_origin}``
       wherever the lexicon and the siblings, or two siblings, disagree.
@@ -193,7 +194,9 @@ def glossary_prefills(
     from src.house import book_slug
     from src.house.groups import group_ids_of
     from src.house.lexicon import entries_for
-    from src.house.precedent import bare, format_concordance, leading_rendering
+    from src.house.precedent import (
+        bare, committed_uses, example_of, format_concordance, leading_rendering,
+    )
 
     precedent = precedent or {}
     by_english = precedent.get("glossary") or {}
@@ -214,11 +217,16 @@ def glossary_prefills(
             "origin": f"house lexicon ({entry['scope']})",
             "why": entry["why"],
             "evidence": format_concordance(by_english.get(key, {})),
+            "example": example_of(by_english.get(key, {})),
         }
 
     for key, entry in by_english.items():
         lead = leading_rendering(entry)
         if lead is None:
+            continue
+        # The siblings' prose has the word and never used their own rendering for
+        # it: the glossary row was never acted on, so it is no precedent.
+        if key not in prefilled and committed_uses(entry) == 0:
             continue
         origin = "siblings: " + ", ".join(lead["slugs"])
         if key in prefilled:
@@ -239,6 +247,7 @@ def glossary_prefills(
             "origin": origin,
             "why": "",
             "evidence": format_concordance(entry),
+            "example": example_of(entry),
         }
         for r in entry["renderings"]:
             if bare(r["spanish"]).casefold() != lead["spanish"].casefold():
@@ -268,12 +277,15 @@ def format_glossary_prefill(
             line += f" — {p['why']}"
         if p["evidence"]:
             line += f" ({p['evidence']})"
+        if p.get("example"):
+            line += f' e.g. "{p["example"]}"'
         lines.append(line)
     block = (
         "PRE-FILLED RENDERINGS. These come from the house lexicon and from earlier books "
         "in this book's groups. Propose each one with exactly this translation unless "
         "something in this book argues otherwise; if you depart, say why in `context`. "
-        "Counts are uses in the earlier books' committed translations.\n" + "\n".join(lines)
+        "Counts are uses in the earlier books' committed translations. The e.g. sentence is "
+        "from an earlier book: check this book uses the word in the same sense.\n" + "\n".join(lines)
     )
     if divergence:
         block += "\n\nWhere the sources disagree (decide, and say which in `context`):\n" + "\n".join(

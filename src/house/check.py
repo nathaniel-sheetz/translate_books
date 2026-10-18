@@ -24,7 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
-from src.house import PROJECTS_DIR, book_slug, read_source
+from src.house import PROJECTS_DIR, book_slug, read_body
 from src.house.match import count_word
 
 #: A glossary term counts as "not followed" when its renderings appear in fewer
@@ -111,7 +111,7 @@ def check_glossary(project_dir: Path, precedent: dict) -> list[dict[str, Any]]:
     mine = {str(t["english"]).casefold(): t for t in _glossary_terms(project_dir)}
     by_english = precedent.get("glossary") or {}
     rows = []
-    lexicon = entries_for(group_ids_of(book_slug(project_dir)), read_source(project_dir))
+    lexicon = entries_for(group_ids_of(book_slug(project_dir)), read_body(project_dir))
     covered = set()
     for e in lexicon:
         if not e["spanish"]:

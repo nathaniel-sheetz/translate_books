@@ -29,13 +29,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.house import PROJECTS_DIR, book_slug, read_source
+from src.house import PROJECTS_DIR, book_slug, read_body
 from src.house.groups import SERIES, siblings
-from src.house.match import count_word, term_occurs
+from src.house.match import count_word, word_occurs
 
 logger = logging.getLogger(__name__)
 
 CACHE_NAME = "precedent.json"
+
+#: Bumped when the snapshot's shape or matching changes, so an older cache is rebuilt.
+SCHEMA = 2
 
 #: Leading articles stripped before renderings are compared or counted, so a
 #: glossary's "el venado" and another's "venado" are the same rendering.
@@ -266,19 +269,67 @@ def concordance(
     has it, and each form's occurrences in that chunk's translation. A form is
     counted bare (no article) with its plural, so "las casillas" counts as
     casilla. ``None`` when the English never occurs in the committed text.
+
+    ``example`` is the first English sentence that uses the word, so a reader
+    can see which sense the sibling meant (a boat's wheel, not a car's).
     """
     english_n = 0
+    example = ""
     counts: Counter = Counter()
     for source, translation in chunks:
         n = count_word(english, source)
         if not n:
             continue
         english_n += n
+        if not example:
+            example = example_sentence(english, source)
         for form in forms:
             counts[form] += count_word(form, translation)
     if not english_n:
         return None
-    return {"english": english_n, "forms": {f: counts[f] for f in forms if counts[f]}}
+    return {
+        "english": english_n,
+        "forms": {f: counts[f] for f in forms if counts[f]},
+        "example": example,
+    }
+
+
+_EXAMPLE_MAX = 120
+
+
+def example_sentence(word: str, text: str) -> str:
+    """The sentence around ``word``'s first whole-word use, at most ~120 characters."""
+    m = re.search(r"(?<![^\W\d_])" + re.escape(word) + r"(?:e?s)?(?![^\W\d_])", text, re.IGNORECASE)
+    if not m:
+        return ""
+    start = max(text.rfind(c, 0, m.start()) for c in ".!?\n") + 1
+    ends = [i for i in (text.find(c, m.end()) for c in ".!?\n") if i != -1]
+    end = min(ends) + 1 if ends else len(text)
+    sentence = " ".join(text[start:end].split()).strip(' "“”')
+    if len(sentence) <= _EXAMPLE_MAX:
+        return sentence
+    # Too long: a window centred on the word.
+    pos = sentence.lower().find(m.group(0).lower())
+    lo = max(0, pos - _EXAMPLE_MAX // 2)
+    window = sentence[lo:lo + _EXAMPLE_MAX].strip()
+    return ("…" if lo else "") + window + ("…" if lo + _EXAMPLE_MAX < len(sentence) else "")
+
+
+def example_of(entry: dict[str, Any]) -> str:
+    """The first sibling example sentence in an index entry's concordance, or ``""``."""
+    for c in (entry.get("concordance") or {}).values():
+        if c.get("example"):
+            return c["example"]
+    return ""
+
+
+def committed_uses(entry: dict[str, Any]) -> Optional[int]:
+    """Uses of any rendering in the siblings' committed text, or ``None`` when
+    no sibling's committed text has the English word (nothing to judge by)."""
+    concord = entry.get("concordance") or {}
+    if not concord:
+        return None
+    return sum(n for c in concord.values() for n in c["forms"].values())
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +343,7 @@ def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
 
     project_dir = Path(project_dir)
     slug = book_slug(project_dir)
-    source = read_source(project_dir) or ""
-    source_lower = source.lower()
+    source = read_body(project_dir) or ""
     sibs = siblings(slug)
 
     style: dict[str, list[dict[str, str]]] = {}
@@ -314,7 +364,7 @@ def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
         for term in terms:
             english = str(term.get("english") or "").strip()
             spanish = str(term.get("spanish") or "").strip()
-            if not english or not spanish or not term_occurs(english, source_lower):
+            if not english or not spanish or not word_occurs(english, source):
                 continue
             # A domain shares vocabulary, not a cast or a map: its characters'
             # and places' names are not precedent for this book.
@@ -360,6 +410,7 @@ def build_precedent(project_dir: Path, *, write: bool = True) -> dict[str, Any]:
         entry["divergent"] = len({_norm(r["spanish"]) for r in entry["renderings"]}) > 1
 
     doc = {
+        "schema": SCHEMA,
         "project": slug,
         "built_at": datetime.now().isoformat(timespec="seconds"),
         "siblings": sibs,
@@ -379,7 +430,7 @@ def load_precedent(project_dir: Path, *, rebuild: bool = False) -> dict[str, Any
     path = cache_path(project_dir)
     if not rebuild:
         cached = _read_json(path)
-        if isinstance(cached, dict) and "glossary" in cached:
+        if isinstance(cached, dict) and cached.get("schema") == SCHEMA:
             return cached
     return build_precedent(project_dir)
 
