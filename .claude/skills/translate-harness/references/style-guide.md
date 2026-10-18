@@ -16,9 +16,16 @@ This prints `detected_features`, the `questions` (the 4 **standard** fixed quest
 **deterministic** feature-detected ones, each with `id`, `question`, `options`, and a `hint`),
 and an `answers_path`. Each option is an `{id, label}` pair — the `id` is a stable slug you pass
 straight through, so you never count positions. Nothing here is answered yet — these are
-*for the user*. Two notes: (a) the `dialect` question may arrive with a `prefilled` id +
-`prefilled_reason` derived from the setup locale (es-mx → `mexican_spanish`) — present it as a
-confirm/override default, not a blank ask. (b) `forms_of_address` has a first-class informal-tú
+*for the user*. Two notes: (a) any question may arrive with a `prefilled` id +
+`prefilled_reason` + `prefilled_source` — from this book's own answer, a house rule that settles it
+(`house rule \`mexican-spanish\``), the series or domain siblings' most common answer ("3 of 4
+domain siblings"), or the setup locale (es-mx → `mexican_spanish`). Present each as a
+confirm/override default, not a blank ask, and show its `divergence` (other sources that answered
+differently) beside it. If the user answers a house-rule question differently, that rule is turned
+off for this book only at `prepare-draft` (its `house_overrides`); relay that. Answered the
+house's way again on a re-run, the rule comes back on (`house_restored`); relay that too. `house_covered`
+lists questions a global house rule answers: the translator already reads that rule with every
+chunk, so the guide must not restate it. (b) `forms_of_address` has a first-class informal-tú
 option (id `t_dominates_informal` — the `ú` is dropped by the slug rule); prefer that id over
 inventing custom text when the user wants tú to dominate.
 
@@ -50,6 +57,10 @@ python scripts/harness.py style-guide prepare-followups --project projects/<slug
 ```
 Read the printed `prompt_path`, draft the follow-up questions as a JSON array, **Write** them to
 the printed `draft_path`, then:
+The sample is only the book's opening. The payload's `hotspots` lists chapters from the whole book
+that carry period ethnic/racial framing or much more eye dialect than the book's typical chapter,
+with sample lines. Draft a follow-up for each speaker group they show, unless a house rule or
+series guide section already settles it.
 ```bash
 python scripts/harness.py style-guide commit-followups --project projects/<slug>
 ```
@@ -87,6 +98,9 @@ Two rules the prompt states and you must hold yourself to while drafting:
   glossary entry or alternative to reach for, e.g. *"for a title + personal name, use the form
   with the definite article in narration (el tío Manuel llegó tarde) and the bare vocative in
   direct address (Oye, tío Manuel, quiero…)"*.
+- **Cutting to the word target trims inside sections, never removes one an answer kept.** Shorten
+  each section's sentences first. A series section (above all a framing or dialect rule) stays
+  general: don't narrow it to the one speaker the sample happened to show.
 
 Once they have signed off, and **immediately before** running `commit`, **Write** the *light*
 style guide to the printed `light_draft_path` — **at most two sentences**: one naming the
@@ -99,7 +113,9 @@ Then:
 ```bash
 python scripts/harness.py style-guide commit --project projects/<slug>
 ```
-This parses, saves `style.json`, and validates it. If it prints a VALIDATION/PARSE error, fix the
+This parses, saves `style.json`, and validates it. Relay any `warnings` (`REVIEW:` lines) at the
+gate; one means the book has period framing and nothing in the guide or the house rules gives a
+rule for it. If it prints a VALIDATION/PARSE error, fix the
 draft, refresh or delete `light_draft_path` (a leftover file still wins on re-commit), and
 re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort). It also settles the light
 guide and echoes it back as `light_content`, with `light_source` naming where it came from:

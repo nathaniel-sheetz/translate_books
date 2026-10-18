@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.77.0.0] - 2026-10-17
+
+### Added
+- **The decisions stage scans each English chapter for the book-wide calls it will force.** `scripts/decisions.py` has these subcommands:
+  - `scan-prepare`/`scan-fanout`/`scan-commit` run one headless job per chapter against the decision taxonomy. The scan holds out the book's own examples and leaves out its `style_rules.json`. Every quote is checked against the chapter text.
+  - `consolidate-prepare`/`consolidate-fanout`/`consolidate-commit` run one job per category. Each job folds the scan's candidates into gate questions, address-map and glossary items, translation notes and house-rule proposals. A subject that one category settles comes off another category's flags. A subject shared by two gate questions goes to one of them, and the two questions sit together.
+  - The gate ranks questions by chapters spanned and puts the top six in front of the editor. The rest are answered by their recommendation.
+  - The stage runs standalone and is not wired into `harness.py` yet.
+- **House rules reach the translator.** Each house rule in `prompts/house_style_rules.json` can carry a scope (every book or `group:<id>`), an enforce mode, triggers and the questions it settles:
+  - global rules sit in the translator's cached prefix;
+  - triggered rules reach only the chunks whose English sets them off;
+  - mechanical rules (rio, never rió) are fixed in code at every commit and logged to `house_fixes.jsonl`;
+  - draft-only rules pre-answer the questions they settle.
+
+  A book turns a rule off in its `style_rules.json`. `style-guide prepare-draft` writes that entry when an answer departs from the house.
+- **A house lexicon and book groups.** `prompts/house_lexicon.json` replaces `forced_glossary_terms.json` and pre-fills the glossary. `prompts/book_groups.json` names series and domains. A book's siblings pre-fill its style answers, address pairs (series only) and glossary renderings. The evidence is counts from the siblings' committed translations, and every disagreement shows at the gate. `setup` takes `--group`; `group` and `precedent` are new harness commands. Both files are per-user, with tracked `.example` twins.
+- **`scripts/house_check.py` reports where a book departs from the house and its siblings.** It runs after each gate's commit and writes `reports/house_check.md`.
+- **The style-guide beat sees the whole book's dialect and racial framing.** `prepare-followups` and `prepare-draft` scan every chapter for period ethnic and racial terms and for heavy eye dialect, and add those chapters to the prompt. `style-guide commit` warns when the book has period framing that neither the guide nor a house rule addresses.
+- **`setup --url` accepts a Gutenberg catalog page** (`gutenberg.org/ebooks/<id>`) and ingests the book's HTML file.
+
+### Changed
+- **Pre-fills match whole words, in the sense the siblings meant.** Precedent, the lexicon, the house check and the scan match whole words against the chapters, without front matter. A Hardy Boys book is no longer pre-filled with *oars* because it contains *hoarsely*. Each pre-filled row carries a sibling sentence that uses the word.
+- **The drafting prompts are smaller and say where each block sits.** Sibling address pairs print one line each, and shared sibling style sections print once. `prepare` commands return the line range of each inserted block as `sections`.
+
+### Fixed (found in pre-ship review)
+- **A house rule a book turned off could never come back on.** Answering a settled question the house's way again and re-running `prepare-draft` now turns the rule back on and reports it as `house_restored`. An override written by hand is left alone.
+- **Books inside grouping folders were invisible to the house layer.** Examples are `projects/.macdonald/<slug>`, or a future Hardy Boys folder. Their siblings, group rules, book overrides and fix log were dropped without a warning. The house layer now finds books the way the harness does.
+- **The house check added 9–22 seconds to every commit.** It now builds the siblings' precedent once and reads their chunks once. Whole-word matching first tries a cheap substring test, which can only rule a word out, so results are unchanged. On game-legs the check went from 22.4 s to 3.3 s.
+- **The read-only house check wrote the precedent snapshot.** Running it before drafting froze the baseline that drift is measured against. It no longer writes the snapshot.
+- **`group join` on an unreadable `book_groups.json` replaced every group with the new one.** It now refuses and leaves the file alone.
+- **A gate question that lost every subject to a higher one kept its gate slot.** It also reported stale chapter counts. Chapter counts are now taken again after linking, and an emptied question goes below the cut.
+- **`adopt-proposal` accepted an empty or unknown group scope.** `decline-proposal` would also decline a proposal already adopted. Both now refuse.
+- **A custom translation template with no house slots and no markers dropped the house blocks without a warning.** It now logs a warning once per process.
+- **Stale docstrings, a duplicate import, a wrong series placeholder in the address prompt, and a crash on a non-object fanout manifest.**
+
 ## [0.76.0.0] - 2026-10-14
 
 ### Added

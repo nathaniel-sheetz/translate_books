@@ -19,9 +19,6 @@ _APP_CONFIG_CACHE: dict | None = None
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "app_config.json"
 
-_FORCED_GLOSSARY_PATH = (
-    Path(__file__).resolve().parent.parent / "forced_glossary_terms.json"
-)
 _FORCED_GLOSSARY_CACHE: list[dict] | None = None
 
 
@@ -118,36 +115,19 @@ def get_save_check_config() -> dict:
 
 
 def load_forced_glossary_terms(*, force_reload: bool = False) -> list[dict]:
-    """Return raw forced-term entries from ``forced_glossary_terms.json``.
+    """Return the words the glossary candidate extractor must always surface.
 
-    Returns ``[]`` when the file is absent or malformed. The file is a
-    user-maintained list of words the glossary candidate extractor should
-    always surface when they appear in source text — bypassing the normal
-    extraction heuristics that would otherwise hide consistently-mistranslated
-    domain words (e.g. "stall", "gobbler").
+    A shim over the house lexicon (``src.house.lexicon``), which replaced
+    ``forced_glossary_terms.json``: its every-book entries come back in the
+    ``{term, type_guess}`` shape the extractor has always read. An install with
+    no ``prompts/house_lexicon.json`` yet still has its old forced-terms file
+    read, so nothing is lost before it migrates.
     """
     global _FORCED_GLOSSARY_CACHE
     if _FORCED_GLOSSARY_CACHE is not None and not force_reload:
         return list(_FORCED_GLOSSARY_CACHE)
 
-    if not _FORCED_GLOSSARY_PATH.exists():
-        _FORCED_GLOSSARY_CACHE = []
-        return []
+    from src.house.lexicon import forced_terms
 
-    try:
-        data = json.loads(_FORCED_GLOSSARY_PATH.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning("Failed to parse forced_glossary_terms.json: %s", e)
-        _FORCED_GLOSSARY_CACHE = []
-        return []
-
-    terms = data.get("terms") if isinstance(data, dict) else None
-    if not isinstance(terms, list):
-        logger.warning(
-            "forced_glossary_terms.json: expected top-level 'terms' list"
-        )
-        _FORCED_GLOSSARY_CACHE = []
-        return []
-
-    _FORCED_GLOSSARY_CACHE = [t for t in terms if isinstance(t, dict)]
+    _FORCED_GLOSSARY_CACHE = forced_terms()
     return list(_FORCED_GLOSSARY_CACHE)

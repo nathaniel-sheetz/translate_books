@@ -41,6 +41,53 @@ HOUSE_STYLE_RULES_FILE = _PROMPTS_DIR / "house_style_rules.json"
 HOUSE_STYLE_RULES_EXAMPLE_FILE = _PROMPTS_DIR / "house_style_rules.example.json"
 
 
+#: How a house rule is enforced (its optional ``enforce`` field).
+#:
+#: - ``prompt`` (default): the translator and the judges read it. With no
+#:   ``triggers`` it is global and sits in the translator's cached prefix; with
+#:   ``triggers`` it reaches only the chunks whose English sets one off.
+#: - ``mechanical``: a named fixer (:mod:`src.house.mechanical`) applies it at
+#:   chunk commit and logs each change, so no prompt carries it.
+#: - ``draft``: a house default for the drafting steps only. It pre-answers the
+#:   questions it ``settles`` (style guide, address map, decisions stage) and
+#:   reaches no translator or judge prompt.
+ENFORCE_PROMPT = "prompt"
+ENFORCE_MECHANICAL = "mechanical"
+ENFORCE_DRAFT = "draft"
+ENFORCE_MODES = (ENFORCE_PROMPT, ENFORCE_MECHANICAL, ENFORCE_DRAFT)
+
+#: Who a rule list is being built for. The translator and the judges get the
+#: ``prompt`` rules; the decisions stage gets every rule in scope.
+AUDIENCE_TRANSLATOR = "translator"
+AUDIENCE_JUDGE = "judge"
+AUDIENCE_DECISIONS = "decisions"
+
+
+def rule_enforce(rule: dict[str, Any]) -> str:
+    """The rule's ``enforce`` mode; an unknown value reads as ``prompt``."""
+    mode = str(rule.get("enforce") or ENFORCE_PROMPT).strip()
+    return mode if mode in ENFORCE_MODES else ENFORCE_PROMPT
+
+
+def rule_triggers(rule: dict[str, Any]) -> list[str]:
+    """The English source forms that bring a rule into a chunk; ``[]`` means global."""
+    raw = rule.get("triggers")
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(t) for t in raw or [] if str(t).strip()]
+
+
+def rule_settles(rule: dict[str, Any]) -> dict[str, Any]:
+    """``{"<step>:<question>": answer}`` for the questions this rule answers.
+
+    Keys share one space across the steps: ``style:<question id>`` for the
+    style-guide questionnaire, ``decisions:<taxonomy category>`` for the
+    decisions stage, ``address:global_rules`` for the address map.
+    """
+    raw = rule.get("settles")
+    return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
 def _house_rules_path() -> Path:
     """The operator's house rules if present, else the checked-in example.
 
@@ -131,13 +178,8 @@ def load_house_rules() -> list[dict[str, Any]]:
     return rules or []
 
 
-def load_book_rules(project_dir: Path) -> list[dict[str, Any]]:
-    """This book's own sidecar rules, or ``[]`` when it has none.
-
-    A malformed sidecar is logged and treated as absent rather than raised, and
-    the house rules still reach the judge: one unreadable file must not cost a
-    book the rules it shares with every other book.
-    """
+def _read_book_sidecar(project_dir: Path) -> list[dict[str, Any]]:
+    """Every entry in the book's sidecar: its own rules and its ``off`` overrides."""
     path = Path(project_dir) / STYLE_RULES_FILENAME
     if not path.exists():
         return []
@@ -151,6 +193,155 @@ def load_book_rules(project_dir: Path) -> list[dict[str, Any]]:
         logger.warning("Ignoring %s: expected a 'rules' list", path)
         return []
     return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def load_book_rules(project_dir: Path) -> list[dict[str, Any]]:
+    """This book's own sidecar rules, or ``[]`` when it has none.
+
+    An ``{"id": ..., "off": true}`` entry is an override of a house rule, not a
+    rule of the book's own, and is left out (:func:`load_book_overrides`).
+
+    A malformed sidecar is logged and treated as absent rather than raised, and
+    the house rules still reach the judge: one unreadable file must not cost a
+    book the rules it shares with every other book.
+    """
+    return [rule for rule in _read_book_sidecar(project_dir) if not rule.get("off")]
+
+
+def load_book_overrides(project_dir: Optional[Path]) -> dict[str, dict[str, Any]]:
+    """``{rule id: entry}`` for the house rules this book has turned off.
+
+    Written when the user answers a house-settled question differently for one
+    book: the rule then drops out of that book's translator prefix and judge
+    context, and the book's own answer goes into its style guide instead.
+    """
+    if project_dir is None:
+        return {}
+    return {
+        str(rule.get("id")).strip(): rule
+        for rule in _read_book_sidecar(project_dir)
+        if rule.get("off") and str(rule.get("id") or "").strip()
+    }
+
+
+def set_book_override(
+    project_dir: Path, rule_id: str, *, off: bool = True, reason: str = ""
+) -> bool:
+    """Turn a house rule off (or back on) for one book. Returns whether anything changed.
+
+    Keeps the sidecar's other entries and its top-level shape as they were.
+    """
+    path = Path(project_dir) / STYLE_RULES_FILENAME
+    doc: Any = {"rules": []}
+    if path.exists():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError(f"{path} is unreadable ({exc}); fix it before overriding a rule") from exc
+    rules = doc.get("rules") if isinstance(doc, dict) else doc
+    if not isinstance(rules, list):
+        raise ValueError(f"{path}: expected a 'rules' list")
+    present = [r for r in rules if isinstance(r, dict) and r.get("off") and r.get("id") == rule_id]
+    if off and present:
+        return False
+    if not off and not present:
+        return False
+    if off:
+        entry: dict[str, Any] = {"id": rule_id, "off": True}
+        if reason:
+            entry["reason"] = reason
+        rules.append(entry)
+    else:
+        rules[:] = [r for r in rules if r not in present]
+    if isinstance(doc, list):
+        doc = {"rules": rules}
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def house_rules_for_book(project_dir: Optional[Path]) -> list[dict[str, Any]]:
+    """The house rules in scope for this book, minus the ones it turned off.
+
+    Scope is ``every_book`` or ``group:<id>`` (:mod:`src.house.groups`); with no
+    ``project_dir`` only the every-book rules apply. Every ``enforce`` mode is
+    kept; :func:`rules_for` narrows by audience.
+    """
+    from src.house import book_slug, in_scope
+    from src.house.groups import group_ids_of
+
+    groups = group_ids_of(book_slug(project_dir))
+    off = load_book_overrides(project_dir)
+    return [
+        rule for rule in load_house_rules()
+        if in_scope(rule.get("scope"), groups) and str(rule.get("id") or "").strip() not in off
+    ]
+
+
+def rules_for(
+    project_dir: Optional[Path],
+    source_text: Optional[str] = None,
+    *,
+    audience: str = AUDIENCE_JUDGE,
+) -> list[dict[str, Any]]:
+    """The rules one prompt about this book should carry.
+
+    Applies, in order: scope (the book's groups), the book's ``off`` overrides,
+    the audience, and the triggers. The judges also get the book's own sidecar
+    rules after the house set; the translator gets the house set only, because
+    its book-specific rules are its style guide.
+
+    ``source_text`` is the English the prompt is about (a chunk, or the whole
+    book for a book-level judge prompt). A triggered rule stays only when one of
+    its triggers occurs in it, matched like a glossary term
+    (:func:`src.house.match.trigger_matches`). ``None`` keeps every triggered
+    rule, for a caller that cannot say what the prompt covers.
+    """
+    from src.house.match import any_trigger
+
+    rules = house_rules_for_book(project_dir)
+    if audience != AUDIENCE_DECISIONS:
+        rules = [r for r in rules if rule_enforce(r) == ENFORCE_PROMPT]
+    if audience == AUDIENCE_JUDGE and project_dir is not None:
+        rules = merge_style_rules(rules, load_book_rules(project_dir))
+    if source_text is not None:
+        rules = [
+            r for r in rules
+            if not rule_triggers(r) or any_trigger(rule_triggers(r), source_text)
+        ]
+    return rules
+
+
+def split_global_triggered(
+    rules: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(global, triggered)``: rules with no triggers, and rules with some."""
+    return (
+        [r for r in rules if not rule_triggers(r)],
+        [r for r in rules if rule_triggers(r)],
+    )
+
+
+def settled_by_house(project_dir: Optional[Path], step: str) -> dict[str, dict[str, Any]]:
+    """``{question: {answer, rule_id}}`` for every ``<step>:<question>`` a house rule settles.
+
+    Only rules in scope and not turned off for this book count. The first rule
+    to settle a question wins; a later one that disagrees is reported in
+    ``conflicts`` so the gate can show it rather than pick silently.
+    """
+    prefix = f"{step}:"
+    settled: dict[str, dict[str, Any]] = {}
+    for rule in house_rules_for_book(project_dir):
+        rule_id = str(rule.get("id") or "").strip()
+        for key, answer in rule_settles(rule).items():
+            if not key.startswith(prefix):
+                continue
+            question = key[len(prefix):]
+            prior = settled.get(question)
+            if prior is None:
+                settled[question] = {"answer": answer, "rule_id": rule_id, "conflicts": []}
+            elif prior["answer"] != answer:
+                prior["conflicts"].append({"answer": answer, "rule_id": rule_id})
+    return settled
 
 
 def has_book_rules(project_dir: Path) -> bool:
@@ -198,11 +389,17 @@ def merge_style_rules(
 def load_style_rules(project_dir: Path) -> str:
     """The rules this book is judged against: the house set plus its own.
 
-    Every book gets the house rules whether or not it has a sidecar, so a judge
-    can always cite a rule id. Empty only when both sources are.
+    Every book gets the house rules in its scope whether or not it has a
+    sidecar, so a judge can always cite a rule id. Mechanical and draft-only
+    rules are left out (a fixer already applied the one, and the other binds
+    the drafting steps), and so is a triggered rule whose triggers never occur
+    in the book's source: the judge prompt is book-level, so the book is what a
+    trigger is matched against. Empty only when nothing is left.
     """
+    from src.house import read_source
+
     return format_style_rules(
-        merge_style_rules(load_house_rules(), load_book_rules(project_dir))
+        rules_for(project_dir, read_source(project_dir), audience=AUDIENCE_JUDGE)
     )
 
 
@@ -402,10 +599,19 @@ __all__ = [
     "build_judge_context",
     "format_style_rules",
     "has_book_rules",
+    "house_rules_for_book",
+    "load_book_overrides",
     "load_book_rules",
     "load_calibration_examples",
     "load_coded_findings",
     "load_house_rules",
     "load_style_rules",
     "merge_style_rules",
+    "rule_enforce",
+    "rule_settles",
+    "rule_triggers",
+    "rules_for",
+    "set_book_override",
+    "settled_by_house",
+    "split_global_triggered",
 ]

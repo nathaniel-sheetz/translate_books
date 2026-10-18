@@ -216,12 +216,17 @@ def build_question_prompt(
     fixed_questions: list[dict],
     fixed_answers: dict[str, int | str],
     manifest: Optional[FeatureManifest] = None,
+    house_context: str = "",
 ) -> str:
     """Build the prompt for LLM to generate additional questions.
 
     Note: we intentionally do NOT include the heuristic feature manifest in
     this prompt. The LLM should base additional question suggestions on the
     user-answered questions plus the source text sample.
+
+    ``house_context`` is what the house already settles for this book (house
+    rules in the translator's prefix, series siblings' guides), so no follow-up
+    re-asks it.
     """
     template = _resolve_prompt_path("style_guide_questions.txt").read_text(encoding="utf-8")
     answered = format_answered_questions(fixed_questions, fixed_answers)
@@ -231,7 +236,21 @@ def build_question_prompt(
         "answered_questions": answered,
         "source_text": source_text[:15000],  # Cap at ~15K chars
     }
-    return render_prompt(template, variables)
+    return _with_house_context(template, variables, house_context)
+
+
+def _with_house_context(template: str, variables: dict, house_context: str) -> str:
+    """Render ``template``, carrying ``house_context`` in its slot or at the end.
+
+    The style-guide templates are per-user copies, so one may predate the
+    ``{{house_context}}`` slot; the block is then appended, so what the house
+    already settles still reaches the drafter.
+    """
+    variables = {**variables, "house_context": house_context.strip()}
+    rendered = render_prompt(template, variables)
+    if variables["house_context"] and "{{house_context}}" not in template:
+        rendered = rendered.rstrip("\n") + "\n\n" + variables["house_context"] + "\n"
+    return rendered
 
 
 def get_active_questions(
@@ -283,6 +302,7 @@ def build_style_guide_prompt(
     target_lang: str,
     locale: str,
     address_summary: str = "",
+    house_context: str = "",
 ) -> str:
     """Build the prompt for LLM to generate a style guide from Q&A.
 
@@ -290,6 +310,11 @@ def build_style_guide_prompt(
     the address-map beat ran first. It is already written for a chunk-local reader,
     so the template reproduces it as the FORMS OF ADDRESS section rather than
     re-deriving that section from the single ``forms_of_address`` answer.
+
+    ``house_context`` names the house rules the translator already reads in its
+    prefix (the guide must not restate them) and carries the series siblings'
+    guides as reference. A drafting-time cost only: it never reaches the
+    translator.
     """
     template = _resolve_prompt_path("style_guide_generate.txt").read_text(encoding="utf-8")
     qa_text = format_answered_questions(questions, answers, include_effects=True)
@@ -303,7 +328,7 @@ def build_style_guide_prompt(
             "questionnaire answer above)"
         ),
     }
-    return render_prompt(template, variables)
+    return _with_house_context(template, variables, house_context)
 
 
 def parse_style_guide_response(response: str) -> str:
@@ -347,14 +372,19 @@ def load_source_sample(project_dir: Path, max_words: int = 10000) -> str:
     """Load a source text sample from a project directory.
 
     Returns the first ``max_words`` words of the cleanest available source
-    text. See ``src.utils.source_text.load_clean_source_text`` for the
-    priority order (chapters → chunks → source.txt).
+    text, with its paragraph breaks kept so dialogue turns stay readable. See
+    ``src.utils.source_text.load_clean_source_text`` for the priority order
+    (chapters → chunks → source.txt).
     """
     text, _, _ = load_clean_source_text(project_dir)
     if not text:
         return ""
-    words = text.split()
-    return " ".join(words[:max_words])
+    last = None
+    for i, m in enumerate(re.finditer(r"\S+", text), 1):
+        last = m
+        if i == max_words:
+            break
+    return text[:last.end()].strip() if last else ""
 
 
 # ── light style guide ──────────────────────────────────────────────────────

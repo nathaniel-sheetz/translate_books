@@ -112,16 +112,38 @@ def decode_html_bytes(raw: bytes) -> str:
     return UnicodeDammit(raw, is_html=True).unicode_markup
 
 
+# The catalog page an operator copies from the address bar (title, cover,
+# download links), not the book. ".html.images" is the old name of the HTML link.
+_GUTENBERG_CATALOG_RE = re.compile(
+    r"^https?://(?:www\.)?gutenberg\.org/ebooks/(\d+)(?:\.html\.images|\.html\.noimages)?/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def normalize_gutenberg_url(url: str) -> str:
+    """The book's HTML-with-images file for a Gutenberg catalog URL, else ``url`` unchanged.
+
+    ``gutenberg.org/ebooks/72958`` → ``gutenberg.org/cache/epub/72958/pg72958-images.html``.
+    """
+    m = _GUTENBERG_CATALOG_RE.match((url or "").strip())
+    if not m:
+        return url
+    book_id = m.group(1)
+    return f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}-images.html"
+
+
 def fetch_html(source: str) -> tuple[str, str]:
     """
     Return (html_text, base_url).
-    source may be a URL or a local file path.
+    source may be a URL or a local file path. A Gutenberg catalog URL fetches
+    the book it describes (see ``normalize_gutenberg_url``).
     """
     path = Path(source)
     if path.exists():
         html = decode_html_bytes(path.read_bytes())
         base_url = path.parent.as_uri() + "/"
         return html, base_url
+    source = normalize_gutenberg_url(source)
 
     # Treat as URL — strip fragment before fetching
     parsed = urllib.parse.urlparse(source)

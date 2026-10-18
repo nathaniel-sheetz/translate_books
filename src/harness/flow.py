@@ -230,6 +230,40 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+#: Appended to a prepare step's instructions when its payload carries ``sections``.
+_SECTIONS_HINT = (
+    " `sections` gives the 1-based line range of each block inserted into prompt_path. "
+    "The source sample, house context and precedent repeat across beats: Read by "
+    "offset/limit only the blocks you have not already read, plus every line outside "
+    "the listed ranges (the instructions)."
+)
+
+
+def _prompt_sections(prompt: str, blocks: dict[str, str]) -> dict[str, list[int]]:
+    """``{name: [first_line, last_line]}`` for each block ``prompt`` carries.
+
+    A block is found by its opening text and runs as far as the prompt matches
+    it, so a sample the template cut short still gets its true range. Blocks
+    that are empty or absent are left out.
+    """
+    out: dict[str, list[int]] = {}
+    for name, block in blocks.items():
+        block = (block or "").strip()
+        if not block:
+            continue
+        probe = min(len(block), 200)
+        idx = prompt.find(block[:probe])
+        while idx == -1 and probe > 20:  # cut short before the probe ran out
+            probe //= 2
+            idx = prompt.find(block[:probe])
+        if idx == -1:
+            continue
+        span = len(os.path.commonprefix([prompt[idx:idx + len(block)], block]))
+        first = prompt.count("\n", 0, idx) + 1
+        out[name] = [first, first + prompt[idx:idx + span].rstrip().count("\n")]
+    return out
+
+
 # ── setup ──────────────────────────────────────────────────────────────────
 
 def setup(
@@ -257,8 +291,13 @@ def setup(
     footnotes: str = "import",
     heading_level=None,
     case_sensitive_custom: bool = False,
+    groups: list[str] | None = None,
 ) -> dict:
     """Create the project, persist config, run ingest + split (NOT chunk).
+
+    ``groups`` joins the book to existing book groups (``prompts/book_groups.json``)
+    so its siblings pre-fill the style guide, address map and glossary. The
+    result lists the groups there are, so the agent can ask about any not named.
 
     Chunking is deferred to ``chunk`` so it can use the glossary-informed
     difficulty score. Wipes any prior ``.harness/`` working state for a clean run.
@@ -270,6 +309,14 @@ def setup(
     """
     if url and epub:
         raise ValueError("--url and --epub are mutually exclusive")
+    from src.house import groups as house_groups
+
+    unknown_groups = [g for g in groups or [] if g not in house_groups.load_groups()]
+    if unknown_groups:
+        raise ValueError(
+            f"unknown book group(s) {unknown_groups}; create one with "
+            "`group join --project <slug> --group <id> --kind series|domain`"
+        )
     md_title = md_author = None
     if epub:
         epub_file = Path(epub)
@@ -358,6 +405,9 @@ def setup(
         pstate = stage_split(args, project_dir, pstate)
         save_pipeline_state(project_dir, pstate)
 
+    for gid in groups or []:
+        house_groups.join_group(project_dir.name, gid)
+
     chapters = sorted((project_dir / "chapters").glob("chapter_*.txt"))
     # Heading-derived hints. On the URL path ingest fills suggested_pattern /
     # chapter_report from the HTML; on the local source.txt path we derive them
@@ -399,7 +449,57 @@ def setup(
         "chapter_report": pstate.get("chapter_report") or _local_chapter_report(hints["sections"]),
         "warnings": hints["warnings"],  # e.g. "1 chapter for an 87KB source"
         "chunks_dir_exists": (project_dir / "chunks").exists(),  # expected False
+        "groups": house_groups.describe(project_dir.name),
         "next": "style-guide prepare-questions",
+    }
+
+
+# ── book groups and precedent ──────────────────────────────────────────────
+
+def group_list(project: str | None = None) -> dict:
+    """Every book group, and which ones ``project`` is in."""
+    from src.house import groups as house_groups
+
+    slug = state.resolve_project_dir(project).name if project else None
+    return house_groups.describe(slug)
+
+
+def group_join(project: str, *, group: str, kind: str | None = None,
+               about: str | None = None) -> dict:
+    """Add the book to a group (creating it when ``kind`` is given)."""
+    from src.house import groups as house_groups
+
+    project_dir = state.resolve_project_dir(project)
+    joined = house_groups.join_group(project_dir.name, group, kind=kind, about=about)
+    return {**house_groups.describe(project_dir.name), "group": joined,
+            "next": "precedent --project <slug> (rebuild the sibling snapshot)"}
+
+
+def group_leave(project: str, *, group: str) -> dict:
+    from src.house import groups as house_groups
+
+    project_dir = state.resolve_project_dir(project)
+    left = house_groups.leave_group(project_dir.name, group)
+    return {**house_groups.describe(project_dir.name), "group": left}
+
+
+def precedent(project: str, *, rebuild: bool = True) -> dict:
+    """(Re)build the book's sibling-precedent snapshot and summarize it."""
+    from src.house.precedent import cache_path, load_precedent, series_pairs
+
+    project_dir = state.resolve_project_dir(project)
+    doc = load_precedent(project_dir, rebuild=rebuild)
+    pairs, pair_divergence = series_pairs(doc)
+    glossary = doc.get("glossary") or {}
+    return {
+        "precedent_path": str(cache_path(project_dir)),
+        "built_at": doc.get("built_at"),
+        "siblings": doc.get("siblings") or [],
+        "style_questions": len(doc.get("style") or {}),
+        "address_pairs": len(pairs),
+        "address_divergence": pair_divergence,
+        "glossary_terms": len(glossary),
+        "glossary_divergent": sorted(e["english"] for e in glossary.values() if e.get("divergent")),
     }
 
 
@@ -778,11 +878,7 @@ def style_guide_prepare_questions(project: str) -> dict:
 
     if str(state.REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(state.REPO_ROOT))
-    from src.style_guide_wizard import (
-        dialect_id_from_locale,
-        get_active_questions,
-        load_source_sample,
-    )
+    from src.style_guide_wizard import get_active_questions, load_source_sample
 
     source = load_source_sample(project_dir)
     with _quiet_stdout():
@@ -795,15 +891,34 @@ def style_guide_prepare_questions(project: str) -> dict:
             q["_detected_hint"] = manifest.features[feature].evidence[0]
     allq = list(fixed) + list(conditional)
 
-    # Pre-answer the redundant `dialect` question from the locale chosen at setup
-    # (es-mx → mexican_spanish) so the agent confirms rather than re-asks it.
+    # Pre-answer what the house already knows, in order: the book's own answer, a
+    # house rule that `settles` the question, the series then domain siblings'
+    # most common answer, and the setup locale (es-mx → mexican_spanish). The
+    # agent confirms these rather than re-asking them; every source that
+    # disagrees rides along as `divergence`.
+    from src.house.precedent import load_precedent
+    from src.house.prefill import house_covered, style_prefills
+
     locale = cfg.get("locale") or ""
-    dialect_q = next((q for q in allq if q.get("id") == "dialect"), None)
-    prefilled_dialect = dialect_id_from_locale(locale, dialect_q) if dialect_q else None
+    answers_path = hdir / "style_answers.json"
+    try:
+        explicit = json.loads(_read(answers_path)) if answers_path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        explicit = {}
+    precedent = load_precedent(project_dir)
+    prefills = style_prefills(
+        project_dir, allq, locale=locale,
+        explicit=explicit if isinstance(explicit, dict) else {}, precedent=precedent,
+    )
+    covered = house_covered(project_dir)
 
     (hdir / "style_source.txt").write_text(source, encoding="utf-8")
     (hdir / "style_fixed.json").write_text(json.dumps(fixed), encoding="utf-8")
     (hdir / "style_questions.json").write_text(json.dumps(allq), encoding="utf-8")
+    (hdir / "style_prefill.json").write_text(
+        json.dumps({"prefills": prefills, "house_covered": covered}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     def _question_entry(q: dict) -> dict:
         entry = {
@@ -812,9 +927,13 @@ def style_guide_prepare_questions(project: str) -> dict:
             "options": _options_with_ids(q),
             "hint": q.get("_detected_hint", ""),
         }
-        if q.get("id") == "dialect" and prefilled_dialect:
-            entry["prefilled"] = prefilled_dialect
-            entry["prefilled_reason"] = f"from setup locale {locale!r}"
+        pre = prefills.get(q["id"])
+        if pre:
+            entry["prefilled"] = pre["prefilled"]
+            entry["prefilled_reason"] = pre["prefilled_reason"]
+            entry["prefilled_source"] = pre["source"]
+            if pre["divergence"]:
+                entry["divergence"] = pre["divergence"]
         return entry
 
     instructions = (
@@ -823,17 +942,22 @@ def style_guide_prepare_questions(project: str) -> dict:
         "to answers_path (use each option's `id` or exact `label`; a numeric index still "
         "works; any other string is a custom answer), then run `style-guide prepare-followups`."
     )
-    if prefilled_dialect:
+    if prefills:
         instructions += (
-            f" The `dialect` question is pre-answered from the setup locale "
-            f"(`prefilled`: {prefilled_dialect!r}) — present it as a confirm/override default, "
-            "not a blank ask, and keep that id in answers unless the user changes it."
+            f" {len(prefills)} question(s) carry `prefilled` (with `prefilled_reason`: a house "
+            "rule, sibling books or the setup locale) — present each as a confirm/override "
+            "default, not a blank ask, and keep that id in answers unless the user changes it. "
+            "Show any `divergence` beside its question: those are other sources that answered "
+            "differently. Answering a house-rule question differently turns that rule off for "
+            "this book only (recorded at `prepare-draft`)."
         )
 
     return {
         "detected_features": present or [],
         "questions": [_question_entry(q) for q in allq],
-        "answers_path": str(hdir / "style_answers.json"),
+        "answers_path": str(answers_path),
+        "siblings": [s["slug"] for s in precedent.get("siblings") or []],
+        "house_covered": covered,
         "instructions": instructions,
     }
 
@@ -851,17 +975,49 @@ def style_guide_prepare_followups(project: str, *, answers: str | None = None) -
     answers_path = Path(answers) if answers else hdir / "style_answers.json"
     ans = json.loads(_read(answers_path))
 
-    prompt = build_question_prompt(source, cfg["target_language"], cfg["locale"], fixed, ans)
+    from src.house.precedent import load_precedent
+    from src.house.prefill import style_house_context
+
+    house_context = style_house_context(project_dir, load_precedent(project_dir))
+    prompt = build_question_prompt(
+        source, cfg["target_language"], cfg["locale"], fixed, ans, house_context=house_context,
+    )
+    hotspots, hotspots_block = _speech_hotspots(project_dir)
+    prompt = _append_block(prompt, hotspots_block)
     prompt_path = hdir / "style_followups_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
+    instructions = (
+        "Read prompt_path, draft the follow-up questions as a JSON array to draft_path, "
+        "then run `style-guide commit-followups`."
+    )
+    if hotspots:
+        instructions += (
+            " `hotspots` lists chapters from the WHOLE book (the sample is only its opening) "
+            "with period ethnic/racial framing or heavy eye dialect: draft a follow-up for "
+            "each speaker group they show, unless a house rule or series guide section "
+            "already settles it."
+        )
     return {
         "prompt_path": str(prompt_path),
         "draft_path": str(hdir / "style_followups.json"),
-        "instructions": (
-            "Read prompt_path, draft the follow-up questions as a JSON array to draft_path, "
-            "then run `style-guide commit-followups`."
-        ),
+        "hotspots": hotspots,
+        "sections": _prompt_sections(prompt, {
+            "sample": source, "house_context": house_context, "hotspots": hotspots_block,
+        }),
+        "instructions": instructions + _SECTIONS_HINT,
     }
+
+
+def _speech_hotspots(project_dir: Path) -> tuple[list[dict], str]:
+    """``(rows, prompt block)`` for the chapters whose speech or framing needs a rule."""
+    from src.harness.speech_hotspots import format_hotspots, speech_hotspots
+
+    rows = speech_hotspots(project_dir)
+    return rows, format_hotspots(rows)
+
+
+def _append_block(prompt: str, block: str) -> str:
+    return prompt.rstrip("\n") + "\n\n" + block + "\n" if block else prompt
 
 
 def style_guide_commit_followups(project: str, *, draft: str | None = None) -> dict:
@@ -911,9 +1067,41 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
     ans = json.loads(_read(answers_path))
     source = _read(hdir / "style_source.txt")
 
-    # Defense-in-depth: if the agent treated the locale-prefilled dialect as
-    # confirmed-by-default and left it out of the answers, fill it from the
-    # locale so the dialect section is never blank.
+    # Defense-in-depth: a pre-answered question the agent treated as confirmed by
+    # default and left out of the answers takes its pre-filled answer, so no
+    # section the house settles is ever blank.
+    from src.house.precedent import load_precedent
+    from src.house.prefill import (
+        STYLE_OVERRIDE_REASON, overrides_from_answers, overrides_to_lift, style_house_context,
+    )
+    from src.judges.context import set_book_override
+
+    prefills: dict = {}
+    prefill_path = hdir / "style_prefill.json"
+    if prefill_path.exists():
+        try:
+            prefills = json.loads(_read(prefill_path)).get("prefills") or {}
+        except (json.JSONDecodeError, OSError, AttributeError):
+            prefills = {}
+    for qid, pre in prefills.items():
+        if qid not in ans and any(q.get("id") == qid for q in allq):
+            ans[qid] = pre["prefilled"]
+
+    # A house-settled question answered differently turns that rule off for
+    # this book: it leaves the translator prefix and the judge context, and the
+    # book's own answer goes into its guide as usual. Answered the house's way
+    # again on a re-run, the rule comes back on.
+    house_restored = overrides_to_lift(project_dir, ans, allq)
+    for o in house_restored:
+        set_book_override(project_dir, o["rule_id"], off=False)
+    house_overrides = overrides_from_answers(prefills, ans, allq)
+    for o in house_overrides:
+        set_book_override(
+            project_dir, o["rule_id"],
+            reason=f"{STYLE_OVERRIDE_REASON}{o['question']}: {o['answer']}",
+        )
+
+    # Older runs without style_prefill.json: fill dialect from the locale.
     if "dialect" not in ans:
         dialect_q = next((q for q in allq if q.get("id") == "dialect"), None)
         mapped = dialect_id_from_locale(cfg.get("locale") or "", dialect_q) if dialect_q else None
@@ -933,10 +1121,14 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         except (OSError, ValueError) as exc:
             _log.warning("Could not read style_guide_summary from %s: %s", address_map_path, exc)
 
+    house_context = style_house_context(project_dir, load_precedent(project_dir))
     prompt = build_style_guide_prompt(
         allq, ans, source, cfg["target_language"], cfg["locale"],
-        address_summary=address_summary,
+        address_summary=address_summary, house_context=house_context,
     )
+    # The guide must carry a rule for each, or the trim to the word target drops it.
+    _hotspots, hotspots_block = _speech_hotspots(project_dir)
+    prompt = _append_block(prompt, hotspots_block)
     prompt_path = hdir / "style_guide_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
 
@@ -961,6 +1153,12 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         "resolved_answers": resolved,
         "unanswered": unanswered,
         "address_summary_loaded": bool(address_summary),
+        "house_overrides": house_overrides,
+        "house_restored": house_restored,
+        "sections": _prompt_sections(prompt, {
+            "sample": source, "house_context": house_context, "address_summary": address_summary,
+            "hotspots": hotspots_block,
+        }),
         "instructions": (
             "Check resolved_answers (each should read 'option' unless you meant a custom "
             "answer; 'custom' on a question you tried to answer by id means a typo). Then read "
@@ -972,7 +1170,7 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
             "light_draft_path: at most two sentences — one naming the dialect, one the "
             "high-level tone — which replace the full guide in the reader's single-sentence "
             "retranslate prompt, so they must stand alone and name no characters, chapters, or "
-            "terms. Commit derives one from the guide if you skip it."
+            "terms. Commit derives one from the guide if you skip it." + _SECTIONS_HINT
         ),
     }
 
@@ -1018,11 +1216,17 @@ def style_guide_commit(project: str, *, draft: str | None = None,
     save_style_guide_json(content, out, light_content=light,
                           writer="harness:style-guide commit", reason=reason)
     validate_style_guide_file(out)  # raises HarnessValidationError -> re-draft
+    from src.harness.speech_hotspots import framing_rule_warning
+    from src.house.check import write_report
+
+    framing = framing_rule_warning(project_dir, content)
     return {
         "style_path": str(out),
         "chars": len(content),
         "light_content": light,
         "light_source": light_source,
+        "house_check": write_report(project_dir),
+        "warnings": [framing] if framing else [],
     }
 
 
@@ -1119,6 +1323,41 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     carryforward, guidance = _glossary_carryforward(hdir, {c["term"] for c in candidates})
     candidates.extend(carryforward)
 
+    # The house lexicon and the group siblings' glossaries, for terms that occur
+    # in this source: pre-filled renderings the agent proposes as they are
+    # unless the book argues otherwise, with any disagreement listed.
+    from src.house.precedent import load_precedent
+    from src.house.prefill import format_glossary_prefill, glossary_prefills
+
+    prefilled, house_candidates, divergence = glossary_prefills(
+        project_dir, source, load_precedent(project_dir)
+    )
+    seen = {c["term"].casefold() for c in candidates}
+    house_added = 0
+    for term, type_guess, reason in [
+        *((p["english"], p["type"], "house_prefill") for p in prefilled),
+        *((e["english"], e["type_guess"], "house_lexicon") for e in house_candidates),
+    ]:
+        if term.casefold() in seen:
+            continue
+        seen.add(term.casefold())
+        house_added += 1
+        candidates.append({
+            "term": term,
+            "type_guess": type_guess if type_guess in _GLOSSARY_TYPES else "other",
+            "frequency": 0,
+            "score": 0.0,
+            "context_sentence": "",
+            "detection_reasons": [reason],
+        })
+    prefill_block = format_glossary_prefill(prefilled, divergence)
+    if prefill_block:
+        guidance = f"{prefill_block}\n\n{guidance}" if guidance else prefill_block
+    (hdir / "glossary_prefill.json").write_text(
+        json.dumps({"prefilled": prefilled, "divergence": divergence}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     prompt = build_glossary_prompt(
         candidates, sample, style_guide, cfg["target_language"], glossary_guidance=guidance
     )
@@ -1128,15 +1367,24 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
         "prompt_path": str(prompt_path),
         "candidate_count": len(candidates),
         "carryforward_count": len(carryforward),
+        "house_candidates_added": house_added,
+        "prefilled": [
+            {k: p[k] for k in ("english", "translation", "origin", "evidence")} for p in prefilled
+        ],
+        "divergence": divergence,
         "source_kind": source_kind,  # "chunks"/"chapters" => front matter excluded; "source" => not
         "style_guide_loaded": bool(style_guide),
         "draft_path": str(hdir / "glossary_draft.json"),
+        "sections": _prompt_sections(prompt, {
+            "sample": sample, "style_guide": style_guide, "prefilled": prefill_block,
+        }),
         "instructions": (
             "Read prompt_path, draft proposals as a JSON array of "
             "{english, translation, type, context, alternatives} to draft_path (tracking any "
             "uncertain renderings to surface at the approval gate), then run `glossary commit`. "
             "Note the alternatives conventions in the prompt: places and bare personal names "
             "take none; a title + name leads with the narration form including the article."
+            + _SECTIONS_HINT
         ),
     }
 
@@ -1175,9 +1423,26 @@ def glossary_commit(project: str, *, draft: str | None = None,
     # names; now that the target-language forms are approved, flag the drift.
     warnings.extend(_stale_cast_warnings(project_dir, glossary=glossary))
 
+    # Where the approved glossary departs from what the house pre-filled.
+    from src.house.check import write_report
+    from src.house.prefill import glossary_departures
+
+    prefilled: list = []
+    prefill_path = hdir / "glossary_prefill.json"
+    if prefill_path.exists():
+        try:
+            prefilled = json.loads(_read(prefill_path)).get("prefilled") or []
+        except (json.JSONDecodeError, OSError, AttributeError):
+            prefilled = []
+    departures = glossary_departures(
+        prefilled, [{"english": t.english, "translation": t.spanish} for t in glossary.terms]
+    )
+
     return {
         "glossary_path": str(out),
         "term_count": len(glossary.terms),
+        "house_departures": departures,
+        "house_check": write_report(project_dir),
         "warnings": warnings,
         "terms": [
             {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context}
@@ -1396,6 +1661,72 @@ def address_map_skip(project: str) -> dict:
     }
 
 
+def _format_precedent_pair(pair: dict) -> str:
+    """One sibling pair as one prompt line, keeping every rule and note.
+
+    ``- Frank Hardy → Fenton Hardy: tú | Fenton Hardy → Frank Hardy: tú — son ↔ father [the-house-on-the-cliff]``
+    """
+    a, b = pair.get("a") or "?", pair.get("b") or "?"
+    sides = []
+    for key, (speaker, addressee) in (("a_to_b", (a, b)), ("b_to_a", (b, a))):
+        rules = []
+        for r in (pair.get("directions") or {}).get(key) or []:
+            text = str(r.get("form") or "?")
+            extras = [f"{k}: {r[k]}" for k in ("when", "since", "until", "after_event")
+                      if r.get(k) and not (k == "when" and r[k] == "default")]
+            if r.get("notes"):
+                extras.append(f"note: {r['notes']}")
+            rules.append(f"{text} ({'; '.join(extras)})" if extras else text)
+        if rules:
+            sides.append(f"{speaker} → {addressee}: {' / '.join(rules)}")
+    line = "- " + " | ".join(sides)
+    if pair.get("relationship"):
+        line += f" — {pair['relationship']}"
+    return line + (f" [{pair['from']}]" if pair.get("from") else "")
+
+
+def _address_house_blocks(project_dir: Path) -> tuple[str, str, int, list[dict]]:
+    """``(house rules block, series block, pairs pre-filled, sibling divergence)``.
+
+    The house block carries every house rule that settles
+    ``address:global_rules`` (adult usted, for one), which the drafted map must
+    state. The series block carries the series siblings' pairs for characters
+    who also appear in this book, tagged with the sibling they came from, plus
+    each sibling's global rules. Domain siblings contribute nothing here: they
+    do not share a cast.
+    """
+    from src.house.precedent import load_precedent, series_pairs
+    from src.judges.context import settled_by_house
+
+    house = settled_by_house(project_dir, "address")
+    house_lines = []
+    if "global_rules" in house:
+        entry = house["global_rules"]
+        house_lines.append(f"- {entry['answer']} (house rule `{entry['rule_id']}`)")
+        house_lines += [f"- {c['answer']} (house rule `{c['rule_id']}`)" for c in entry["conflicts"]]
+
+    precedent = load_precedent(project_dir)
+    pairs, divergence = series_pairs(precedent)
+    blocks = []
+    if pairs:
+        blocks.append(
+            "Pairs from earlier books, for characters who also appear in this one "
+            "(speaker → addressee: form; a rule with no `when` is the default):\n"
+            + "\n".join(_format_precedent_pair(p) for p in pairs)
+        )
+    for rules in precedent.get("address", {}).get("global_rules") or []:
+        blocks.append(f"global_rules in {rules['from']}:\n{rules['text']}")
+    if divergence:
+        blocks.append(
+            "Where the earlier books disagree:\n"
+            + "\n".join(
+                f"- {d['direction']}: {d['other_form']} in {d['other']}, {d['form']} in {d['pair_from']}"
+                for d in divergence
+            )
+        )
+    return "\n".join(house_lines), "\n\n".join(blocks), len(pairs), divergence
+
+
 def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
     """Build the address-map drafting prompt (you are the LLM that drafts the map).
 
@@ -1425,6 +1756,7 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
         style_guide = load_style_guide(style_path).content
     sample_block = _format_sample_chapters_block(project_dir, scores)
     forms_of_address = _forms_of_address_answer(project_dir)
+    house_address, series_block, series_pairs, divergence = _address_house_blocks(project_dir)
 
     template = _read(state.REPO_ROOT / "prompts" / "address_map_generate.txt")
     prompt = (
@@ -1435,6 +1767,8 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
         .replace("{{style_guide}}", style_guide or "(no style guide yet)")
         .replace("{{forms_of_address}}", forms_of_address
                  or "(not answered — infer the register from the sample chapters)")
+        .replace("{{house_address}}", house_address or "(none)")
+        .replace("{{series_precedent}}", series_block or "(no earlier book in a series shares this book's characters)")
         .replace("{{sample_chapters}}", sample_block)
     )
     prompt_path = hdir / "address_map_prompt.txt"
@@ -1447,6 +1781,13 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
         "characters_loaded": char_count,
         "style_guide_loaded": bool(style_guide),
         "forms_of_address_loaded": bool(forms_of_address),
+        "house_address_rules": bool(house_address),
+        "precedent_pairs": series_pairs,
+        "divergence": divergence,
+        "sections": _prompt_sections(prompt, {
+            "characters": characters, "style_guide": style_guide, "house_address": house_address,
+            "series_precedent": series_block, "sample_chapters": sample_block,
+        }),
         "instructions": (
             "Read prompt_path, draft the forms-of-address map as a JSON object "
             "{content, style_guide_summary, pairs, global_rules} to draft_path (each "
@@ -1454,7 +1795,7 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
             "put specific when-rules before it), refine it with the user, then run "
             "`address-map commit`. `style_guide_summary` is read by a translator who "
             "sees ONE chunk: general rules plus high-frequency exceptions only, no "
-            "chapter references, no full pair list."
+            "chapter references, no full pair list." + _SECTIONS_HINT
         ),
     }
 
@@ -1511,6 +1852,19 @@ def address_map_commit(project: str, *, draft: str | None = None,
             "questionnaire answer alone and the map informs nothing. Add it and re-commit."
         )
     warnings.extend(_stale_cast_warnings(project_dir, address_map))
+    pairs_out = [
+        {"a": p.a, "b": p.b, "relationship": p.relationship,
+         "directions": {k: [r.model_dump(exclude_none=True) for r in v]
+                        for k, v in p.directions.items()}}
+        for p in address_map.pairs
+    ]
+    # Where this book's map departs from its series siblings', for the gate.
+    from src.house.check import write_report
+    from src.house.precedent import address_divergence, load_precedent
+
+    divergence = address_divergence(
+        pairs_out, load_precedent(project_dir).get("address", {}).get("pairs") or []
+    )
     return {
         "address_map_path": str(out),
         "pair_count": len(address_map.pairs),
@@ -1519,12 +1873,9 @@ def address_map_commit(project: str, *, draft: str | None = None,
         "style_guide_summary": summary,
         "warnings": warnings,
         "address_map_decision": "built",
-        "pairs": [
-            {"a": p.a, "b": p.b, "relationship": p.relationship,
-             "directions": {k: [r.model_dump(exclude_none=True) for r in v]
-                            for k, v in p.directions.items()}}
-            for p in address_map.pairs
-        ],
+        "pairs": pairs_out,
+        "divergence": divergence,
+        "house_check": write_report(project_dir),
     }
 
 
@@ -1877,6 +2228,9 @@ def translate_prepare(
 
     entries: list[dict] = []
     total_words = 0
+    # House rules: global ones in the shared preamble, triggered ones per chunk.
+    from src.house.prompt import load_translator_house
+    house = load_translator_house(project_dir)
     # Shared cacheable prefix for headless fan-out. Written once from the first
     # chunk that yields a non-empty prefix; later chunks must match byte-for-byte
     # or they fall back to the full prompt.txt (no --system-prompt-file).
@@ -1915,6 +2269,7 @@ def translate_prepare(
                 previous_chapter_context=prev_context,
                 always_include_dialogue=always_include_dialogue,
                 always_include_image_instructions=book_has_images,
+                house=house,
             )
             prompt = prefix + suffix
             prompt_path = translate_dir / f"{chunk.id}.prompt.txt"
@@ -2304,7 +2659,8 @@ def translate_commit(
             chunk_id=chunk.id,
             project_slug=project_slug,
         )
-        apply_translation(chunk, prose, log_path=log_path)
+        apply_translation(chunk, prose, log_path=log_path, project_dir=project_dir,
+                          writer=f"harness:{worker_model}")
         save_chunk(chunk, cp)
         try:
             evaluate_and_persist_chunk(
@@ -2406,8 +2762,19 @@ def translate_commit(
             "recombined": len(recombined),
             "combine_failed": len(combine_failed),
         },
+        # Committed text against the glossary and the siblings, after each wave.
+        "house_check": _house_check_after(project_dir, committed),
         "instructions": instructions,
     }
+
+
+def _house_check_after(project_dir: Path, committed: list) -> dict | None:
+    """The house consistency report after a commit that landed translations."""
+    if not committed:
+        return None
+    from src.house.check import write_report
+
+    return write_report(project_dir)
 
 
 def _split_matches_prompt(preamble_p: Path, body_p: Path, prompt_p: Path) -> bool:
@@ -4944,6 +5311,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chapter_report": "per-chapter {number, heading, words, chunks} report; now populated on the local source.txt path too",
         "warnings": "advisory strings when the split looks wrong (e.g. 1 chapter for a large source); empty when clean",
         "chunks_dir_exists": "whether chunks/ exists yet (expected False right after setup)",
+        "groups": "{path, available: [{id, kind, about, members}], joined: [ids]}. When available is non-empty and joined is empty, ask whether the book joins one (a series shares characters; a domain shares vocabulary), then `group join`",
         "next": "the next command to run",
     },
     "split-preview": {
@@ -4975,13 +5343,17 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     },
     "style-guide prepare-questions": {
         "detected_features": "list of source features that triggered conditional questions",
-        "questions": "list of {id, question, options:[{id,label}], hint, [prefilled, prefilled_reason]}",
+        "questions": "list of {id, question, options:[{id,label}], hint, [prefilled, prefilled_reason, prefilled_source, divergence]}. prefilled_source is book|house_rule|series|domain|locale (first wins, in that order); divergence lists {answer, label, source, reason} for sources that answered differently — show it beside the question",
         "answers_path": "path to write the {question_id: answer} JSON to",
+        "siblings": "slugs of the book's group siblings that precedent was drawn from (empty when the book is in no group)",
+        "house_covered": "list of {question, rule_id, rule}: style questions a global house rule answers; the translator reads that rule in its prefix, so the guide must not restate it",
         "instructions": "what to do next (ask the user, then write answers_path)",
     },
     "style-guide prepare-followups": {
         "prompt_path": "path to the follow-up-question prompt to read",
         "draft_path": "path to write the drafted follow-up questions JSON to",
+        "hotspots": "list of {chapter_id, framing: {term: count}, dialect_markers, dialect_per_1k, lines}: chapters from the whole book with period ethnic/racial framing or eye dialect at 3x the book's median chapter (min 5/1k words), framing first, max 8. Each speaker group needs a follow-up unless a house rule or series section settles it",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "instructions": "what to do next",
     },
     "style-guide commit-followups": {
@@ -4992,11 +5364,14 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "style-guide prepare-draft": {
         "prompt_path": "path to the style-guide prompt to read",
         "draft_path": "path to write the drafted style-guide prose to",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "light_draft_path": "path to write the <=2-sentence light style guide to (optional; commit derives one if absent)",
         "resolved_answers": "list of {id, question, answer, source} ('option' vs 'custom')",
         "unanswered": "list of question ids with no answer",
         "carryforward_path": "path to write glossary terms surfaced while drafting: [{term, why, type_guess}]",
         "address_summary_loaded": "whether an approved address map supplied the FORMS OF ADDRESS section",
+        "house_overrides": "list of {rule_id, question, answer}: house rules this book's answers departed from, now turned off for this book in its style_rules.json (they leave its translator prefix and judge context). Relay them at the gate",
+        "house_restored": "list of {rule_id, question, answer}: house rules this book had turned off over a style answer, now answered the house's way again and turned back on. Relay them at the gate",
         "instructions": "what to do next",
     },
     "style-guide commit": {
@@ -5004,11 +5379,17 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chars": "character length of the committed style guide",
         "light_content": "the committed light style guide (<=2 sentences, used by the reader's sentence retranslate)",
         "light_source": "'draft' when the light-draft file had content, else 'derived'",
+        "warnings": "REVIEW: lines for the gate; today one: the book has period ethnic/racial framing (see prepare-followups `hotspots`) and neither the guide nor a house rule mentions racial/ethnic framing or slurs. Never blocks the commit",
+        "house_check": "{counts, report_path} from scripts/house_check.py: style, address, glossary, sibling-usage, committed-text, drift and promotion-candidate counts, with the full report at reports/house_check.md; {error} if the check failed (never blocks the commit)",
     },
     "glossary prepare": {
         "prompt_path": "path to the glossary-proposal prompt to read",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "candidate_count": "number of extracted candidate terms (including carry-forwards)",
         "carryforward_count": "terms injected from the style-guide beat's hand-off",
+        "house_candidates_added": "candidates the house added that extraction had missed: pre-filled terms and rendering-less house-lexicon words",
+        "prefilled": "list of {english, translation, origin, evidence}: renderings pre-filled from the house lexicon (origin 'house lexicon (<scope>)') or group siblings' glossaries (origin 'siblings: ...'), for terms in this source; evidence is committed-translation counts. The prompt asks for them as-is unless the book argues otherwise",
+        "divergence": "list of {english, chosen, chosen_origin, other, other_origin}: where the lexicon and the siblings, or two siblings, disagree. Show at the approval gate",
         "source_kind": (
             "what the candidate sample was extracted from: 'chunks'/'chapters' (front "
             "matter excluded) or 'source' (not excluded)"
@@ -5020,8 +5401,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "glossary commit": {
         "glossary_path": "path to the written glossary.json",
         "term_count": "number of committed terms",
+        "house_departures": "list of {english, prefilled, committed, origin}: pre-filled renderings the approved glossary changed (committed is the new form) or left out (committed null). Relay at the gate; a deliberate departure needs no action",
         "warnings": "advisory, non-blocking flags for the approval gate: accent-stripping, REVIEW: alternatives-convention violations, and up to two address-map cast lines (stale names the rename will fix, and sites it will flag but not rewrite); empty when clean",
         "terms": "list of {english, translation, type, context}",
+        "house_check": "{counts, report_path} from scripts/house_check.py: style, address, glossary, sibling-usage, committed-text, drift and promotion-candidate counts, with the full report at reports/house_check.md; {error} if the check failed (never blocks the commit)",
     },
     "address-map precheck": {
         "chapters_scored": "chapters whose English source was scored for dialogue",
@@ -5041,10 +5424,14 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "address-map prepare": {
         "prompt_path": "path to the address-map drafting prompt to read",
         "draft_path": "path to write the drafted map JSON to",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "sample_chapters": "list of sampled chapters: {chapter_id, turns, attributions, second_person, words, density}",
         "characters_loaded": "approved character terms fed into the prompt (0 before the glossary exists — draft with the ENGLISH source names)",
         "style_guide_loaded": "whether style.json was fed into the prompt",
         "forms_of_address_loaded": "whether the answered forms_of_address preference was found",
+        "house_address_rules": "whether a house rule settling address:global_rules (e.g. adult usted) was fed in; the draft must state it",
+        "precedent_pairs": "number of pairs pre-filled from series siblings for characters present in this book (0 when the book is in no series)",
+        "divergence": "list of {pair, direction, form, other_form, other, pair_from}: directions where two series siblings disagree. Relay at the gate",
         "instructions": "what to do next",
     },
     "address-map commit": {
@@ -5056,6 +5443,36 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "warnings": "advisory, non-blocking flags for the approval gate: a missing style_guide_summary, a REVIEW: line when the cast still uses English names an approved glossary has translated, and a second REVIEW: line for sites `address-map rename` flags but will not rewrite (those need a hand edit); empty when clean",
         "address_map_decision": "recorded decision ('built')",
         "pairs": "list of {a, b, relationship, directions}",
+        "divergence": "list of {pair, direction, form, other_form, other}: directions where this map's default form differs from a series sibling's (other names the sibling). Empty when the book is in no series or agrees. Show it at the gate",
+        "house_check": "{counts, report_path} from scripts/house_check.py: style, address, glossary, sibling-usage, committed-text, drift and promotion-candidate counts, with the full report at reports/house_check.md; {error} if the check failed (never blocks the commit)",
+    },
+    "group list": {
+        "path": "the book_groups file read (the per-user one, else the tracked example)",
+        "available": "list of {id, kind, about, members}",
+        "joined": "group ids --project belongs to (empty without --project)",
+    },
+    "group join": {
+        "path": "the book_groups file",
+        "available": "list of {id, kind, about, members}",
+        "joined": "group ids the book now belongs to",
+        "group": "{group, kind, about, members} as written",
+        "next": "rebuild the precedent snapshot so the drafts see the new siblings",
+    },
+    "group leave": {
+        "path": "the book_groups file",
+        "available": "list of {id, kind, about, members}",
+        "joined": "group ids the book still belongs to",
+        "group": "{group, kind, about, members} as written",
+    },
+    "precedent": {
+        "precedent_path": ".harness/precedent.json — the snapshot the drafting steps read",
+        "built_at": "when the snapshot was taken (a later sibling change does not update it)",
+        "siblings": "list of {slug, kind, group}",
+        "style_questions": "style questions at least one sibling answered",
+        "address_pairs": "series-sibling pairs whose two characters both occur in this source",
+        "address_divergence": "directions where two series siblings disagree",
+        "glossary_terms": "sibling-glossary and house-lexicon terms that occur in this source",
+        "glossary_divergent": "terms the siblings render differently",
     },
     "address-map rename": {
         "source_path": "the committed address_map.json the rename read (never modified)",
@@ -5160,6 +5577,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
             "`combine --chapters <ids>`"
         ),
         "counts": "dict {committed, failed, missing, skipped, evaluated, recombined, combine_failed}",
+        "house_check": "{counts, report_path} from the house consistency report (committed text against the glossary and the sibling books) when this run committed anything, else null",
         "instructions": "what to do next (re-spawn failed/missing, or proceed)",
         "error": "present only on failure (e.g. no manifest); recombined/combine_failed are absent on that path",
     },

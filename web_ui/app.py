@@ -2516,6 +2516,8 @@ def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> lis
             return []
         glossary_path = project_dir / "glossary.json"
         glossary = load_glossary(glossary_path) if glossary_path.exists() else None
+        from src.house.mechanical import book_mechanical_rules
+
         return save_check.check_write(
             en, before, after,
             vocabulary=save_check.book_vocabulary.counts(project_dir),
@@ -2523,6 +2525,7 @@ def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> lis
             ignored=load_project_ignored_terms(project_dir),
             disabled_rules=disabled_rules,
             speller=save_check.default_speller(),
+            house_fixers=book_mechanical_rules(project_dir),
         )
     except Exception:
         app.logger.exception("save check failed")
@@ -5042,6 +5045,12 @@ def project_chunk_prompt(project_id, chunk_id):
             "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
             "dialogue_instructions": dialogue_instruction(chunk.source_text, "Spanish"),
         }
+        from src.api_translator import place_house_blocks
+        from src.house.prompt import load_translator_house
+
+        house = load_translator_house(project_dir)
+        variables["house_rules"] = house.rules_block()
+        variables["house_notes"] = house.notes_block(chunk.source_text)
 
         rendered = render_prompt(template, variables)
         separator = "=" * 80
@@ -5049,6 +5058,9 @@ def project_chunk_prompt(project_id, chunk_id):
             parts = rendered.split(separator, 1)
             if len(parts) > 1:
                 rendered = separator + parts[1]
+        rendered = place_house_blocks(
+            rendered, template, variables["house_rules"], variables["house_notes"]
+        )
 
         return jsonify({"prompt": rendered})
     except Exception as e:
@@ -5163,6 +5175,7 @@ def project_translate_cost_estimate(project_id):
         always_images = flags["always_include_image_instructions"]
 
         from src.api_translator import DEFAULT_MODEL
+        from src.house.prompt import load_translator_house
         result = estimate_cost(
             chunks,
             provider=provider,
@@ -5171,6 +5184,7 @@ def project_translate_cost_estimate(project_id):
             style_guide=style_guide,
             always_include_dialogue=always_dialogue,
             always_include_image_instructions=always_images,
+            house=load_translator_house(project_dir),
         )
         features = summarize_chunk_features(chunks)
         image_count = features["images"]

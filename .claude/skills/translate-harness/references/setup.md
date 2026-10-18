@@ -34,6 +34,15 @@ python scripts/harness.py setup \
 #   omit them unless the user asks — they default to auto, which is usually right.
 ```
 
+**Book groups.** `setup` returns `groups` (`available`, `joined`). When groups exist and the book
+joined none, ask the user whether it belongs to one — a **series** shares characters (its siblings
+pre-fill names, address pairs, style answers and vocabulary), a **domain** shares vocabulary and
+style answers (the horse books). Pass `--group <id>` to `setup`, or afterwards run
+`python scripts/harness.py group join --project <slug> --group <id>` (add `--kind series|domain
+--about "..."` to create a new group), then `python scripts/harness.py precedent --project <slug>`
+to rebuild the sibling snapshot the drafting steps read. A group id is also a scope for house rules
+and house-lexicon entries (`group:horses`).
+
 `setup` also accepts `--always-dialogue` / `--always-images`, which force the dialogue block and
 image bullet onto every chunk so the cacheable prompt prefix stays byte-identical book-wide. Both
 default to **auto** (on when the book needs it), and **`setup` is no longer the only place to set

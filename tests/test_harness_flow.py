@@ -438,7 +438,7 @@ def test_commit_followups_merges_into_question_set(project: Path):
     assert len(merged) == base_count + 1
 
 
-def test_prepare_questions_prefills_dialect_from_locale(project: Path):
+def test_prepare_questions_prefills_dialect_from_locale(project: Path, no_house_rules):
     # The project fixture inherits the default locale ("mx").
     prep = flow.style_guide_prepare_questions(str(project))
     dialect = next(q for q in prep["questions"] if q["id"] == "dialect")
@@ -447,7 +447,7 @@ def test_prepare_questions_prefills_dialect_from_locale(project: Path):
     assert "prefilled" in prep["instructions"]
 
 
-def test_prepare_questions_no_prefill_for_unmapped_locale(project: Path):
+def test_prepare_questions_no_prefill_for_unmapped_locale(project: Path, no_house_rules):
     cfg = state.load_config(project)
     cfg["locale"] = "fr-FR"
     state.save_config(project, cfg)

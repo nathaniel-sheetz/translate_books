@@ -392,6 +392,9 @@ def _generate_chunk_section(
         "previous_chapter_context": previous_chapter_context,
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
+        # No book here, so no house rules (the template may name the slots).
+        "house_rules": "",
+        "house_notes": "",
     }
 
     # Render the complete prompt

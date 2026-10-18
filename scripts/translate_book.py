@@ -40,6 +40,7 @@ from src.chunker import chunk_chapter
 from src.combiner import combine_chunks
 from src.epub_builder import build_epub_from_chunks
 from src.harness.state import emit_harness_result
+from src.house.prompt import load_translator_house
 from src.annotations.reanchor import load_es_map, reanchor_chapter_quietly
 from src.api_translator import DEFAULT_MODEL, default_provider_arg, provider_arg
 from src.models import Chunk, ChunkStatus, ChunkingConfig
@@ -150,11 +151,14 @@ def stage_ingest(args, project_dir: Path, state: dict) -> dict:
         find_book_body,
         _normalize_whitespace,
         build_chapter_report,
+        normalize_gutenberg_url,
         suggest_split_pattern,
         write_heading_outline,
     )
 
-    url = args.url
+    url = normalize_gutenberg_url(args.url)
+    if url != args.url:
+        print(f"  {args.url} is the catalog page; using the book file {url}")
     if not url:
         # Check if source.txt already exists
         source_path = project_dir / "source.txt"
@@ -521,6 +525,10 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         f"{' (auto)' if always_images_arg is None else ''}"
     )
 
+    # The house rules this book carries: the HOUSE RULES prefix and per-chunk
+    # HOUSE NOTES, counted in the estimate and sent with every chunk.
+    house = load_translator_house(project_dir)
+
     # Cost estimation
     cost_info = estimate_cost(
         chunks_for_cost,
@@ -531,6 +539,7 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
         always_include_dialogue=always_include_dialogue,
         always_include_image_instructions=always_include_image_instructions,
         target_language=target_lang,
+        house=house,
     )
 
     if getattr(args, "cost_only", False):
@@ -597,6 +606,8 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
             enable_thinking=getattr(args, "thinking", None),
             always_include_dialogue=always_include_dialogue,
             always_include_image_instructions=always_include_image_instructions,
+            project_slug=project_dir.name,
+            house=house,
         )
 
         save_chunk(translated, chunk_path)

@@ -17,6 +17,9 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from src.house import project_dir_for
+from src.house.mechanical import fix_translation
+from src.house.prompt import TranslatorHouse, load_translator_house
 from src.models import Chunk, ChunkStatus, Glossary, StyleGuide
 from src.utils.file_io import render_prompt, load_prompt_template, format_glossary_for_prompt, filter_glossary_for_chunk
 from src.utils.prompt_logger import (
@@ -680,6 +683,7 @@ def build_translation_prompt(
     *,
     always_include_dialogue: bool = False,
     always_include_image_instructions: bool = False,
+    house: Optional["TranslatorHouse"] = None,
 ) -> str:
     """Render the translation prompt for a single chunk.
 
@@ -699,9 +703,16 @@ def build_translation_prompt(
     book-level opt-ins that force the (conditional) dialogue block and image bullet
     into the fixed prefix so it stays byte-identical across every chunk of a book.
     Both default off, preserving the historical per-chunk behavior.
+
+    ``house`` is the book's house rules (:func:`src.house.prompt.load_translator_house`).
+    Its global rules go into the fixed prefix as HOUSE RULES, identical in every
+    chunk; its triggered rules go after the glossary as HOUSE NOTES, only in a
+    chunk whose English triggers one. ``None`` renders neither.
     """
     chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
     template = load_prompt_template()
+    house_rules = house.rules_block() if house else ""
+    house_notes = house.notes_block(chunk.source_text) if house else ""
     variables = {
         "book_title": project_name,
         "source_text": chunk.source_text,
@@ -718,6 +729,8 @@ def build_translation_prompt(
         "dialogue_instructions": dialogue_instruction(
             chunk.source_text, target_language, always_include=always_include_dialogue
         ),
+        "house_rules": house_rules,
+        "house_notes": house_notes,
     }
 
     prompt = render_prompt(template, variables)
@@ -728,7 +741,51 @@ def build_translation_prompt(
         parts = prompt.split(separator, 1)
         if len(parts) > 1:
             prompt = separator + parts[1]
+    return place_house_blocks(prompt, template, house_rules, house_notes)
+
+
+#: Where a template with no house placeholders gets the house blocks: the
+#: rules at the end of the fixed prefix, the notes just before the source text.
+_SOURCE_SECTION_MARKER = "=" * 80 + "\nSOURCE TEXT TO TRANSLATE"
+
+
+def place_house_blocks(prompt: str, template: str, house_rules: str, house_notes: str) -> str:
+    """Insert the house blocks into a prompt whose template predates them.
+
+    ``prompts/translation.txt`` is a per-user copy, so an operator's template
+    can lack ``{{house_rules}}`` / ``{{house_notes}}``. The rules then go right
+    before the GLOSSARY TERMS split (still in the cached prefix, still
+    byte-identical) and the notes right before the source text (per-chunk
+    suffix), so the house reaches the translator either way.
+    """
+    if house_rules and "{{house_rules}}" not in template:
+        at = prompt.find(_CACHE_PREFIX_SPLIT_MARKER)
+        if at >= 0:
+            prompt = prompt[:at] + house_rules + "\n\n" + prompt[at:]
+        else:
+            _warn_house_dropped("house_rules", "GLOSSARY TERMS")
+    if house_notes and "{{house_notes}}" not in template:
+        at = prompt.find(_SOURCE_SECTION_MARKER)
+        if at >= 0:
+            prompt = prompt[:at] + house_notes + "\n\n" + prompt[at:]
+        else:
+            _warn_house_dropped("house_notes", "SOURCE TEXT TO TRANSLATE")
     return prompt
+
+
+_HOUSE_DROP_WARNED: set[str] = set()
+
+
+def _warn_house_dropped(slot: str, marker: str) -> None:
+    """Say once per process that a template had nowhere to put a house block."""
+    if slot in _HOUSE_DROP_WARNED:
+        return
+    _HOUSE_DROP_WARNED.add(slot)
+    logger.warning(
+        "prompts/translation.txt has no {{%s}} slot and no %s section; the house "
+        "block is left out of the translator prompt. Add the slot to the template.",
+        slot, marker,
+    )
 
 
 def build_translation_prompt_parts(
@@ -742,6 +799,7 @@ def build_translation_prompt_parts(
     *,
     always_include_dialogue: bool = False,
     always_include_image_instructions: bool = False,
+    house: Optional["TranslatorHouse"] = None,
 ) -> tuple[str, str]:
     """Render the translation prompt split into ``(prefix, suffix)`` for caching.
 
@@ -764,6 +822,7 @@ def build_translation_prompt_parts(
         previous_chapter_context=previous_chapter_context,
         always_include_dialogue=always_include_dialogue,
         always_include_image_instructions=always_include_image_instructions,
+        house=house,
     )
     marker = _CACHE_PREFIX_SPLIT_MARKER
     idx = prompt.find(marker)
@@ -772,15 +831,28 @@ def build_translation_prompt_parts(
     return (prompt[:idx], prompt[idx:])
 
 
-def apply_translation(chunk: Chunk, prose: str, log_path: Optional[Path] = None) -> Chunk:
+def apply_translation(
+    chunk: Chunk,
+    prose: str,
+    log_path: Optional[Path] = None,
+    *,
+    project_dir: Optional[Path] = None,
+    writer: str = "translate",
+) -> Chunk:
     """Stamp a translated chunk in place: text, status, timestamp, provenance.
 
     Single source of truth for how a translated chunk is recorded, shared by the
     API realtime path and the harness subagent commit path so the two cannot
     drift. ``log_path`` is the prompt-log this translation came from; when given
     it is stamped onto ``chunk.last_llm_log`` (preserved, not cleared, when None).
+
+    The book's mechanical house rules (rio, never rió) are applied here and each
+    change is logged to ``project_dir``'s ``house_fixes.jsonl``; with no
+    ``project_dir`` the every-book ones still apply.
     """
-    chunk.translated_text = prose.strip()
+    chunk.translated_text = fix_translation(
+        prose.strip(), project_dir=project_dir, chunk_id=chunk.id, writer=writer
+    )
     chunk.status = ChunkStatus.TRANSLATED
     chunk.translated_at = datetime.now()
     if log_path is not None:
@@ -798,6 +870,7 @@ def estimate_cost(
     always_include_dialogue: bool | None = None,
     always_include_image_instructions: bool | None = None,
     target_language: str = "Spanish",
+    house: Optional[TranslatorHouse] = None,
 ) -> dict:
     """
     Estimate the cost of translating chunks with the specified provider and model.
@@ -815,6 +888,8 @@ def estimate_cost(
         always_include_image_instructions: Match the book-level image opt-in;
             ``None`` auto-derives via ``_book_has_images(chunks)``.
         target_language: Target language for dialogue gating / feature counts.
+        house: The book's house rules, so the estimate counts the HOUSE RULES
+            prefix and each chunk's HOUSE NOTES; ``None`` counts neither.
 
     Returns:
         Dictionary with cost breakdown plus feature counts:
@@ -867,10 +942,15 @@ def estimate_cost(
             "dialogue_instructions": dialogue_instruction(
                 chunk.source_text, target_language, always_include=always_include_dialogue
             ),
+            "house_rules": house.rules_block() if house else "",
+            "house_notes": house.notes_block(chunk.source_text) if house else "",
         }
 
         # Render prompt
-        prompt = render_prompt(template, variables)
+        prompt = place_house_blocks(
+            render_prompt(template, variables), template,
+            variables["house_rules"], variables["house_notes"],
+        )
 
         # Rough token estimate: ~4 characters per token
         input_tokens = len(prompt) // 4
@@ -1218,6 +1298,7 @@ def translate_chunk_realtime(
     enable_thinking: bool | None = None,
     always_include_dialogue: bool = False,
     always_include_image_instructions: bool = False,
+    house: Optional["TranslatorHouse"] = None,
 ) -> Chunk:
     """
     Translate a single chunk using real-time API.
@@ -1247,6 +1328,8 @@ def translate_chunk_realtime(
     Raises:
         APIError: If translation fails after retries
     """
+    if house is None and project_slug:
+        house = load_translator_house(project_dir_for(project_slug))
     cache_prefix, suffix = build_translation_prompt_parts(
         chunk,
         glossary=glossary,
@@ -1257,6 +1340,7 @@ def translate_chunk_realtime(
         previous_chapter_context=previous_chapter_context,
         always_include_dialogue=always_include_dialogue,
         always_include_image_instructions=always_include_image_instructions,
+        house=house,
     )
     prompt = cache_prefix + suffix
 
@@ -1273,7 +1357,10 @@ def translate_chunk_realtime(
         cache_prefix=cache_prefix or None,
     )
 
-    return apply_translation(chunk, translation, log_path=last_log_path())
+    return apply_translation(
+        chunk, translation, log_path=last_log_path(),
+        project_dir=project_dir_for(project_slug), writer=f"api:{model}",
+    )
 
 
 # ============================================================================
@@ -1375,6 +1462,8 @@ def _submit_anthropic_batch(
 
     # Book-level constant so the image bullet is byte-identical across the batch.
     book_has_images = _book_has_images(chunks)
+    # One house per batch: the global rules are the same for every chunk.
+    house = load_translator_house(project_dir_for(project_slug)) if project_slug else None
 
     # Build requests for each chunk
     requests = []
@@ -1390,6 +1479,7 @@ def _submit_anthropic_batch(
             previous_chapter_context=context_map.get(chunk.id, ""),
             always_include_dialogue=always_include_dialogue,
             always_include_image_instructions=book_has_images,
+            house=house,
         )
 
         # Create batch request
@@ -1488,6 +1578,8 @@ def _submit_openai_batch(
 
     # Book-level constant so the image bullet is byte-identical across the batch.
     book_has_images = _book_has_images(chunks)
+    # One house per batch: the global rules are the same for every chunk.
+    house = load_translator_house(project_dir_for(project_slug)) if project_slug else None
 
     # Build JSONL file with requests
     jsonl_lines = []
@@ -1503,6 +1595,7 @@ def _submit_openai_batch(
             previous_chapter_context=context_map.get(chunk.id, ""),
             always_include_dialogue=always_include_dialogue,
             always_include_image_instructions=book_has_images,
+            house=house,
         )
 
         # Create batch request
@@ -1827,7 +1920,10 @@ def _retrieve_anthropic_results(
                 message = result.result.message
                 translation = _extract_text_from_content(message.content)
                 if translation:
-                    chunk.translated_text = translation.strip()
+                    chunk.translated_text = fix_translation(
+                        translation.strip(), project_dir=project_dir_for(project_slug),
+                        chunk_id=chunk_id, writer=f"batch:anthropic:{model}",
+                    )
                     chunk.status = ChunkStatus.TRANSLATED
                     chunk.translated_at = datetime.now()
 
@@ -1901,7 +1997,10 @@ def _retrieve_openai_results(
                 choices = body.get("choices", [])
                 if choices and len(choices) > 0:
                     translation = choices[0].get("message", {}).get("content", "")
-                    chunk.translated_text = translation.strip()
+                    chunk.translated_text = fix_translation(
+                        translation.strip(), project_dir=project_dir_for(project_slug),
+                        chunk_id=chunk_id, writer=f"batch:openai:{model}",
+                    )
                     chunk.status = ChunkStatus.TRANSLATED
                     chunk.translated_at = datetime.now()
 

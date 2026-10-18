@@ -1651,44 +1651,65 @@ class TestForcedGlossaryTerms:
             report = extract_candidates(text, min_frequency=1, max_candidates=50)
         assert isinstance(report, CandidateReport)
 
-    def test_load_forced_glossary_terms_missing_file(self, tmp_path, monkeypatch):
-        missing = tmp_path / "nope.json"
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", missing)
+    @staticmethod
+    def _lexicon_files(tmp_path, monkeypatch, *, user=None, legacy=None, example=None):
+        """Point the house lexicon at tmp files; ``None`` leaves that file absent."""
+        from src.house import lexicon
+
+        for name, attr, content in (
+            ("house_lexicon.json", "LEXICON_FILE", user),
+            ("forced_glossary_terms.json", "LEGACY_FORCED_FILE", legacy),
+            ("house_lexicon.example.json", "LEXICON_EXAMPLE_FILE", example),
+        ):
+            path = tmp_path / name
+            if content is not None:
+                path.write_text(
+                    content if isinstance(content, str) else json.dumps(content),
+                    encoding="utf-8",
+                )
+            monkeypatch.setattr(lexicon, attr, path)
         monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+
+    def test_load_forced_glossary_terms_no_files(self, tmp_path, monkeypatch):
+        self._lexicon_files(tmp_path, monkeypatch)
         assert app_config.load_forced_glossary_terms(force_reload=True) == []
 
-    def test_load_forced_glossary_terms_malformed_json(self, tmp_path, monkeypatch):
-        bad = tmp_path / "bad.json"
-        bad.write_text("{ not valid json", encoding="utf-8")
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", bad)
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
-        assert app_config.load_forced_glossary_terms(force_reload=True) == []
-
-    def test_load_forced_glossary_terms_missing_terms_key(
+    def test_load_forced_glossary_terms_malformed_lexicon_falls_back_to_example(
         self, tmp_path, monkeypatch
     ):
-        bad = tmp_path / "no_terms.json"
-        bad.write_text(json.dumps({"other_key": []}), encoding="utf-8")
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", bad)
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
-        assert app_config.load_forced_glossary_terms(force_reload=True) == []
-
-    def test_load_forced_glossary_terms_returns_entries(
-        self, tmp_path, monkeypatch
-    ):
-        good = tmp_path / "good.json"
-        good.write_text(
-            json.dumps({"terms": [
-                {"term": "stall", "type_guess": "TECHNICAL"},
-                {"term": "gobbler"},
-            ]}),
-            encoding="utf-8",
+        self._lexicon_files(
+            tmp_path, monkeypatch, user="{ not valid json",
+            example={"entries": [{"english": "gobbler"}]},
         )
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", good)
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
         entries = app_config.load_forced_glossary_terms(force_reload=True)
-        assert len(entries) == 2
-        assert entries[0]["term"] == "stall"
+        assert [e["term"] for e in entries] == ["gobbler"]
+
+    def test_load_forced_glossary_terms_reads_legacy_file_without_lexicon(
+        self, tmp_path, monkeypatch
+    ):
+        self._lexicon_files(
+            tmp_path, monkeypatch,
+            legacy={"terms": [{"term": "stall", "type_guess": "TECHNICAL"}, {"term": "gobbler"}]},
+            example={"entries": [{"english": "doughnut"}]},
+        )
+        entries = app_config.load_forced_glossary_terms(force_reload=True)
+        assert [e["term"] for e in entries] == ["stall", "gobbler"]
+        assert entries[0]["type_guess"] == "TECHNICAL"
+
+    def test_load_forced_glossary_terms_returns_every_book_entries_only(
+        self, tmp_path, monkeypatch
+    ):
+        self._lexicon_files(
+            tmp_path, monkeypatch,
+            user={"entries": [
+                {"english": "deer", "spanish": "venado"},
+                {"english": "stall", "spanish": "casilla", "scope": "group:horses"},
+                {"english": "gobbler", "spanish": None},
+            ]},
+            legacy={"terms": [{"term": "ignored-once-migrated"}]},
+        )
+        entries = app_config.load_forced_glossary_terms(force_reload=True)
+        assert [e["term"] for e in entries] == ["deer", "gobbler"]
 
     # ------------------------------------------------------------------
     # Gap tests: uncovered branches
@@ -1728,37 +1749,24 @@ class TestForcedGlossaryTerms:
     def test_load_forced_glossary_terms_top_level_list_returns_empty(
         self, tmp_path, monkeypatch
     ):
-        """JSON file whose root is a list (not a dict) should return []."""
-        bad = tmp_path / "list.json"
-        bad.write_text(
-            json.dumps([{"term": "stall"}]), encoding="utf-8"
-        )
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", bad)
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        """A lexicon whose root is a list (not a dict) is unusable, read as nothing."""
+        self._lexicon_files(tmp_path, monkeypatch, user=[{"english": "stall"}])
         assert app_config.load_forced_glossary_terms(force_reload=True) == []
 
     def test_load_forced_glossary_terms_filters_non_dict_entries(
         self, tmp_path, monkeypatch
     ):
-        """Non-dict items in the 'terms' list are filtered out."""
-        mixed = tmp_path / "mixed.json"
-        mixed.write_text(
-            json.dumps({"terms": [{"term": "stall"}, "a string", 42, None]}),
-            encoding="utf-8",
+        """Non-dict items in the 'entries' list are filtered out."""
+        self._lexicon_files(
+            tmp_path, monkeypatch,
+            user={"entries": [{"english": "stall"}, "a string", 42, None]},
         )
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", mixed)
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
         entries = app_config.load_forced_glossary_terms(force_reload=True)
-        assert entries == [{"term": "stall"}]
+        assert entries == [{"term": "stall", "type_guess": "OTHER"}]
 
     def test_load_forced_glossary_terms_cache_hit(self, tmp_path, monkeypatch):
         """Second call without force_reload returns the cached list."""
-        good = tmp_path / "good.json"
-        good.write_text(
-            json.dumps({"terms": [{"term": "stall"}]}), encoding="utf-8"
-        )
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_PATH", good)
-        monkeypatch.setattr(app_config, "_FORCED_GLOSSARY_CACHE", None)
+        self._lexicon_files(tmp_path, monkeypatch, user={"entries": [{"english": "stall"}]})
         first = app_config.load_forced_glossary_terms(force_reload=True)
         second = app_config.load_forced_glossary_terms()  # uses cache
         assert first == second

@@ -49,6 +49,9 @@ RULES = (
     "space_before_mark",
     "no_space_after_period",
     "repeated_word",
+    # A mechanical house rule's pattern the edit brought back (rió for rio).
+    # Translations are fixed at commit; a reader's edit is flagged, not fixed.
+    "house_rule",
     # Not a rule: the language model's verdict (src/save_check_model.py). It is
     # listed so that disabled_rules can silence it like the rest.
     "model",
@@ -245,19 +248,28 @@ def check_write(
     ignored: Optional[IgnoredTerms] = None,
     disabled_rules: Iterable[str] = (),
     speller: Optional[Speller] = None,
+    house_fixers: Iterable = (),
 ) -> list[dict]:
     """Every rule hit for one saved sentence, as ``{rule, text}``.
 
     ``vocabulary`` maps a lower-cased word to how often the rest of the book
     uses it. ``speller`` is ``None`` where Enchant is missing; the punctuation
-    rules still run.
+    rules still run. ``house_fixers`` are the book's mechanical house rules
+    (:func:`src.house.mechanical.book_mechanical_rules`).
     """
+    from src.house.mechanical import introduced_hits
+
     off = set(disabled_rules)
     hits = []
     if "spelling" not in off:
         for word in spelling_hits(en or "", before, after, vocabulary, glossary, ignored, speller):
             hits.append({"rule": "spelling", "text": word})
     hits.extend(h for h in punctuation_hits(before, after) if h["rule"] not in off)
+    if "house_rule" not in off:
+        hits.extend(
+            {"rule": h["rule"], "text": h["text"]}
+            for h in introduced_hits(before, after, list(house_fixers))
+        )
     return hits
 
 

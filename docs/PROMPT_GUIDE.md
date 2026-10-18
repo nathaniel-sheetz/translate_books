@@ -62,8 +62,10 @@ The overridable prompts, exactly as listed in `.gitignore`:
 | `prompts/glossary_bootstrap.txt` | `glossary_bootstrap.example.txt` | Glossary candidate translation |
 | `prompts/dialogue.txt` | `dialogue.example.txt` | Spanish dialogue formatting rules |
 | `prompts/translator_note_default.txt` | `translator_note_default.example.txt` | Pre-filled "Note from the Translator" |
-| `prompts/house_style_rules.json` | `house_style_rules.example.json` | The house rules every book is judged against |
-| `prompts/decisions_taxonomy.json` | `decisions_taxonomy.example.json` | Reference data, not yet loaded by anything: the kinds of hard decision a planned decisions scan will look for, with your past examples and house defaults |
+| `prompts/house_style_rules.json` | `house_style_rules.example.json` | The house rules: global ones in the translator's cached prefix, triggered ones in the chunks that need them, mechanical ones fixed at commit, draft-only ones pre-answering the questions they `settle`; the judges read them too |
+| `prompts/house_lexicon.json` | `house_lexicon.example.json` | Words rendered the same way in every book (or every book of a group) that has them; pre-fills the glossary. Replaces `forced_glossary_terms.json` |
+| `prompts/book_groups.json` | `book_groups.example.json` | Which books form a series or a domain; siblings pre-fill style answers, address pairs and glossary |
+| `prompts/decisions_taxonomy.json` | `decisions_taxonomy.example.json` | The kinds of hard decision the decisions scan looks for, with your past examples (category defaults live in the house rules, as rules that settle `decisions:<category>`) |
 
 Every other prompt in `prompts/` is tracked directly — edit it in place and the change is
 a normal commit.
@@ -103,7 +105,7 @@ a normal commit.
 | `address_forms.txt` | The shared usted/tú detection rubric both address judges load |
 | `judge_absolute.txt` + `_full_context` / `_no_voice` | Absolute-score evaluator variants |
 | `judge_pairwise.txt` + `_full_context` / `_no_voice` | Pairwise model comparison |
-| `house_style_rules.json` | The house rules merged into every book's editorial-judge, audit-panel and triage prompts |
+| `house_style_rules.json` | The house rules merged into every book's translator, editorial-judge, audit-panel and triage prompts |
 
 `house_style_rules.json` is **data, not a template**: it is parsed with
 `json.loads`, never passed through `render_prompt`, so the `{{placeholder}}`
@@ -113,7 +115,21 @@ your copy wins, and a fresh clone falls back to the checked-in
 rule `id`s and their wording as shipped unless you mean to diverge: that id is
 the key rule suppressions and per-rule precision are computed on, so two installs
 disagreeing about what an id means would corrupt both. A book's own
-`style_rules.json` sidecar adds to it.
+`style_rules.json` sidecar adds to it, and can turn a house rule off for that
+book with `{"id": ..., "off": true, "reason": ...}`.
+
+Each rule may also carry `scope` (`every_book`, the default, or `group:<id>`
+from `book_groups.json`), `enforce` (`prompt`, the default; `mechanical` with a
+`fixer`, applied in code at chunk commit and logged to the book's
+`house_fixes.jsonl`; or `draft`, read only by the drafting steps), `triggers`
+(English forms, or `re:<regex>`; a triggered rule reaches only the chunks that
+contain one, in a HOUSE NOTES block after the glossary, while a global rule sits
+in the HOUSE RULES block of the cached prefix) and `settles` (the
+`style:<question>`, `decisions:<category>` or `address:global_rules` it answers,
+which are then pre-filled at the gate instead of asked). The translation
+template places the two blocks with `{{house_rules}}` and `{{house_notes}}`; a
+template without those slots gets them inserted before GLOSSARY TERMS and before
+the source text.
 
 See [`JUDGES_FRAMEWORK.md`](JUDGES_FRAMEWORK.md) and
 [`LLM_JUDGE_EVALUATOR.md`](LLM_JUDGE_EVALUATOR.md).

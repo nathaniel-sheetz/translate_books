@@ -393,6 +393,11 @@ class TestLiveTranslationTemplate:
     def test_example_template_uses_dialogue_variable(self, example_template):
         assert "{{dialogue_instructions}}" in example_template
 
+    def test_example_template_places_house_blocks_around_the_cache_split(self, example_template):
+        """HOUSE RULES belong in the cached prefix, HOUSE NOTES after the glossary split."""
+        split = example_template.index("=" * 80 + "\nGLOSSARY TERMS")
+        assert example_template.index("{{house_rules}}") < split < example_template.index("{{house_notes}}")
+
     def test_live_template_renders_with_empty_instruction(self, live_template):
         """Rendering with image_placeholder_instructions='' must succeed (no orphan KeyError)."""
         variables = {
@@ -407,6 +412,8 @@ class TestLiveTranslationTemplate:
             "previous_chapter_context": "",
             "image_placeholder_instructions": "",
             "dialogue_instructions": "",
+            "house_rules": "",
+            "house_notes": "",
         }
         result = render_prompt(live_template, variables)
         # No unreplaced variables left.
@@ -427,6 +434,8 @@ class TestLiveTranslationTemplate:
             "previous_chapter_context": "",
             "image_placeholder_instructions": "",
             "dialogue_instructions": block,
+            "house_rules": "",
+            "house_notes": "",
         }
         result = render_prompt(live_template, variables)
         assert "DIALOGUE FORMATTING" in result
@@ -449,6 +458,8 @@ class TestLiveTranslationTemplate:
             "previous_chapter_context": "",
             "image_placeholder_instructions": bullet,
             "dialogue_instructions": "",
+            "house_rules": "",
+            "house_notes": "",
         }
         result = render_prompt(live_template, variables)
         # Bullet appears in the rendered prompt; "translating only" wording does NOT.
@@ -472,6 +483,8 @@ class TestLiveTranslationTemplate:
             "previous_chapter_context": "",
             "image_placeholder_instructions": bullet,
             "dialogue_instructions": "",
+            "house_rules": "",
+            "house_notes": "",
         }
         result = render_prompt(live_template, variables)
         # With-description wording must appear; filename-only wording must NOT.

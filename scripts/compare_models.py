@@ -170,6 +170,9 @@ def _build_translator_context(
         "previous_chapter_context": "",
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
+        # No book here, so no house rules (the template may name the slots).
+        "house_rules": "",
+        "house_notes": "",
     }
     return render_prompt(template, variables)
 
@@ -203,6 +206,9 @@ def _build_translator_prompt(
         "previous_chapter_context": "",
         "image_placeholder_instructions": image_placeholder_instruction(chunk.source_text),
         "dialogue_instructions": dialogue_instruction(chunk.source_text, target_language),
+        # No book here, so no house rules (the template may name the slots).
+        "house_rules": "",
+        "house_notes": "",
     }
     prompt = render_prompt(template, variables)
     # Strip header comments (same as translate_chunk_realtime)
