@@ -372,14 +372,19 @@ def load_source_sample(project_dir: Path, max_words: int = 10000) -> str:
     """Load a source text sample from a project directory.
 
     Returns the first ``max_words`` words of the cleanest available source
-    text. See ``src.utils.source_text.load_clean_source_text`` for the
-    priority order (chapters → chunks → source.txt).
+    text, with its paragraph breaks kept so dialogue turns stay readable. See
+    ``src.utils.source_text.load_clean_source_text`` for the priority order
+    (chapters → chunks → source.txt).
     """
     text, _, _ = load_clean_source_text(project_dir)
     if not text:
         return ""
-    words = text.split()
-    return " ".join(words[:max_words])
+    last = None
+    for i, m in enumerate(re.finditer(r"\S+", text), 1):
+        last = m
+        if i == max_words:
+            break
+    return text[:last.end()].strip() if last else ""
 
 
 # ── light style guide ──────────────────────────────────────────────────────

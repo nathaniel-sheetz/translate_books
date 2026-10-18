@@ -294,11 +294,11 @@ def concordance(
     }
 
 
-_EXAMPLE_MAX = 120
+_EXAMPLE_MAX = 90
 
 
 def example_sentence(word: str, text: str) -> str:
-    """The sentence around ``word``'s first whole-word use, at most ~120 characters."""
+    """The sentence around ``word``'s first whole-word use, at most ~90 characters."""
     m = re.search(r"(?<![^\W\d_])" + re.escape(word) + r"(?:e?s)?(?![^\W\d_])", text, re.IGNORECASE)
     if not m:
         return ""

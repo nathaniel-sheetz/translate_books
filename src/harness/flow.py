@@ -230,6 +230,40 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+#: Appended to a prepare step's instructions when its payload carries ``sections``.
+_SECTIONS_HINT = (
+    " `sections` gives the 1-based line range of each block inserted into prompt_path. "
+    "The source sample, house context and precedent repeat across beats: Read by "
+    "offset/limit only the blocks you have not already read, plus every line outside "
+    "the listed ranges (the instructions)."
+)
+
+
+def _prompt_sections(prompt: str, blocks: dict[str, str]) -> dict[str, list[int]]:
+    """``{name: [first_line, last_line]}`` for each block ``prompt`` carries.
+
+    A block is found by its opening text and runs as far as the prompt matches
+    it, so a sample the template cut short still gets its true range. Blocks
+    that are empty or absent are left out.
+    """
+    out: dict[str, list[int]] = {}
+    for name, block in blocks.items():
+        block = (block or "").strip()
+        if not block:
+            continue
+        probe = min(len(block), 200)
+        idx = prompt.find(block[:probe])
+        while idx == -1 and probe > 20:  # cut short before the probe ran out
+            probe //= 2
+            idx = prompt.find(block[:probe])
+        if idx == -1:
+            continue
+        span = len(os.path.commonprefix([prompt[idx:idx + len(block)], block]))
+        first = prompt.count("\n", 0, idx) + 1
+        out[name] = [first, first + prompt[idx:idx + span].rstrip().count("\n")]
+    return out
+
+
 # ── setup ──────────────────────────────────────────────────────────────────
 
 def setup(
@@ -944,18 +978,19 @@ def style_guide_prepare_followups(project: str, *, answers: str | None = None) -
     from src.house.precedent import load_precedent
     from src.house.prefill import style_house_context
 
+    house_context = style_house_context(project_dir, load_precedent(project_dir))
     prompt = build_question_prompt(
-        source, cfg["target_language"], cfg["locale"], fixed, ans,
-        house_context=style_house_context(project_dir, load_precedent(project_dir)),
+        source, cfg["target_language"], cfg["locale"], fixed, ans, house_context=house_context,
     )
     prompt_path = hdir / "style_followups_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
     return {
         "prompt_path": str(prompt_path),
         "draft_path": str(hdir / "style_followups.json"),
+        "sections": _prompt_sections(prompt, {"sample": source, "house_context": house_context}),
         "instructions": (
             "Read prompt_path, draft the follow-up questions as a JSON array to draft_path, "
-            "then run `style-guide commit-followups`."
+            "then run `style-guide commit-followups`." + _SECTIONS_HINT
         ),
     }
 
@@ -1055,10 +1090,10 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         except (OSError, ValueError) as exc:
             _log.warning("Could not read style_guide_summary from %s: %s", address_map_path, exc)
 
+    house_context = style_house_context(project_dir, load_precedent(project_dir))
     prompt = build_style_guide_prompt(
         allq, ans, source, cfg["target_language"], cfg["locale"],
-        address_summary=address_summary,
-        house_context=style_house_context(project_dir, load_precedent(project_dir)),
+        address_summary=address_summary, house_context=house_context,
     )
     prompt_path = hdir / "style_guide_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -1085,6 +1120,9 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         "unanswered": unanswered,
         "address_summary_loaded": bool(address_summary),
         "house_overrides": house_overrides,
+        "sections": _prompt_sections(prompt, {
+            "sample": source, "house_context": house_context, "address_summary": address_summary,
+        }),
         "instructions": (
             "Check resolved_answers (each should read 'option' unless you meant a custom "
             "answer; 'custom' on a question you tried to answer by id means a typo). Then read "
@@ -1096,7 +1134,7 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
             "light_draft_path: at most two sentences — one naming the dialect, one the "
             "high-level tone — which replace the full guide in the reader's single-sentence "
             "retranslate prompt, so they must stand alone and name no characters, chapters, or "
-            "terms. Commit derives one from the guide if you skip it."
+            "terms. Commit derives one from the guide if you skip it." + _SECTIONS_HINT
         ),
     }
 
@@ -1298,12 +1336,16 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
         "source_kind": source_kind,  # "chunks"/"chapters" => front matter excluded; "source" => not
         "style_guide_loaded": bool(style_guide),
         "draft_path": str(hdir / "glossary_draft.json"),
+        "sections": _prompt_sections(prompt, {
+            "sample": sample, "style_guide": style_guide, "prefilled": prefill_block,
+        }),
         "instructions": (
             "Read prompt_path, draft proposals as a JSON array of "
             "{english, translation, type, context, alternatives} to draft_path (tracking any "
             "uncertain renderings to surface at the approval gate), then run `glossary commit`. "
             "Note the alternatives conventions in the prompt: places and bare personal names "
             "take none; a title + name leads with the narration form including the article."
+            + _SECTIONS_HINT
         ),
     }
 
@@ -1580,6 +1622,30 @@ def address_map_skip(project: str) -> dict:
     }
 
 
+def _format_precedent_pair(pair: dict) -> str:
+    """One sibling pair as one prompt line, keeping every rule and note.
+
+    ``- Frank Hardy → Fenton Hardy: tú | Fenton Hardy → Frank Hardy: tú — son ↔ father [the-house-on-the-cliff]``
+    """
+    a, b = pair.get("a") or "?", pair.get("b") or "?"
+    sides = []
+    for key, (speaker, addressee) in (("a_to_b", (a, b)), ("b_to_a", (b, a))):
+        rules = []
+        for r in (pair.get("directions") or {}).get(key) or []:
+            text = str(r.get("form") or "?")
+            extras = [f"{k}: {r[k]}" for k in ("when", "since", "until", "after_event")
+                      if r.get(k) and not (k == "when" and r[k] == "default")]
+            if r.get("notes"):
+                extras.append(f"note: {r['notes']}")
+            rules.append(f"{text} ({'; '.join(extras)})" if extras else text)
+        if rules:
+            sides.append(f"{speaker} → {addressee}: {' / '.join(rules)}")
+    line = "- " + " | ".join(sides)
+    if pair.get("relationship"):
+        line += f" — {pair['relationship']}"
+    return line + (f" [{pair['from']}]" if pair.get("from") else "")
+
+
 def _address_house_blocks(project_dir: Path) -> tuple[str, str, int, list[dict]]:
     """``(house rules block, series block, pairs pre-filled, sibling divergence)``.
 
@@ -1605,11 +1671,9 @@ def _address_house_blocks(project_dir: Path) -> tuple[str, str, int, list[dict]]
     blocks = []
     if pairs:
         blocks.append(
-            "Pairs from earlier books, for characters who also appear in this one:\n"
-            + json.dumps(
-                [{k: p.get(k) for k in ("a", "b", "relationship", "directions", "from")} for p in pairs],
-                ensure_ascii=False, indent=1,
-            )
+            "Pairs from earlier books, for characters who also appear in this one "
+            "(speaker → addressee: form; a rule with no `when` is the default):\n"
+            + "\n".join(_format_precedent_pair(p) for p in pairs)
         )
     for rules in precedent.get("address", {}).get("global_rules") or []:
         blocks.append(f"global_rules in {rules['from']}:\n{rules['text']}")
@@ -1681,6 +1745,10 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
         "house_address_rules": bool(house_address),
         "precedent_pairs": series_pairs,
         "divergence": divergence,
+        "sections": _prompt_sections(prompt, {
+            "characters": characters, "style_guide": style_guide, "house_address": house_address,
+            "series_precedent": series_block, "sample_chapters": sample_block,
+        }),
         "instructions": (
             "Read prompt_path, draft the forms-of-address map as a JSON object "
             "{content, style_guide_summary, pairs, global_rules} to draft_path (each "
@@ -1688,7 +1756,7 @@ def address_map_prepare(project: str, *, max_chapters: int = 6) -> dict:
             "put specific when-rules before it), refine it with the user, then run "
             "`address-map commit`. `style_guide_summary` is read by a translator who "
             "sees ONE chunk: general rules plus high-frequency exceptions only, no "
-            "chapter references, no full pair list."
+            "chapter references, no full pair list." + _SECTIONS_HINT
         ),
     }
 
@@ -5245,6 +5313,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "style-guide prepare-followups": {
         "prompt_path": "path to the follow-up-question prompt to read",
         "draft_path": "path to write the drafted follow-up questions JSON to",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "instructions": "what to do next",
     },
     "style-guide commit-followups": {
@@ -5255,6 +5324,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "style-guide prepare-draft": {
         "prompt_path": "path to the style-guide prompt to read",
         "draft_path": "path to write the drafted style-guide prose to",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "light_draft_path": "path to write the <=2-sentence light style guide to (optional; commit derives one if absent)",
         "resolved_answers": "list of {id, question, answer, source} ('option' vs 'custom')",
         "unanswered": "list of question ids with no answer",
@@ -5272,6 +5342,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     },
     "glossary prepare": {
         "prompt_path": "path to the glossary-proposal prompt to read",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "candidate_count": "number of extracted candidate terms (including carry-forwards)",
         "carryforward_count": "terms injected from the style-guide beat's hand-off",
         "house_candidates_added": "candidates the house added that extraction had missed: pre-filled terms and rendering-less house-lexicon words",
@@ -5311,6 +5382,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "address-map prepare": {
         "prompt_path": "path to the address-map drafting prompt to read",
         "draft_path": "path to write the drafted map JSON to",
+        "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "sample_chapters": "list of sampled chapters: {chapter_id, turns, attributions, second_person, words, density}",
         "characters_loaded": "approved character terms fed into the prompt (0 before the glossary exists — draft with the ENGLISH source names)",
         "style_guide_loaded": "whether style.json was fed into the prompt",

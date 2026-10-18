@@ -153,9 +153,34 @@ def test_address_prepare_carries_house_rules_and_series_pairs(house, monkeypatch
     assert out["house_address_rules"] and out["precedent_pairs"] == 1
     prompt = (book / ".harness" / "address_map_prompt.txt").read_text(encoding="utf-8")
     assert "Two adult strangers say usted both ways." in prompt
-    assert '"from": "hardy-1"' in prompt
+    assert "- Frank → Chet: tú | Chet → Frank: tú [hardy-1]" in prompt
+    first, last = out["sections"]["series_precedent"]
+    assert "[hardy-1]" in "\n".join(prompt.splitlines()[first - 1:last])
 
 
 class _Score:
     def to_dict(self):
         return {"chapter_id": "chapter_01"}
+
+
+def test_precedent_pair_line_keeps_every_rule_and_note():
+    p = {"a": "Frank", "b": "Gus", "relationship": "strangers", "from": "hardy-1", "directions": {
+        "a_to_b": [{"form": "tú", "when": "after the rescue", "notes": None},
+                   {"form": "usted", "when": "default", "notes": "a stranger at first"}],
+        "b_to_a": [{"form": "tú", "when": "default"}],
+    }}
+    assert flow._format_precedent_pair(p) == (
+        "- Frank → Gus: tú (when: after the rescue) / usted (note: a stranger at first)"
+        " | Gus → Frank: tú — strangers [hardy-1]"
+    )
+
+
+def test_prompt_sections_find_a_block_the_template_cut_short():
+    prompt = "Intro line\nSAMPLE:\none two\nthree four\n\nReturn JSON.\nHOUSE\nrule a\n"
+    sections = flow._prompt_sections(prompt, {
+        "sample": "one two\nthree four\nfive six",  # the template kept the first two lines
+        "house": "HOUSE\nrule a",
+        "absent": "never inserted",
+        "empty": "",
+    })
+    assert sections == {"sample": [3, 4], "house": [7, 8]}

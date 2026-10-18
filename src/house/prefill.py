@@ -15,11 +15,12 @@ the gate shows the disagreement beside the question instead of hiding it.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 from src.house.groups import DOMAIN, SERIES
-from src.house.precedent import normalize_answer, style_votes
+from src.house.precedent import example_of, normalize_answer, style_votes
 
 
 def _rule_source(rule_id: str) -> str:
@@ -158,7 +159,7 @@ def style_house_context(project_dir: Path, precedent: Optional[dict] = None) -> 
             "HOUSE RULES THE TRANSLATOR GETS WHEN A PASSAGE CALLS FOR THEM\n"
             "Also not to be restated:\n" + "\n".join(lines)
         )
-    guides = []
+    guides: list[tuple[str, str]] = []
     for sib in (precedent or {}).get("siblings") or []:
         if sib.get("kind") != SERIES:
             continue
@@ -168,14 +169,65 @@ def style_house_context(project_dir: Path, precedent: Optional[dict] = None) -> 
         except Exception:  # noqa: BLE001 - a sibling without a usable guide adds nothing
             continue
         if content:
-            guides.append(f"--- {sib['slug']} ---\n{content}")
+            guides.append((sib["slug"], content))
     if guides:
         parts.append(
             "STYLE GUIDES OF EARLIER BOOKS IN THIS SERIES (reference)\n"
             "Keep this book consistent with them unless something in it argues "
-            "otherwise, and say where it departs.\n\n" + "\n\n".join(guides)
+            "otherwise, and say where it departs. Each section is printed once, "
+            "followed by the books whose guide has it word for word; a heading "
+            "listed twice is one the books worded differently.\n\n"
+            + merged_guide_sections(guides)
         )
     return "\n\n".join(parts)
+
+
+def _guide_sections(content: str) -> list[tuple[str, str]]:
+    """``(heading, body)`` for each blank-line block of a guide, keeping its lines.
+
+    A lone ALL-CAPS line heads the block after it; ``heading`` is ``""`` for a
+    block that opens with none.
+    """
+    from src.style_guide_wizard import _is_heading_line
+
+    blocks = [
+        [ln.strip() for ln in b.splitlines() if ln.strip()]
+        for b in re.split(r"\n\s*\n", content.strip())
+    ]
+    blocks = [b for b in blocks if b]
+    out: list[tuple[str, str]] = []
+    i = 0
+    while i < len(blocks):
+        lines = blocks[i]
+        if len(lines) == 1 and _is_heading_line(lines[0]) and i + 1 < len(blocks):
+            lines = [lines[0], *blocks[i + 1]]
+            i += 1
+        i += 1
+        if _is_heading_line(lines[0]):
+            out.append((lines[0], "\n".join(lines[1:])))
+        else:
+            out.append(("", "\n".join(lines)))
+    return out
+
+
+def merged_guide_sections(guides: list[tuple[str, str]]) -> str:
+    """Sibling guides as their distinct sections, each tagged with the books that share it.
+
+    Three Hardy Boys guides carry the same DIALECT section word for word; it is
+    printed once. Variants of one heading sit together, in first-seen order.
+    """
+    by_heading: dict[str, dict[str, list[str]]] = {}
+    for slug, content in guides:
+        for heading, body in _guide_sections(content):
+            key = heading or body  # an untitled block only merges with its exact twin
+            by_heading.setdefault(key, {}).setdefault(body, []).append(slug)
+    rendered = []
+    for key, bodies in by_heading.items():
+        for body, slugs in bodies.items():
+            heading = "" if key == body else key
+            tag = f"[{', '.join(slugs)}]"
+            rendered.append(f"{heading} {tag}\n{body}" if heading else f"{tag}\n{body}")
+    return "\n\n".join(rendered)
 
 
 def glossary_prefills(
@@ -195,7 +247,7 @@ def glossary_prefills(
     from src.house.groups import group_ids_of
     from src.house.lexicon import entries_for
     from src.house.precedent import (
-        bare, committed_uses, example_of, format_concordance, leading_rendering,
+        bare, committed_uses, format_concordance, leading_rendering,
     )
 
     precedent = precedent or {}
@@ -217,7 +269,7 @@ def glossary_prefills(
             "origin": f"house lexicon ({entry['scope']})",
             "why": entry["why"],
             "evidence": format_concordance(by_english.get(key, {})),
-            "example": example_of(by_english.get(key, {})),
+            "example": _sense_example(entry["type_guess"], by_english.get(key, {})),
         }
 
     for key, entry in by_english.items():
@@ -247,7 +299,7 @@ def glossary_prefills(
             "origin": origin,
             "why": "",
             "evidence": format_concordance(entry),
-            "example": example_of(entry),
+            "example": _sense_example(entry.get("type") or "other", entry),
         }
         for r in entry["renderings"]:
             if bare(r["spanish"]).casefold() != lead["spanish"].casefold():
@@ -259,6 +311,14 @@ def glossary_prefills(
                     "other_origin": f"sibling: {r['slug']}",
                 })
     return sorted(prefilled.values(), key=lambda p: p["english"].casefold()), candidates_only, divergence
+
+
+#: Names have no sense to get wrong, so their rows carry no example sentence.
+_NAME_TYPES = {"character", "place"}
+
+
+def _sense_example(term_type: str, entry: dict[str, Any]) -> str:
+    return "" if term_type in _NAME_TYPES else example_of(entry)
 
 
 def format_glossary_prefill(
