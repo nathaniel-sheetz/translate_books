@@ -982,17 +982,42 @@ def style_guide_prepare_followups(project: str, *, answers: str | None = None) -
     prompt = build_question_prompt(
         source, cfg["target_language"], cfg["locale"], fixed, ans, house_context=house_context,
     )
+    hotspots, hotspots_block = _speech_hotspots(project_dir)
+    prompt = _append_block(prompt, hotspots_block)
     prompt_path = hdir / "style_followups_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
+    instructions = (
+        "Read prompt_path, draft the follow-up questions as a JSON array to draft_path, "
+        "then run `style-guide commit-followups`."
+    )
+    if hotspots:
+        instructions += (
+            " `hotspots` lists chapters from the WHOLE book (the sample is only its opening) "
+            "with period ethnic/racial framing or heavy eye dialect: draft a follow-up for "
+            "each speaker group they show, unless a house rule or series guide section "
+            "already settles it."
+        )
     return {
         "prompt_path": str(prompt_path),
         "draft_path": str(hdir / "style_followups.json"),
-        "sections": _prompt_sections(prompt, {"sample": source, "house_context": house_context}),
-        "instructions": (
-            "Read prompt_path, draft the follow-up questions as a JSON array to draft_path, "
-            "then run `style-guide commit-followups`." + _SECTIONS_HINT
-        ),
+        "hotspots": hotspots,
+        "sections": _prompt_sections(prompt, {
+            "sample": source, "house_context": house_context, "hotspots": hotspots_block,
+        }),
+        "instructions": instructions + _SECTIONS_HINT,
     }
+
+
+def _speech_hotspots(project_dir: Path) -> tuple[list[dict], str]:
+    """``(rows, prompt block)`` for the chapters whose speech or framing needs a rule."""
+    from src.harness.speech_hotspots import format_hotspots, speech_hotspots
+
+    rows = speech_hotspots(project_dir)
+    return rows, format_hotspots(rows)
+
+
+def _append_block(prompt: str, block: str) -> str:
+    return prompt.rstrip("\n") + "\n\n" + block + "\n" if block else prompt
 
 
 def style_guide_commit_followups(project: str, *, draft: str | None = None) -> dict:
@@ -1095,6 +1120,9 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         allq, ans, source, cfg["target_language"], cfg["locale"],
         address_summary=address_summary, house_context=house_context,
     )
+    # The guide must carry a rule for each, or the trim to the word target drops it.
+    _hotspots, hotspots_block = _speech_hotspots(project_dir)
+    prompt = _append_block(prompt, hotspots_block)
     prompt_path = hdir / "style_guide_prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
 
@@ -1122,6 +1150,7 @@ def style_guide_prepare_draft(project: str, *, answers: str | None = None) -> di
         "house_overrides": house_overrides,
         "sections": _prompt_sections(prompt, {
             "sample": source, "house_context": house_context, "address_summary": address_summary,
+            "hotspots": hotspots_block,
         }),
         "instructions": (
             "Check resolved_answers (each should read 'option' unless you meant a custom "
@@ -1180,14 +1209,17 @@ def style_guide_commit(project: str, *, draft: str | None = None,
     save_style_guide_json(content, out, light_content=light,
                           writer="harness:style-guide commit", reason=reason)
     validate_style_guide_file(out)  # raises HarnessValidationError -> re-draft
+    from src.harness.speech_hotspots import framing_rule_warning
     from src.house.check import write_report
 
+    framing = framing_rule_warning(project_dir, content)
     return {
         "style_path": str(out),
         "chars": len(content),
         "light_content": light,
         "light_source": light_source,
         "house_check": write_report(project_dir),
+        "warnings": [framing] if framing else [],
     }
 
 
@@ -5313,6 +5345,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "style-guide prepare-followups": {
         "prompt_path": "path to the follow-up-question prompt to read",
         "draft_path": "path to write the drafted follow-up questions JSON to",
+        "hotspots": "list of {chapter_id, framing: {term: count}, dialect_markers, dialect_per_1k, lines}: chapters from the whole book with period ethnic/racial framing or eye dialect at 3x the book's median chapter (min 5/1k words), framing first, max 8. Each speaker group needs a follow-up unless a house rule or series section settles it",
         "sections": "{block: [first_line, last_line]} (1-based, inclusive) for each block inserted into prompt_path; lines outside every range are the instructions. Read only the blocks not already read in an earlier beat",
         "instructions": "what to do next",
     },
@@ -5338,6 +5371,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "chars": "character length of the committed style guide",
         "light_content": "the committed light style guide (<=2 sentences, used by the reader's sentence retranslate)",
         "light_source": "'draft' when the light-draft file had content, else 'derived'",
+        "warnings": "REVIEW: lines for the gate; today one: the book has period ethnic/racial framing (see prepare-followups `hotspots`) and neither the guide nor a house rule mentions racial/ethnic framing or slurs. Never blocks the commit",
         "house_check": "{counts, report_path} from scripts/house_check.py: style, address, glossary, sibling-usage, committed-text, drift and promotion-candidate counts, with the full report at reports/house_check.md; {error} if the check failed (never blocks the commit)",
     },
     "glossary prepare": {

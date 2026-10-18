@@ -56,6 +56,10 @@ python scripts/harness.py style-guide prepare-followups --project projects/<slug
 ```
 Read the printed `prompt_path`, draft the follow-up questions as a JSON array, **Write** them to
 the printed `draft_path`, then:
+The sample is only the book's opening. The payload's `hotspots` lists chapters from the whole book
+that carry period ethnic/racial framing or much more eye dialect than the book's typical chapter,
+with sample lines. Draft a follow-up for each speaker group they show, unless a house rule or
+series guide section already settles it.
 ```bash
 python scripts/harness.py style-guide commit-followups --project projects/<slug>
 ```
@@ -93,6 +97,9 @@ Two rules the prompt states and you must hold yourself to while drafting:
   glossary entry or alternative to reach for, e.g. *"for a title + personal name, use the form
   with the definite article in narration (el tío Manuel llegó tarde) and the bare vocative in
   direct address (Oye, tío Manuel, quiero…)"*.
+- **Cutting to the word target trims inside sections, never removes one an answer kept.** Shorten
+  each section's sentences first. A series section (above all a framing or dialect rule) stays
+  general: don't narrow it to the one speaker the sample happened to show.
 
 Once they have signed off, and **immediately before** running `commit`, **Write** the *light*
 style guide to the printed `light_draft_path` — **at most two sentences**: one naming the
@@ -105,7 +112,9 @@ Then:
 ```bash
 python scripts/harness.py style-guide commit --project projects/<slug>
 ```
-This parses, saves `style.json`, and validates it. If it prints a VALIDATION/PARSE error, fix the
+This parses, saves `style.json`, and validates it. Relay any `warnings` (`REVIEW:` lines) at the
+gate; one means the book has period framing and nothing in the guide or the house rules gives a
+rule for it. If it prints a VALIDATION/PARSE error, fix the
 draft, refresh or delete `light_draft_path` (a leftover file still wins on re-commit), and
 re-run `commit` (cap ~3 re-drafts, then hand-edit-or-abort). It also settles the light
 guide and echoes it back as `light_content`, with `light_source` naming where it came from:
