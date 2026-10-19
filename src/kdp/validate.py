@@ -24,6 +24,8 @@ import unicodedata
 from html.parser import HTMLParser
 from typing import Any
 
+from src.kdp.gutenberg import names_trademark
+
 DESCRIPTION_MAX = 4000
 #: Per bullet: KDP's own example has four bullets that run ~180 characters together.
 OPENING_SUMMARY_MAX = 80
@@ -433,7 +435,7 @@ def check(
     for field, value in (("title", title), ("subtitle", subtitle),
                          ("description_html", text), ("epub.edition_notice", notice),
                          ("epub.rights", str(epub.get("rights") or ""))):
-        if "gutenberg" in _fold(value):
+        if names_trademark(value):
             _issue(errors, "gutenberg_mention",
                    "Project Gutenberg's trademark license bars its name on a commercial "
                    "derivative.", field)

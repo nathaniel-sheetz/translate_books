@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.book_metadata import load_book_metadata
+from src.kdp.gutenberg import names_trademark
 
 _NS = {
     "opf": "http://www.idpf.org/2007/opf",
@@ -117,8 +118,8 @@ def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any
     if want["edition_notice_body"].strip():
         _check("edition_notice", "copyright.xhtml" in spine[:3], f"spine starts {spine[:3]}")
 
-    named = sorted(href for href, text in got["texts"].items() if re.search(r"gutenberg", text, re.I))
-    if re.search(r"gutenberg", got["description"] + got["rights"], re.I):
+    named = sorted(href for href, text in got["texts"].items() if names_trademark(text))
+    if names_trademark(got["description"] + "\n" + got["rights"]):
         named.append("content.opf")
     _check("no_gutenberg_trademark", not named,
            f"named in {named}" if named else "not named anywhere")

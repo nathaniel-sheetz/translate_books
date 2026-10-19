@@ -4,6 +4,7 @@ import copy
 
 import pytest
 
+from src.kdp import gutenberg
 from src.kdp.validate import check, description_plain, parse_description
 
 GOOD = {
@@ -195,6 +196,26 @@ def test_worldwide_sale_against_rights_flags():
 def test_gutenberg_in_the_edition_notice():
     listing = _with(epub={"edition_notice": {"body": "Texto fuente: Project Gutenberg."}})
     assert "gutenberg_mention" in _codes(check(listing))
+
+
+def test_johannes_gutenberg_in_the_edition_notice():
+    listing = _with(epub={"edition_notice": {"body": "Gutenberg inventó la imprenta."}})
+    assert "gutenberg_mention" not in _codes(check(listing))
+
+
+@pytest.mark.parametrize("text, named", [
+    ("Texto del Project Gutenberg.", True),
+    ("Del Proyecto Gutenberg", True),
+    ("Projet-Gutenberg", True),
+    ("https://www.gutenberg.org/ebooks/1342", True),
+    ("The Project Gutenberg-tm License", True),
+    ("Gutenberg™ trademark", True),
+    ("This Gutenberg eBook", True),
+    ("su invención se debe a Gutenberg.", False),
+    ("Johannes Gutenberg, orfebre e impresor alemán", False),
+])
+def test_names_trademark(text, named):
+    assert gutenberg.names_trademark(text) is named
 
 
 def test_parse_description_opening_list():

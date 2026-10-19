@@ -38,6 +38,15 @@ _NS = {
 # /epub/72577/... — the id is the first number after one of those path segments.
 _ID_RE = re.compile(r"gutenberg\.org/(?:ebooks|cache/epub|files|epub)/(\d+)")
 
+# The trademark, not the man: "Project/Proyecto Gutenberg", the domain, and the
+# license's "Gutenberg-tm" / "Gutenberg eBook" forms. A bare "Gutenberg" is
+# usually Johannes, in a chapter on printing, and must not fail a book.
+_TRADEMARK_RE = re.compile(
+    r"\b(?:project|proyecto|projet|projekt|progetto)[\s\-]+gutenberg"
+    r"|gutenberg\.org"
+    r"|\bgutenberg[\s\-]*(?:™|(?:tm|e-?books?|e-?texts?)\b)",
+    re.I)
+
 # MARC relator codes Gutenberg uses, to the role a listing cares about.
 _ROLES = {
     "creator": "author",
@@ -55,6 +64,11 @@ LIFE_PLUS = 70
 MEXICO_LIFE_PLUS = 100
 #: US public domain covers works published before 1 January of (this year - 95).
 US_TERM_YEARS = 95
+
+
+def names_trademark(text: str) -> bool:
+    """Whether ``text`` names Project Gutenberg (the trademark), not the printer."""
+    return bool(_TRADEMARK_RE.search(text or ""))
 
 
 def gutenberg_id(url: Optional[str]) -> Optional[int]:

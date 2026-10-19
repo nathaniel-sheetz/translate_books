@@ -146,7 +146,7 @@ Sources: KDP Help G200743940 (public domain), G201298500 (keywords), G200652170
 | `description_url/email/phone/price/emoji` | error | Prohibited description content |
 | `keyword_count`, `keyword_too_long` | error | 7 keywords, each ≤ 50 characters |
 | `keyword_quotes/html/program_name/claim` | error | Quotation marks, HTML, Amazon program names, quality/price/time claims |
-| `gutenberg_mention` | error | Project Gutenberg's trademark license bars the name on a commercial derivative. Checked in the title, subtitle, description, keywords, rights and edition notice; `verify-epub` checks the built book too |
+| `gutenberg_mention` | error | Project Gutenberg's trademark license bars the name on a commercial derivative. Checked in the title, subtitle, description, keywords, rights and edition notice; `verify-epub` checks the built book too. Only the trademark forms count (`gutenberg.names_trademark`: "Project/Proyecto Gutenberg", `gutenberg.org`, "Gutenberg-tm"/"eBook"), so Johannes Gutenberg in a chapter on printing passes; a keyword fails on the bare word, since as a search term it targets the brand |
 | `category_count`, `category_duplicate` | error | 3 distinct categories |
 | `missing_author`, `missing_translator` | error | A translation credits the translator and the original author |
 | `reading_age_inverted` | error | min ≤ max |

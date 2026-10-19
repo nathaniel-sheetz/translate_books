@@ -112,6 +112,15 @@ def test_verify_catches_gutenberg_in_the_body(tmp_path):
     assert "chapter_01.xhtml" in checks["no_gutenberg_trademark"]["detail"]
 
 
+def test_verify_allows_johannes_gutenberg(tmp_path):
+    project = _project(tmp_path)
+    (project / "chapters" / "chapter_01.txt").write_text(
+        "CAPÍTULO I\n\nLa imprenta se debe a Gutenberg, orfebre de Maguncia.", encoding="utf-8")
+    build_epub(project_path=project, title="Bambi", author="Felix Salten")
+    checks = {c["check"]: c for c in verify(project)["checks"]}
+    assert checks["no_gutenberg_trademark"]["ok"], checks["no_gutenberg_trademark"]["detail"]
+
+
 def test_verify_without_an_epub(tmp_path):
     assert verify(tmp_path)["ok"] is False
 
