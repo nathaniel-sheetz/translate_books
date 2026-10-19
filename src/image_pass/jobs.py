@@ -80,8 +80,9 @@ _MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
 
 INPUT_ORIGINAL = "original"
 INPUT_CURRENT = "current"
-# A cover drawn from another of the book's images: that image is attached as
-# source material, not as the thing being edited.
+# A cover or replacement drawn from another picture (one of the book's images,
+# the cover's art, an earlier candidate): it is attached as source material,
+# not as the thing being edited.
 INPUT_REFERENCE = "reference"
 
 # A reference from outside images/: the cover's art (`cover/art.jpg`) or a
@@ -282,9 +283,13 @@ def render_prompt(job: dict[str, Any], meta: dict[str, str]) -> str:
             width=job.get("width"),
             height=job.get("height"),
         )
+        drawn_from = (
+            "the editor's chosen starting point" if job.get("reference_snapshot")
+            else "one of the book's own illustrations"
+        )
         cover_task = (
             f"Create the front cover of a book from the attached image, `{input_name}`, "
-            "one of the book's own illustrations, following the editor's brief below."
+            f"{drawn_from}, following the editor's brief below."
         )
     elif input_name:
         contract = _CONTRACT_EDIT.format(
@@ -348,9 +353,11 @@ def _outside_reference(
 ) -> tuple[Optional[Path], Optional[str], Optional[str]]:
     """Resolve a ``cover/...`` or ``jobs/...`` reference: ``(path, name, problem)``.
 
-    A candidate named here is archived by the very prepare that names it (its
-    job's prompt changes), so when the file has gone the copy an earlier
-    prepare took for this job is used, if it was taken of the same name.
+    Once this job has a copy taken of the same name, that copy is what the name
+    means: the candidate it named is archived by the prepare that names it, and
+    the path is then reused by the redo's own candidate 1 (or the art by the
+    next cover job). Re-reading the live file would draw candidate 2 from
+    candidate 1 and keep the old candidates as if they answered it.
     """
     name = ref.strip().replace("\\", "/")
     root, _, rest = name.partition("/")
@@ -358,9 +365,6 @@ def _outside_reference(
         return None, None, f"reference {ref!r} is not a path inside {root}/"
     if Path(rest).suffix.lower() not in IMAGE_SUFFIXES:
         return None, None, f"reference {ref!r} is not an image file ({', '.join(IMAGE_SUFFIXES)})"
-    path = (cover_dir(project_dir) if root == "cover" else jobs_dir(project_dir)) / rest
-    if path.is_file():
-        return path, name, None
     job_dir = jobs_dir(project_dir) / job_id_for(key)
     kept = _reference_snapshot(job_dir)
     try:
@@ -369,6 +373,14 @@ def _outside_reference(
         previous = None
     if kept is not None and isinstance(previous, dict) and previous.get("reference") == name:
         return kept, name, None
+    path = (cover_dir(project_dir) if root == "cover" else jobs_dir(project_dir)) / rest
+    if path.is_file():
+        return path, name, None
+    if (images_dir(project_dir) / name).is_file():
+        return None, None, (
+            f"reference {name}: no such file in {root}/ (for the book's image, "
+            f"write 'images/{name}')"
+        )
     return None, None, f"reference {name}: no such file"
 
 
@@ -568,7 +580,7 @@ def _input_path(project_dir: Path, job: dict[str, Any]) -> Path:
     asked = job.get("input_asked") or (
         INPUT_ORIGINAL if job.get("input_from") == INPUT_ORIGINAL else INPUT_CURRENT
     )
-    if asked != INPUT_ORIGINAL:
+    if asked != INPUT_ORIGINAL or job.get("reference_snapshot"):
         return recorded
     backup = originals_dir(project_dir) / (job.get("reference") or job["image"])
     return backup if backup.is_file() else recorded
@@ -725,6 +737,14 @@ def _prepare(project_dir: Path, jobs: list[Any], *, replace: bool) -> dict[str, 
     except (OSError, ValueError) as exc:
         return {"status": "error", "error": f"could not render a prompt: {exc}"}
 
+    # Every snapshot before any archiving: a reference may be a candidate of
+    # this job or of another in the batch, which the loop below may move.
+    for job in valid:
+        if job.get("reference_snapshot"):
+            job_dir = jobs_dir(project_dir) / job["id"]
+            job_dir.mkdir(parents=True, exist_ok=True)
+            job["input"] = str(_take_snapshot(job_dir, Path(job["input"])))
+
     prepared: list[dict[str, Any]] = []
     archived_total = 0
     for job in valid:
@@ -733,10 +753,6 @@ def _prepare(project_dir: Path, jobs: list[Any], *, replace: bool) -> dict[str, 
         prompt = prompts[job["id"]]
         prompt_file = job_dir / "prompt.txt"
         archived = 0
-        # Before any archiving: the reference may be one of this job's own
-        # candidates, which the archive below is about to move.
-        if job.get("reference_snapshot"):
-            job["input"] = str(_take_snapshot(job_dir, Path(job["input"])))
         if (
             prompt_file.exists() and prompt_file.read_text(encoding="utf-8") != prompt
         ) or _input_changed(job_dir, job):
