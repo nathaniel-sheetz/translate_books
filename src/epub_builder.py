@@ -284,7 +284,17 @@ sup.endnote-ref { vertical-align: super; font-size: 0.75em; line-height: 0; }
 sup.endnote-ref a { text-decoration: none; color: inherit; }
 p.endnote { text-indent: 0; margin: 0.4em 0; }
 p.endnote a { text-decoration: none; }
+section.titlepage { text-align: center; margin-top: 20%; }
+section.titlepage h1 { font-size: 1.8em; margin-bottom: 0.3em; }
+section.titlepage p { text-indent: 0; text-align: center; }
+p.titlepage-subtitle { font-size: 1.2em; font-style: italic; margin-bottom: 2em; }
+p.titlepage-author { font-size: 1.2em; margin-bottom: 1.5em; }
+p.titlepage-publisher { margin-top: 4em; font-size: 0.9em; }
+section.edition-notice p { text-indent: 0; font-size: 0.9em; margin: 0.6em 0; }
 """
+
+_DEFAULT_TRANSLATOR_LABEL = "Traducción de"
+_DEFAULT_EDITION_NOTICE_HEADING = "Créditos"
 
 
 def parse_image_placeholders(text: str) -> List[Tuple[str, str, str]]:
@@ -625,6 +635,59 @@ def note_text_to_xhtml(heading: str, body: str) -> str:
     return '\n'.join(parts)
 
 
+def _xhtml_page(title: str, body_parts: List[str]) -> str:
+    """Wrap body markup in the XHTML scaffolding every generated page shares."""
+    parts = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<!DOCTYPE html>',
+        '<html xmlns="http://www.w3.org/1999/xhtml">',
+        '<head><title>{}</title>'
+        '<link rel="stylesheet" type="text/css" href="style.css"/>'
+        '</head>'.format(escape(title)),
+        '<body>',
+        *body_parts,
+        '</body>',
+        '</html>',
+    ]
+    return '\n'.join(parts)
+
+
+def title_page_to_xhtml(
+    title: str,
+    subtitle: Optional[str] = None,
+    author: Optional[str] = None,
+    translator: Optional[str] = None,
+    publisher: Optional[str] = None,
+    translator_label: Optional[str] = None,
+) -> str:
+    """Render the generated title page: title, subtitle, author, translator, imprint."""
+    body = ['<section class="titlepage">', f'<h1>{escape(title)}</h1>']
+    if subtitle and subtitle.strip():
+        body.append(f'<p class="titlepage-subtitle">{escape(subtitle.strip())}</p>')
+    if author and author.strip():
+        body.append(f'<p class="titlepage-author">{escape(author.strip())}</p>')
+    if translator and translator.strip():
+        label = (translator_label or '').strip() or _DEFAULT_TRANSLATOR_LABEL
+        body.append(
+            f'<p class="titlepage-translator">{escape(label)} {escape(translator.strip())}</p>'
+        )
+    if publisher and publisher.strip():
+        body.append(f'<p class="titlepage-publisher">{escape(publisher.strip())}</p>')
+    body.append('</section>')
+    return _xhtml_page(title, body)
+
+
+def edition_notice_to_xhtml(heading: str, body: str) -> str:
+    """Render the copyright / edition-notice page. Unlike the translator note the
+    heading is visually quiet (an h2), and paragraphs are not indented."""
+    eff_heading = (heading or '').strip() or _DEFAULT_EDITION_NOTICE_HEADING
+    stripped_body, _ = _strip_image_blocks(body)
+    parts = ['<section class="edition-notice">', f'<h2>{escape(eff_heading)}</h2>']
+    parts.extend(_render_body_blocks(stripped_body))
+    parts.append('</section>')
+    return _xhtml_page(eff_heading, parts)
+
+
 def _matter_subtitle_from_text(
     text: str, label: str,
 ) -> Tuple[int, str, List[str]]:
@@ -927,6 +990,12 @@ def build_epub(
     rights: Optional[str] = None,
     source_title: Optional[str] = None,
     publisher: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    subjects: Optional[Iterable[str]] = None,
+    date: Optional[str] = None,
+    front_matter: Optional[Dict[str, Any]] = None,
+    edition_notice_heading: Optional[str] = None,
+    edition_notice_body: Optional[str] = None,
 ) -> Path:
     """
     Build an EPUB from translated chapter files and project images.
@@ -960,6 +1029,17 @@ def build_epub(
         rights: Copyright / license line (dc:rights).
         source_title: Original-language title of the work (dc:source).
         publisher: Publisher name / imprint (dc:publisher).
+        subtitle: Emitted as a second dc:title refined to title-type
+                     "subtitle", and shown on the generated title page.
+        subjects: One dc:subject per entry (BISAC heading text, LCSH).
+        date: Publication date (dc:date), e.g. "2026-10-19".
+        front_matter: ``{"title_page": bool, "translator_label": str}``. With
+                     ``title_page`` set, a generated title page opens the spine.
+                     Absent means no generated front matter, so books that never
+                     opted in build exactly as before.
+        edition_notice_heading / edition_notice_body: The copyright /
+                     edition-notice page, placed after the title page. Skipped
+                     when the body is blank.
 
     Returns:
         Path to the written EPUB file.
@@ -1031,6 +1111,17 @@ def build_epub(
         book.add_metadata('DC', 'source', source_title.strip())
     if publisher and publisher.strip():
         book.add_metadata('DC', 'publisher', publisher.strip())
+    if subtitle and subtitle.strip():
+        book.add_metadata('DC', 'title', subtitle.strip(), {'id': 'subtitle'})
+        book.add_metadata(
+            None, 'meta', 'subtitle',
+            {'refines': '#subtitle', 'property': 'title-type'},
+        )
+    for subject in subjects or ():
+        if subject and str(subject).strip():
+            book.add_metadata('DC', 'subject', str(subject).strip())
+    if date and date.strip():
+        book.add_metadata('DC', 'date', date.strip())
 
     # Add CSS
     css_item = epub.EpubItem(
@@ -1081,8 +1172,39 @@ def build_epub(
     if missing_images:
         logger.warning(f"Missing images: {missing_images}")
 
+    # Generated front matter (title page, then edition notice) opens the spine
+    # ahead of the nav, so a reader goes cover -> title page. Neither is a TOC
+    # entry: they are pages you turn past, not places you navigate to.
+    spine = []
+    front_matter = front_matter or {}
+    if front_matter.get('title_page'):
+        title_item = epub.EpubHtml(
+            uid='titlepage', title=title, file_name='titlepage.xhtml', lang=language,
+        )
+        title_item.set_content(title_page_to_xhtml(
+            title, subtitle=subtitle, author=author, translator=translator,
+            publisher=publisher, translator_label=front_matter.get('translator_label'),
+        ).encode('utf-8'))
+        title_item.add_item(css_item)
+        book.add_item(title_item)
+        spine.append(title_item)
+    if edition_notice_body and str(edition_notice_body).strip():
+        notice_heading = (
+            (edition_notice_heading or '').strip() or _DEFAULT_EDITION_NOTICE_HEADING
+        )
+        notice_item = epub.EpubHtml(
+            uid='edition_notice', title=notice_heading,
+            file_name='copyright.xhtml', lang=language,
+        )
+        notice_item.set_content(
+            edition_notice_to_xhtml(notice_heading, str(edition_notice_body)).encode('utf-8')
+        )
+        notice_item.add_item(css_item)
+        book.add_item(notice_item)
+        spine.append(notice_item)
+
     # Convert chapters to XHTML and add to book
-    spine = ['nav']
+    spine.append('nav')
     toc = []
 
     for i, chapter_file in enumerate(chapter_files, 1):

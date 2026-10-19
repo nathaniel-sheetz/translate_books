@@ -1,0 +1,1 @@
+playwright>=1.48  # optional: only kdp_publish.py comps/category (then: python -m playwright install chromium)

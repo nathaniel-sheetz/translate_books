@@ -869,6 +869,68 @@ class TestBuildEpub:
         assert '<dc:source' in opf and 'The Original Title' in opf
         assert '<dc:publisher' in opf and 'My Imprint' in opf
 
+    def test_subtitle_subjects_and_date(self, tmp_path):
+        """Subtitle is a refined second dc:title; subjects and date are plain DC."""
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="Bambi",
+            author="Felix Salten",
+            subtitle="Una vida en el bosque",
+            subjects=["Nature stories", "  ", "Deer -- Fiction"],
+            date="2026-10-19",
+        )
+        with zipfile.ZipFile(output) as zf:
+            opf_name = next(n for n in zf.namelist() if n.endswith('.opf'))
+            opf = zf.read(opf_name).decode('utf-8')
+        assert 'id="subtitle"' in opf and 'Una vida en el bosque' in opf
+        assert 'refines="#subtitle"' in opf and 'property="title-type"' in opf
+        assert opf.count('<dc:subject') == 2
+        assert '<dc:date' in opf and '2026-10-19' in opf
+
+    def test_front_matter_opens_the_spine(self, tmp_path):
+        """Title page then edition notice come before nav and stay out of the TOC."""
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="Bambi",
+            author="Felix Salten",
+            subtitle="Una vida",
+            translator="Ana Pérez",
+            publisher="Editorial Ejemplo",
+            front_matter={"title_page": True},
+            edition_notice_heading="Créditos",
+            edition_notice_body="Publicado en 1923.\n\nTraducción: Ana Pérez.",
+        )
+        with zipfile.ZipFile(output) as zf:
+            opf_name = next(n for n in zf.namelist() if n.endswith('.opf'))
+            opf = zf.read(opf_name).decode('utf-8')
+            names = zf.namelist()
+            title_page = zf.read(next(n for n in names if n.endswith('titlepage.xhtml'))).decode('utf-8')
+            notice = zf.read(next(n for n in names if n.endswith('copyright.xhtml'))).decode('utf-8')
+            nav = zf.read(next(n for n in names if n.endswith('nav.xhtml'))).decode('utf-8')
+        spine = opf[opf.index('<spine'):]
+        assert spine.index('idref="titlepage"') < spine.index('idref="edition_notice"') \
+            < spine.index('idref="nav"')
+        assert 'Traducción de Ana Pérez' in title_page and 'Editorial Ejemplo' in title_page
+        assert '<h2>Créditos</h2>' in notice and 'Publicado en 1923.' in notice
+        assert 'titlepage.xhtml' not in nav and 'copyright.xhtml' not in nav
+
+    def test_no_front_matter_keys_leaves_spine_unchanged(self, tmp_path):
+        """Books that never opted in: nav still opens the spine, no generated pages."""
+        project = self._make_project(tmp_path)
+        output = build_epub(project_path=project, title="Test Book", author="Author")
+        with zipfile.ZipFile(output) as zf:
+            opf_name = next(n for n in zf.namelist() if n.endswith('.opf'))
+            opf = zf.read(opf_name).decode('utf-8')
+            names = zf.namelist()
+        spine = opf[opf.index('<spine'):]
+        first = spine[spine.index('<itemref'):]
+        assert first.startswith('<itemref idref="nav"')
+        assert not any(n.endswith(('titlepage.xhtml', 'copyright.xhtml')) for n in names)
+        for tag in ('<dc:subject', '<dc:date', 'id="subtitle"'):
+            assert tag not in opf
+
     def test_blank_optional_metadata_is_omitted(self, tmp_path):
         """Blank/whitespace metadata must not emit empty <dc:*/> elements."""
         project = self._make_project(tmp_path)

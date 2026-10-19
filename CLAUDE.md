@@ -30,3 +30,4 @@ Key routing rules:
 - Add editorial footnotes to a book, scan chapters for footnote candidates → invoke footnote-pass
 - Redo/translate/clean book images, cover art → invoke image-pass
 - Write a friction log, log what wasted time/tokens in this run → invoke friction-log
+- Publish to KDP, KDP listing, Amazon categories/keywords, book description, epub metadata → invoke kdp-publish

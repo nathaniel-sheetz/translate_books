@@ -87,6 +87,8 @@ prompts/dialogue.txt
 prompts/house_style_rules.json
 prompts/house_lexicon.json
 prompts/book_groups.json
+prompts/kdp_defaults.json
+prompts/kdp_description_examples.md
 prompts/proposals/
 prompts/decisions_taxonomy.json
 prompts/previous/

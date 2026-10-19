@@ -66,6 +66,8 @@ The overridable prompts, exactly as listed in `.gitignore`:
 | `prompts/house_lexicon.json` | `house_lexicon.example.json` | Words rendered the same way in every book (or every book of a group) that has them; pre-fills the glossary. Replaces `forced_glossary_terms.json` |
 | `prompts/book_groups.json` | `book_groups.example.json` | Which books form a series or a domain; siblings pre-fill style answers, address pairs and glossary |
 | `prompts/decisions_taxonomy.json` | `decisions_taxonomy.example.json` | The kinds of hard decision the decisions scan looks for, with your past examples (category defaults live in the house rules, as rules that settle `decisions:<category>`) |
+| `prompts/kdp_defaults.json` | `kdp_defaults.example.json` | The KDP listing's house defaults: canonical translator name, imprint, title descriptors, rights and copyright-page templates (`docs/KDP_PUBLISH.md`) |
+| `prompts/kdp_description_examples.md` | `kdp_description_examples.example.md` | The Amazon descriptions the `kdp-publish` drafting step imitates, annotated |
 
 Every other prompt in `prompts/` is tracked directly — edit it in place and the change is
 a normal commit.

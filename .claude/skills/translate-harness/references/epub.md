@@ -44,6 +44,10 @@ drift, not a false alarm.)
 > `images/` under their original names, so the EPUB picks them up with no other change; an EPUB
 > built earlier keeps the old pictures until it is rebuilt.
 
+> **Publishing to KDP?** Run the **`kdp-publish`** skill before the final build. It writes the
+> Spanish title, subtitle, translator, description, subjects and a title page and copyright
+> page into `project.json` / `edition_notice.json`, which this build then picks up.
+
 The API `translate` run chains through combine, epub, and align, building the EPUB from translated
 chunks only and reporting exactly which chapters shipped. On the **workers** path you already
 aligned each set in translate-workers 4B-e (the reader reads `alignments/`, not the EPUB), so here
@@ -52,7 +56,7 @@ so far:
 
 ```bash
 python scripts/harness.py epub --project projects/<slug>
-# --title / --author / --language default to what you set at setup; pass them to override.
+# Title/author/language resolve from project.json (spanish_title first), then setup; pass them to override.
 ```
 Report the included/skipped chapter lists so a partial translation is never mistaken for a complete
 book. Confirm the EPUB landed:

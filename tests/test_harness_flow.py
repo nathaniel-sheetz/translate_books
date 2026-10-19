@@ -1863,3 +1863,28 @@ def test_captions_dry_run_does_not_write(tmp_path: Path):
     assert (proj / "chunks" / "chapter_01_chunk_000.json").read_text(
         encoding="utf-8"
     ) == before_chunk
+
+
+def test_epub_prefers_project_json_spanish_title(project: Path, monkeypatch):
+    """The setup config holds the English source title; a Spanish title set in
+    project.json (web UI or kdp_publish apply) must win, via src.book_metadata."""
+    state.save_config(project, {"title": "Bambi: A Life in the Woods", "author": "Felix Salten"})
+    (project / "project.json").write_text(
+        json.dumps({"spanish_title": "Bambi", "author": "Felix Salten"}), encoding="utf-8")
+    captured: dict = {}
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: (captured.update(cmd=cmd), (0, None))[1])
+
+    flow.epub(str(project))
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--title") + 1] == "Bambi"
+
+    flow.epub(str(project), title="Override")
+    assert captured["cmd"][captured["cmd"].index("--title") + 1] == "Override"
+
+
+def test_epub_falls_back_to_setup_title(project: Path, monkeypatch):
+    state.save_config(project, {"title": "Bambi: A Life in the Woods", "author": "Felix Salten"})
+    captured: dict = {}
+    monkeypatch.setattr(flow, "_run_script", lambda cmd: (captured.update(cmd=cmd), (0, None))[1])
+    flow.epub(str(project))
+    assert captured["cmd"][captured["cmd"].index("--title") + 1] == "Bambi: A Life in the Woods"

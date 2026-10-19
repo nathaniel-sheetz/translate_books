@@ -36,6 +36,8 @@ cp translation.example.txt translation.txt   # now yours
 | `house_lexicon.json` | `house_lexicon.example.json` |
 | `book_groups.json` | `book_groups.example.json` |
 | `decisions_taxonomy.json` | `decisions_taxonomy.example.json` |
+| `kdp_defaults.json` | `kdp_defaults.example.json` |
+| `kdp_description_examples.md` | `kdp_description_examples.example.md` |
 
 Every other file here is tracked directly — edit in place and commit.
 

@@ -6,6 +6,10 @@ By default, includes only fully translated chapters discovered from
 chunks/*_chunk_*.json. If --chapters-dir is passed, builds verbatim from
 that directory of chapter_*.txt files as a legacy escape hatch.
 
+Metadata comes from src.book_metadata (project.json first), so --title and
+--author are optional overrides: translator, description, rights, subjects,
+the translator note and any generated front matter ride along unasked.
+
 Usage:
     python build_epub.py projects/fabre2 --title "Book Title" --author "Author Name"
     python build_epub.py projects/fabre2 --title "Book" --author "A" --language es --verbose
@@ -30,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.book_metadata import epub_kwargs
 from src.epub_builder import build_epub, build_epub_from_chunks
 from src.harness.state import emit_harness_result
 
@@ -53,18 +58,18 @@ Examples:
     )
     parser.add_argument(
         '--title',
-        required=True,
-        help='Book title for EPUB metadata'
+        default=None,
+        help='Book title for EPUB metadata (default: project.json spanish_title/title)'
     )
     parser.add_argument(
         '--author',
-        required=True,
-        help='Author name for EPUB metadata'
+        default=None,
+        help='Author name for EPUB metadata (default: project.json author)'
     )
     parser.add_argument(
         '--language',
-        default='es',
-        help='EPUB language code (default: es)'
+        default=None,
+        help='EPUB language code (default: project.json target_lang_code, else es)'
     )
     parser.add_argument(
         '--cover',
@@ -111,26 +116,35 @@ Examples:
     if chapters_dir and not chapters_dir.is_absolute():
         chapters_dir = project_dir / chapters_dir
 
+    metadata = epub_kwargs(
+        project_dir, title=args.title, author=args.author, language=args.language,
+    )
+    if not metadata['title'] or not metadata['author']:
+        missing = ' and '.join(
+            k for k in ('title', 'author') if not metadata[k]
+        )
+        print(
+            f"  ERROR in epub: no {missing}: pass --{missing.replace(' and ', '/--')} "
+            "or set it in project.json"
+        )
+        sys.exit(1)
+
     try:
         if chapters_dir is not None:
             output = build_epub(
                 project_path=project_dir,
-                title=args.title,
-                author=args.author,
-                language=args.language,
                 cover_image=args.cover,
                 output_path=args.output,
                 chapters_dir=chapters_dir,
+                **metadata,
             )
             included = skipped = None
         else:
             result = build_epub_from_chunks(
                 project_path=project_dir,
-                title=args.title,
-                author=args.author,
-                language=args.language,
                 cover_image=args.cover,
                 output_path=args.output,
+                **metadata,
             )
             output = result.path
             included = result.included

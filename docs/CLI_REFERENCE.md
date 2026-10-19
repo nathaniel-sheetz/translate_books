@@ -206,10 +206,15 @@ but not readable side by side.
 ### `build_epub.py` — EPUB export
 
 ```bash
+python scripts/build_epub.py projects/my-book
 python scripts/build_epub.py projects/my-book --title "My Book" --author "An Author"
 ```
 
-`--cover`, `--language`, `--chapters-dir`, `--output`.
+`--title`, `--author`, `--language`, `--cover`, `--chapters-dir`, `--output`. Metadata
+resolves through `src/book_metadata.py` (`project.json` first, then the harness setup
+config, then the ingest report), so `--title` and `--author` are overrides. The
+translator, description, rights, subjects, the translator note and any title or
+copyright page `kdp_publish.py apply` set up come along without flags.
 
 *Harness equivalent:* `harness epub`
 *Dashboard equivalent:* Stage 8
@@ -425,6 +430,27 @@ applies the same audit to notes already on disk; run it after any `harness.py al
 Full reference: [`FOOTNOTE_PASS.md`](FOOTNOTE_PASS.md).
 
 *Skill equivalent:* `/footnote-pass`
+
+### `kdp_publish.py` — the KDP listing
+
+```bash
+python scripts/kdp_publish.py facts       --project my-book
+python scripts/kdp_publish.py suggest     --project my-book --seeds-file seeds.txt --expand
+python scripts/kdp_publish.py comps       --project my-book --query "mi libro en español"
+python scripts/kdp_publish.py category    --project my-book --node 8407404011
+python scripts/kdp_publish.py check       --project my-book
+python scripts/kdp_publish.py report      --project my-book
+python scripts/kdp_publish.py apply       --project my-book --dry-run
+python scripts/kdp_publish.py verify-epub --project my-book
+```
+
+Book facts (the catalog record, what the edition adds, rights flags), Amazon evidence
+(autocomplete phrases, comparable books' Best Sellers Rank ladders, the
+rank-to-sales signal of a category), KDP's listing rules, and the write to
+`project.json` / `edition_notice.json` / `kdp_listing.json`. `comps` and `category` need
+Playwright (`requirements-kdp.txt`). Full reference: [`KDP_PUBLISH.md`](KDP_PUBLISH.md).
+
+*Skill equivalent:* `/kdp-publish`
 
 ### `image_pass.py` — redo a book's images
 
