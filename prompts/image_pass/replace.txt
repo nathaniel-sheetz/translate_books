@@ -1,6 +1,6 @@
 $imagegen
 
-The attached image, `{{input_name}}`, is an illustration from the book "{{title}}". Make a new illustration to take its place.
+{{replace_task}}
 
 - The new picture must do the same job on the page as the original: the same subject, and the same things a reader is meant to see in it.
 - Keep the original's orientation and proportions, so it fits the same space in the book.

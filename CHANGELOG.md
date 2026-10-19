@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.77.2.0] - 2026-10-19
+
+### Added
+- **A replacement can start from the cover's art or from an earlier candidate.** An image-pass `replace` job now takes a `reference`, as a `cover` job already did. It can be one of the book's images, the cover's art (`cover/art.jpg`) for an interior picture that has to match the cover, or a candidate a job drew (`jobs/<id>/cand_01.png`, or one under its `previous/`) for a redo that builds on the one the user liked. A cover job takes these too.
+  - When the reference is the art or a candidate, `prepare` copies it into the job's folder as `reference.<ext>`. It does this before any job in the batch archives its candidates. Re-preparing with the same reference reuses that copy, even after the redo's own `cand_01.png` has taken the path. To start from a different picture, name a different one.
+  - A replacement drawn from another picture is told that the original is not attached, and it keeps the shape of the slot it fills, not the shape of the picture it was drawn from.
+  - The board shows the copy as "drawn from", served by a new `/image-pass/reference/<job_id>` route.
+
+### Changed
+- A `cover/...` or `jobs/...` reference now resolves outside `images/`. A book with an `images/cover/` subfolder writes `images/cover/...`, and the not-found error says so.
+
 ## [0.77.1.0] - 2026-10-18
 
 ### Fixed

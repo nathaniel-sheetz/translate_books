@@ -346,11 +346,159 @@ def test_a_cover_can_be_drawn_from_one_of_the_books_images(project: Path):
     assert again["prepared"][0]["archived"] == 1
 
 
+def test_a_replacement_can_be_drawn_from_the_cover_art(project: Path):
+    _image(project / "cover" / "art.jpg", (1024, 1536))
+    job = {"image": "map.jpg", "mode": "replace", "reference": "cover/art.jpg",
+           "instruction": "The cover's scene, a moment later."}
+    out = ip_jobs.prepare(project, [job])
+    assert out["status"] == "ok", out
+    assert out["prepared"][0]["input_from"] == "reference"
+    prompt = Path(out["prepared"][0]["prompt_path"]).read_text("utf-8")
+    assert "`reference.jpg`, is the editor's chosen starting point" in prompt
+    # The slot's shape rules, not the art's, and it is not told it is a cover.
+    assert "300 wide by 200 high, not the attached image's (1024 wide by 1536 high)" in prompt
+    assert "front cover" not in prompt
+    kept = ip_jobs.jobs_dir(project) / "map.jpg" / "reference.jpg"
+    assert kept.read_bytes() == (project / "cover" / "art.jpg").read_bytes()
+
+    # A later cover job replaces the art; the run still uses what was prepared.
+    _image(project / "cover" / "art.jpg", (1024, 1536), color=(0, 0, 255))
+    codex = FakeCodex(size=(1200, 800))
+    assert ip_jobs.generate(project, runner=codex)["counts"]["wrote"] == 1
+    sent = Path(codex.calls[0]["cmd"][3])
+    assert sent.name == "reference.jpg" and sent.read_bytes() == kept.read_bytes()
+
+    drawn = next(p for p in _board_row(project, "map.jpg")["pictures"] if p["kind"] == "reference")
+    assert (drawn["key"], drawn["source"], drawn["job_id"]) == ("cover/art.jpg", "job", "map.jpg")
+
+
+def test_a_redo_can_start_from_its_own_earlier_candidate(project: Path):
+    first = {"image": "map.jpg", "mode": "replace", "instruction": "A painted map."}
+    ip_jobs.prepare(project, [first])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1200, 800), color=(1, 2, 3)))
+    cand = ip_jobs.jobs_dir(project) / "map.jpg" / "cand_01.png"
+    drawn = cand.read_bytes()
+
+    redo = {**first, "instruction": "Make it darker.", "reference": "jobs/map.jpg/cand_01.png"}
+    out = ip_jobs.prepare(project, [redo])
+    assert out["status"] == "ok", out
+    # The prompt changed, so the candidate went to previous/ — after it was copied.
+    assert out["prepared"][0]["archived"] == 1 and not cand.exists()
+    kept = ip_jobs.jobs_dir(project) / "map.jpg" / "reference.png"
+    assert kept.read_bytes() == drawn
+
+    # Prepared again unchanged, the candidate it names is gone: the copy stands in.
+    again = ip_jobs.prepare(project, [redo])
+    assert again["status"] == "ok", again
+    assert again["prepared"][0]["archived"] == 0 and kept.read_bytes() == drawn
+
+
+def test_a_redo_keeps_the_picture_it_was_drawn_from_once_cand_01_is_redrawn(project: Path):
+    first = {"image": "map.jpg", "mode": "replace", "instruction": "A painted map."}
+    ip_jobs.prepare(project, [first])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1200, 800), color=(1, 2, 3)))
+    liked = (ip_jobs.jobs_dir(project) / "map.jpg" / "cand_01.png").read_bytes()
+
+    redo = {**first, "instruction": "Make it darker.", "reference": "jobs/map.jpg/cand_01.png"}
+    ip_jobs.prepare(project, [redo])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1200, 800), color=(9, 9, 9)))
+    darker = ip_jobs.jobs_dir(project) / "map.jpg" / "cand_01.png"
+    assert darker.read_bytes() != liked
+
+    # The path now holds the redo's own candidate 1; the name still means the
+    # picture that was liked, and candidate 1 answered it, so it stays.
+    out = ip_jobs.prepare(project, [{**redo, "candidates": 2}])
+    assert out["status"] == "ok", out
+    assert out["prepared"][0]["archived"] == 0 and darker.is_file()
+    kept = ip_jobs.jobs_dir(project) / "map.jpg" / "reference.png"
+    assert kept.read_bytes() == liked
+    codex = FakeCodex(size=(1200, 800))
+    ip_jobs.generate(project, runner=codex)
+    assert Path(codex.calls[0]["cmd"][3]).read_bytes() == liked
+
+
+def test_a_batch_can_draw_from_a_candidate_another_of_its_jobs_archives(project: Path):
+    first = {"image": "map.jpg", "mode": "replace", "instruction": "A painted map."}
+    ip_jobs.prepare(project, [first])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1200, 800), color=(1, 2, 3)))
+    cand = ip_jobs.jobs_dir(project) / "map.jpg" / "cand_01.png"
+    drawn = cand.read_bytes()
+
+    out = ip_jobs.prepare(project, [
+        {**first, "instruction": "A pencil map."},
+        {"image": "compass.png", "mode": "replace", "instruction": "In the map's style.",
+         "reference": "jobs/map.jpg/cand_01.png"},
+    ])
+    assert out["status"] == "ok", out
+    assert not cand.exists()
+    assert (ip_jobs.jobs_dir(project) / "compass.png" / "reference.png").read_bytes() == drawn
+
+
+def test_a_cover_redrawn_from_its_own_candidate_is_not_told_it_is_an_illustration(project: Path):
+    first = {"image": "cover.jpg", "mode": "cover", "instruction": "A schoolroom at dawn."}
+    ip_jobs.prepare(project, [first])
+    ip_jobs.generate(project, runner=FakeCodex(size=(1024, 1536)))
+    out = ip_jobs.prepare(project, [
+        {**first, "instruction": "Warmer.", "reference": "jobs/cover.jpg/cand_01.png"},
+    ])
+    assert out["status"] == "ok", out
+    prompt = Path(out["prepared"][0]["prompt_path"]).read_text("utf-8")
+    assert "`reference.png`, the editor's chosen starting point" in prompt
+    assert "one of the book's own illustrations" not in prompt
+
+
+def test_a_cover_reference_names_the_images_subfolder_it_may_have_meant(project: Path):
+    _image(project / "images" / "cover" / "front.jpg")
+    job = {"image": "map.jpg", "mode": "replace", "instruction": "x", "reference": "cover/front.jpg"}
+    out = ip_jobs.prepare(project, [job])
+    assert out["status"] == "error"
+    assert "write 'images/cover/front.jpg'" in " ".join(out["invalid"][0]["problems"])
+    assert ip_jobs.prepare(project, [{**job, "reference": "images/cover/front.jpg"}])["status"] == "ok"
+
+
+def test_a_snapshot_is_sent_even_beside_a_backup_of_the_same_name(project: Path):
+    _image(project / "cover" / "art.jpg", (1024, 1536), color=(0, 0, 255))
+    _image(project / "images_original" / "cover" / "art.jpg", (1024, 1536), color=(0, 255, 0))
+    ip_jobs.prepare(project, [{"image": "map.jpg", "mode": "replace", "instruction": "x",
+                               "reference": "cover/art.jpg"}])
+    codex = FakeCodex(size=(1200, 800))
+    ip_jobs.generate(project, runner=codex)
+    sent = Path(codex.calls[0]["cmd"][3])
+    assert sent.name == "reference.jpg"
+    assert sent.read_bytes() == (project / "cover" / "art.jpg").read_bytes()
+
+
+def test_a_reference_of_another_kind_replaces_the_old_copy(project: Path):
+    _image(project / "cover" / "art.jpg", (1024, 1536))
+    _image(project / "cover" / "art.png", (1024, 1536), color=(0, 0, 255))
+    job = {"image": "map.jpg", "mode": "replace", "instruction": "x", "reference": "cover/art.jpg"}
+    ip_jobs.prepare(project, [job])
+    ip_jobs.prepare(project, [{**job, "reference": "cover/art.png"}])
+    job_dir = ip_jobs.jobs_dir(project) / "map.jpg"
+    assert sorted(p.name for p in job_dir.glob("reference.*")) == ["reference.png"]
+    assert (job_dir / "reference.png").read_bytes() == (project / "cover" / "art.png").read_bytes()
+
+
+def test_a_replacement_from_the_original_renders_as_before(project: Path):
+    out = ip_jobs.prepare(project, [{"image": "map.jpg", "mode": "replace", "instruction": "x"}])
+    prompt = Path(out["prepared"][0]["prompt_path"]).read_text("utf-8")
+    assert prompt.startswith(
+        "$imagegen\n\nThe attached image, `input.jpg`, is an illustration from the book "
+        '"Home Geography". Make a new illustration to take its place.\n'
+    )
+
+
 @pytest.mark.parametrize(
     "job,needle",
     [
         ({"image": "map.jpg", "mode": "restore", "instruction": "x", "reference": "compass.png"},
          "reference is for a cover job"),
+        ({"image": "map.jpg", "mode": "replace", "instruction": "x", "reference": "cover/art.jpg"},
+         "reference cover/art.jpg: no such file"),
+        ({"image": "map.jpg", "mode": "replace", "instruction": "x", "reference": "jobs/../x.png"},
+         "is not a path inside jobs/"),
+        ({"image": "map.jpg", "mode": "replace", "instruction": "x", "reference": "cover/spec.json"},
+         "is not an image file"),
         ({"image": "cover.jpg", "mode": "cover", "instruction": "x", "reference": "nope.jpg"},
          "reference nope.jpg: no such file"),
         ({"image": "cover.jpg", "mode": "cover", "instruction": "x", "reference": "../x.jpg"},

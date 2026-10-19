@@ -2133,6 +2133,8 @@ def _image_board_url(project_id: str, picture: dict) -> str:
     elif picture["kind"] == "earlier":
         path = (f"image-pass/earlier/{quote(picture['job_id'])}/"
                 f"{quote(picture['stamp'])}/{picture['candidate']}")
+    elif picture["source"] == "job":
+        path = f"image-pass/reference/{quote(picture['job_id'])}"
     elif picture["source"] == "cover":
         path = f"image-pass/cover/{quote(picture['name'])}"
     elif picture["source"] == "images_original":
@@ -2314,6 +2316,21 @@ def serve_image_board_earlier(project_id, job_id, stamp, number):
     if not archive.is_dir():
         return jsonify({"error": "No such candidates"}), 404
     return send_from_directory(str(archive), f"cand_{number:02d}.png")
+
+
+@app.route("/projects/<project_id>/image-pass/reference/<job_id>")
+def serve_image_board_reference(project_id, job_id):
+    """What a job was drawn from when that is not one of the book's images (the
+    cover's art, an earlier candidate): the copy prepare kept in its folder."""
+    from src.image_pass import IMAGE_SUFFIXES, jobs_dir
+
+    if not _safe_id(project_id) or not _safe_id(job_id):
+        return "Bad request", 400
+    job_dir = jobs_dir(_resolve_project_dir(project_id)) / job_id
+    for suffix in IMAGE_SUFFIXES:
+        if (job_dir / f"reference{suffix}").is_file():
+            return send_from_directory(str(job_dir), f"reference{suffix}")
+    return jsonify({"error": "No reference on file"}), 404
 
 
 @app.route("/projects/<project_id>/image-pass/cover/<path:filename>")

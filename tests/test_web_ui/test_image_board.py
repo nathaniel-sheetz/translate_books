@@ -318,6 +318,19 @@ def test_the_two_tabs_are_counted_apart_and_the_cover_is_a_workspace(client, boo
     assert workspace["hero"]["url"].startswith("/projects/imgbook/image-pass/cover/drafts/001.jpg?v=")
 
 
+def test_a_job_drawn_from_its_own_earlier_candidate_shows_that_picture(client, book):
+    ip_jobs.prepare(book, [{
+        "image": "map.jpg", "mode": "replace", "instruction": "Darker.",
+        "reference": "jobs/map.jpg/cand_01.png",
+    }])
+    drawn = next(p for p in _rows(client)[0]["map.jpg"]["pictures"] if p["kind"] == "reference")
+    assert drawn["url"].startswith("/projects/imgbook/image-pass/reference/map.jpg?v=")
+    assert "path" not in drawn
+    served = client.get(drawn["url"])
+    assert served.status_code == 200 and served.mimetype == "image/png"
+    assert client.get("/projects/imgbook/image-pass/reference/nojob").status_code == 404
+
+
 def test_candidates_of_an_earlier_prompt_are_served_from_where_they_were_moved(client, book):
     ip_jobs.prepare(book, [{
         "image": "map.jpg", "mode": "translate", "instruction": "Thinner strokes.",
