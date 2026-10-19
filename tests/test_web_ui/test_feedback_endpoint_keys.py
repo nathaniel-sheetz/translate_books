@@ -86,6 +86,24 @@ def test_key_resolved_for_a_coded_evaluator(client, project):
     assert record["issue_index"] == 1
 
 
+def test_the_finding_message_is_recorded_when_the_surface_sends_none(client, project):
+    """No marking surface sends ``message``; without it a mark an edit orphans
+    carries nothing ``rekey_orphaned_marks.py`` could match it on."""
+    post(client, eval_name="dictionary", issue_index=1, feedback_type="false_positive")
+    assert only_record(project)["message"] == CODED_ISSUE["message"]
+
+    post(client, eval_name="dictionary", issue_index=1, feedback_type="false_positive",
+         message="sent by the client")
+    assert only_record(project)["message"] == "sent by the client"
+
+
+def test_an_unresolvable_finding_records_no_message(client, project):
+    resp = post(client, eval_name="dictionary", issue_index=9, feedback_type="false_positive")
+    assert resp.status_code == 200
+    record = only_record(project)
+    assert record["message"] is None and record["issue_key"] is None
+
+
 def test_key_resolved_for_a_judge(client, project):
     """Judge issues live under ``judges{}``, not ``results[]``."""
     resp = post(client, eval_name="address", issue_index=0, feedback_type="resolved")
@@ -120,7 +138,7 @@ def test_negative_index_does_not_key_the_last_finding(client, project):
 
 
 def test_large_negative_index_does_not_500(client, project):
-    """``_resolve_issue_key`` runs outside the route's try/except, so an
+    """``_resolve_issue`` runs outside the route's try/except, so an
     IndexError there took down the request and lost the mark entirely."""
     resp = post(
         client, eval_name="dictionary", issue_index=-5, feedback_type="resolved"
