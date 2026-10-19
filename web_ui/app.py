@@ -6687,15 +6687,10 @@ def project_chunk_evaluation_llm_judge(project_id, chunk_id):
     return jsonify({"ok": True, "llm_judge": result_dict})
 
 
-def _resolve_issue_key(
+def _resolve_issue(
     project_dir: Path, chunk_id: str, eval_name: str, issue_index: int
-) -> Optional[str]:
-    """Content key for the finding at ``(eval_name, issue_index)``, or None.
-
-    Returns None when the evaluation or the index cannot be resolved; the mark
-    is still recorded, it just falls back to positional matching the way every
-    pre-existing record does.
-    """
+) -> Optional[dict]:
+    """The stored finding at ``(eval_name, issue_index)``, or None."""
     try:
         payload = load_chunk_evaluation(project_dir, chunk_id)
     except Exception:
@@ -6716,7 +6711,20 @@ def _resolve_issue_key(
         return None
 
     issue = issues[issue_index]
-    return issue_key(eval_name, issue) if isinstance(issue, dict) else None
+    return issue if isinstance(issue, dict) else None
+
+
+def _resolve_issue_key(
+    project_dir: Path, chunk_id: str, eval_name: str, issue_index: int
+) -> Optional[str]:
+    """Content key for the finding at ``(eval_name, issue_index)``, or None.
+
+    Returns None when the evaluation or the index cannot be resolved; the mark
+    is still recorded, it just falls back to positional matching the way every
+    pre-existing record does.
+    """
+    issue = _resolve_issue(project_dir, chunk_id, eval_name, issue_index)
+    return issue_key(eval_name, issue) if issue is not None else None
 
 
 @app.route(
@@ -6758,7 +6766,13 @@ def project_chunk_evaluation_feedback(project_id, chunk_id):
     # three marking surfaces (dashboard card, reader review mode, mobile sheet)
     # all already send eval_name + issue_index, and deriving the key server-side
     # keeps them unchanged while making the stored mark survive a re-run.
-    key = _resolve_issue_key(project_dir, chunk_id, eval_name, issue_index)
+    issue = _resolve_issue(project_dir, chunk_id, eval_name, issue_index)
+    key = issue_key(eval_name, issue) if issue is not None else None
+    # No marking surface sends the message, and without it a mark whose key an
+    # edit has moved carries nothing a repair could match it on
+    # (``scripts/rekey_orphaned_marks.py``). The server has the finding anyway.
+    if not message and issue is not None:
+        message = issue.get("message")
 
     # Set by the reader's Apply/Edit button, which marks a finding real when
     # the Save lands; `append_feedback` refuses an unknown value, which reaches

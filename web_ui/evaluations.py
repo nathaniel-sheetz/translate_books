@@ -58,6 +58,13 @@ MACHINE_FEEDBACK_TYPES = frozenset({"applied"})
 
 _ALLOWED_FEEDBACK_TYPES = HUMAN_FEEDBACK_TYPES | MACHINE_FEEDBACK_TYPES
 
+#: The labels :func:`_carry_marks_forward` moves onto a re-keyed finding: the
+#: ones that say the finding was wrong, which an edit elsewhere cannot change.
+#: ``resolved`` and ``applied`` say the text was changed to fix it, so a finding
+#: still standing after a later edit is one the fix did not reach, and showing
+#: it again is the point.
+CARRIED_FEEDBACK_TYPES = frozenset({"false_positive", "bad_message", "missing_context_gap"})
+
 #: Where a ``resolved`` mark came from when the reader's Apply or Edit button
 #: wrote it on a Save. Still a human label — one finding, ruled on by a person —
 #: so it scores as ``resolved`` everywhere; this only says which button.
@@ -155,6 +162,39 @@ def issue_key(eval_name: str, issue: dict[str, Any]) -> str:
     ]
     digest = hashlib.sha256(_KEY_FIELD_SEP.join(parts).encode("utf-8")).hexdigest()
     return digest[:_KEY_LENGTH]
+
+
+# What a coded checker writes into a finding that moves when the text around it
+# moves: the occurrence count dictionary and grouped grammar findings carry, and
+# blacklist's offset. ``location`` is left out of the anchor entirely: for the
+# checkers whose findings move it is nothing but offsets, and for the rest it
+# never tells two findings apart.
+_ANCHOR_VOLATILE_RES = (
+    re.compile(r"\s*\(found \d+ time\(s\)\)"),
+    re.compile(r" at position \d+"),
+)
+
+
+def finding_anchor(eval_name: str, issue: dict[str, Any]) -> tuple[str, ...]:
+    """A finding's identity with every character offset taken out.
+
+    :func:`issue_key` hashes ``location``, which for the coded checkers is an
+    absolute offset (``"Character position 3699"``, ``"char 2297-2304"``), so any
+    edit above a finding gives it a new key and orphans every mark standing on
+    the old one. This is the identity that survives the edit, used only to carry
+    those marks across (:func:`_carry_marks_forward`); the key stays what every
+    stored mark was written against.
+
+    Grammar's message keeps its ``Context: '...'`` snippet on purpose: an edit
+    inside the sentence changes it, and a verdict formed on the old sentence
+    should not vouch for the new one.
+    """
+    message = str(issue.get("message") or "")
+    for pattern in _ANCHOR_VOLATILE_RES:
+        message = pattern.sub("", message)
+    location = issue.get("location")
+    side = location.get("side") if isinstance(location, dict) else None
+    return (eval_name or "", str(issue.get("severity") or ""), str(side or ""), message)
 
 
 def build_dismissed(
@@ -1063,6 +1103,7 @@ def append_feedback(
     key: Optional[str] = None,
     via: Optional[str] = None,
     suggestion_used: Optional[str] = None,
+    carried_from: Optional[str] = None,
 ) -> Path:
     """Append a single feedback record to ``_feedback.jsonl``.
 
@@ -1075,6 +1116,10 @@ def append_feedback(
     :data:`SUGGESTION_USED`) are written only when given, and only on a
     ``resolved`` mark, so every record written before they existed keeps the
     shape it had.
+
+    ``carried_from`` is the old key when this is not a new decision but an
+    existing mark moved onto the key its finding took after an edit
+    (:func:`_carry_marks_forward`). Written only when given.
 
     Raises:
         ValueError: If ``feedback_type`` is not one of the allowed labels, or
@@ -1111,6 +1156,8 @@ def append_feedback(
         record["via"] = via
     if suggestion_used:
         record["suggestion_used"] = suggestion_used
+    if carried_from:
+        record["carried_from"] = carried_from
 
     path = _feedback_file(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1245,6 +1292,7 @@ def append_triage(
     model: Optional[str] = None,
     prompt_version: Optional[str] = None,
     run_id: Optional[str] = None,
+    carried_from: Optional[str] = None,
 ) -> Path:
     """Append one machine-triage verdict to ``_triage.jsonl``.
 
@@ -1255,10 +1303,11 @@ def append_triage(
     coded checker sets ``finding_key``, so :func:`issue_key` falls back to
     hashing ``(eval_name, severity, message, location)`` — and for these two
     checkers ``location`` is a character offset. Any edit to the chunk moves that
-    offset and orphans the verdict. Keeping the term and the rule means re-keying
-    is a script rather than a re-run of the whole pass, and they are the join
-    keys ``replay_dictionary_marks.py`` and ``replay_grammar_marks.py`` already
-    trust.
+    offset and changes the key. :func:`evaluate_and_persist_chunk` carries the
+    verdict onto the new key when it re-evaluates (writing ``carried_from``);
+    the term and rule are what ``scripts/rekey_orphaned_marks.py`` matches on
+    for verdicts orphaned before that existed, and the join keys
+    ``replay_dictionary_marks.py`` and ``replay_grammar_marks.py`` already trust.
 
     Raises:
         ValueError: If ``verdict`` is not one of :data:`TRIAGE_VERDICTS`.
@@ -1284,6 +1333,8 @@ def append_triage(
         "prompt_version": prompt_version,
         "run_id": run_id,
     }
+    if carried_from:
+        record["carried_from"] = carried_from
 
     path = _triage_file(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2005,6 +2056,122 @@ def run_coded_evaluators(
     return results, aggregated, normalized
 
 
+def _carry_marks_forward(
+    project_dir: Path,
+    chunk_id: str,
+    previous_issues: Iterable[Any],
+    new_issues: Iterable[Any],
+    eval_names: Iterable[str],
+) -> int:
+    """Move standing triage verdicts and feedback marks onto re-keyed findings.
+
+    A re-run after an edit gives every finding below the edit a new
+    :func:`issue_key`, because the key hashes a character offset. Without this,
+    each mark on such a finding stops matching anything and the finding comes
+    back as open work, which is what a single save in the chunk editor did to a
+    whole chunk's triage.
+
+    An old finding whose key vanished is paired with a new one whose key
+    appeared when they share a :func:`finding_anchor`, and only when that anchor
+    names the same number of findings before and after; those are zipped in
+    document order. Anything else is left for a re-ask, because a mark carried
+    onto the wrong finding is the one failure this must never have. A pair gets
+    a copy of each record standing on the old key, under the new key with
+    ``carried_from``, unless the new key already has one of its own. Feedback
+    carries only for :data:`CARRIED_FEEDBACK_TYPES`.
+
+    Returns how many records were written.
+    """
+    wanted = set(eval_names)
+
+    def first_occurrences(issues: Iterable[Any]) -> dict[tuple[str, str], dict[str, Any]]:
+        # Fanned-out occurrences of one finding share a key; the first is enough.
+        out: dict[tuple[str, str], dict[str, Any]] = {}
+        for issue in issues:
+            if not isinstance(issue, dict) or issue.get("eval_name") not in wanted:
+                continue
+            name = issue["eval_name"]
+            out.setdefault((name, issue_key(name, issue)), issue)
+        return out
+
+    old = first_occurrences(previous_issues)
+    new = first_occurrences(new_issues)
+    gone = [k for k in old if k not in new]
+    if not gone:
+        return 0
+
+    triaged = build_triaged(load_all_triage_by_chunk(project_dir).get(chunk_id, []))
+    fb_by_key, _ = build_dismissed(load_feedback_for_chunk(project_dir, chunk_id))
+    carryable_fb = {
+        k: r for k, r in fb_by_key.items()
+        if r.get("feedback_type") in CARRIED_FEEDBACK_TYPES
+    }
+    if not any(k in triaged or k in carryable_fb for k in gone):
+        return 0
+
+    def offset(issue: dict[str, Any]) -> int:
+        loc = issue.get("location")
+        start = loc.get("char_start") if isinstance(loc, dict) else None
+        return start if isinstance(start, int) else -1
+
+    def by_anchor(found: dict[tuple[str, str], dict[str, Any]]) -> dict[tuple, list]:
+        groups: dict[tuple, list] = {}
+        for k, issue in found.items():
+            groups.setdefault(finding_anchor(k[0], issue), []).append((k, issue))
+        for members in groups.values():
+            members.sort(key=lambda m: offset(m[1]))
+        return groups
+
+    old_groups = by_anchor(old)
+    new_groups = by_anchor(new)
+
+    written = 0
+    for anchor, old_members in old_groups.items():
+        new_members = new_groups.get(anchor, [])
+        if len(old_members) != len(new_members):
+            continue
+        departed = [m for m in old_members if m[0] not in new]
+        arrived = [m for m in new_members if m[0] not in old]
+        # One edit above the group shifts every member by the same amount. A
+        # delete and an add of the same term keep the count but not the shift,
+        # and zipping those would hang a mark on an occurrence nobody ruled on.
+        shifts = {offset(n[1]) - offset(o[1]) for o, n in zip(departed, arrived)}
+        if len(shifts) > 1:
+            continue
+        for (old_k, _), (new_k, new_issue) in zip(departed, arrived):
+            name, new_key = new_k
+            record = triaged.get(old_k)
+            if record is not None and new_k not in triaged:
+                append_triage(
+                    project_dir, chunk_id, name, new_issue.get("issue_index"),
+                    record.get("verdict"),
+                    key=new_key,
+                    confidence=record.get("confidence"),
+                    reason=record.get("reason"),
+                    term=record.get("term"),
+                    rule_id=record.get("rule_id"),
+                    model=record.get("model"),
+                    prompt_version=record.get("prompt_version"),
+                    run_id=record.get("run_id"),
+                    carried_from=old_k[1],
+                )
+                written += 1
+            mark = carryable_fb.get(old_k)
+            if mark is not None and new_k not in fb_by_key:
+                append_feedback(
+                    project_dir, chunk_id, name, new_issue.get("issue_index"),
+                    mark.get("feedback_type"),
+                    message=new_issue.get("message"),
+                    note=mark.get("note"),
+                    key=new_key,
+                    via=mark.get("via"),
+                    suggestion_used=mark.get("suggestion_used"),
+                    carried_from=old_k[1],
+                )
+                written += 1
+    return written
+
+
 def evaluate_and_persist_chunk(
     project_dir: Path,
     chunk: Chunk,
@@ -2118,6 +2285,20 @@ def evaluate_and_persist_chunk(
         text_sha=chunk_text_sha(chunk.translated_text),
     )
 
+    # After the save, so no mark is ever keyed to findings that failed to
+    # persist. Best-effort: a sidecar hiccup must not fail the edit that got here.
+    if previous is not None:
+        try:
+            _carry_marks_forward(
+                project_dir,
+                chunk.id,
+                previous.get("normalized_issues") or [],
+                [issue.to_dict() for issue in normalized],
+                actually_ran,
+            )
+        except Exception as exc:
+            logger.warning("Carrying marks forward failed for %s: %s", chunk.id, exc)
+
     result: dict = {
         "aggregated": aggregated,
         "issues": [issue.to_dict() for issue in normalized] + carried_issues,
@@ -2143,6 +2324,7 @@ __all__ = [
     "HUMAN_FEEDBACK_TYPES",
     "MACHINE_FEEDBACK_TYPES",
     "issue_key",
+    "finding_anchor",
     "build_dismissed",
     "is_dismissed",
     "feedback_mark",

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.77.1.0] - 2026-10-18
+
+### Fixed
+- **Triage verdicts and dismissals survive an edit to the chunk.** A coded finding's key hashes its character offset, so one save in the chunk editor re-keyed every finding below the edit and reopened all of them. In horses-of-destiny chapter 17 that was 8 of 8 verdicts and the one human dismissal. Re-evaluation now pairs each vanished key with the new key that has the same offset-free identity. It copies the standing triage verdict, and any `false_positive`/`bad_message`/`missing_context_gap` mark, onto the new key with `carried_from`. `resolved` and `applied` marks are not carried.
+  - Carry-forward refuses anything it cannot pair for certain: a change in how many findings share an identity, a new key that already has a record of its own, or a group whose members did not all move by the same distance. The last one covers deleting one occurrence of a blacklisted term while adding another.
+  - A grammar verdict is dropped when the edit lands inside its sentence. A verdict on the old sentence does not vouch for the new one.
+- **The feedback endpoint stores the finding's message.** No marking surface sent one, so a mark that an edit orphaned carried nothing a repair could match it on.
+
+### Added
+- **`scripts/rekey_orphaned_marks.py` recovers marks orphaned before carry-forward existed.** It matches triage records on `term`/`rule_id` and dismissals on their offset-free message. It only appends, never rewrites, and refuses ambiguous, contested or already-occupied targets. It is report-only unless you pass `--write`, and it only considers records written before `--before`, which defaults to the ship date, so it cannot undo a verdict carry-forward dropped on purpose.
+
 ## [0.77.0.0] - 2026-10-17
 
 ### Added
