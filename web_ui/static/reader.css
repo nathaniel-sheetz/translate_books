@@ -1445,6 +1445,13 @@ body {
     height: 0;
 }
 
+/* Several verse lines the aligner merged into one sentence row; reader.js
+   turns the joining spaces into newlines. */
+
+.sentence.verse-merged {
+    white-space: pre-line;
+}
+
 /* Bottom sheet */
 
 .sheet-overlay {
