@@ -382,7 +382,21 @@
     // text reaches the DOM, including the post-correction repaint — otherwise
     // saving an edit to a caption would make the marker reappear.
     function displayEsOf(alignment, text) {
-        return alignment && alignment.caption ? text.replace(CAPTION_MARKER_RE, '') : text;
+        if (!alignment) return text;
+        if (alignment.caption) return text.replace(CAPTION_MARKER_RE, '');
+        // Verse lines the aligner merged into one row: the joining spaces become
+        // newlines (same length, so finding offsets still line up). The offsets
+        // only hold for the text they were computed on, so a Save drops them.
+        const breaks = alignment.verse_inner_breaks;
+        if (breaks && breaks.length) {
+            // Array.from walks code points, matching the server's offsets.
+            const chars = Array.from(text);
+            for (const off of breaks) {
+                if (chars[off] === ' ') chars[off] = '\n';
+            }
+            return chars.join('');
+        }
+        return text;
     }
 
     function renderSentences(alignments) {
@@ -446,6 +460,9 @@
                 span.textContent = displayEs + ' ';
             }
 
+            if (a.verse_inner_breaks && a.verse_inner_breaks.length) {
+                span.classList.add('verse-merged');
+            }
             if (a.confidence === 'low') {
                 span.classList.add('low-confidence');
             }
@@ -2273,6 +2290,7 @@
                 if (result.saved) {
                     alignment.es = correctedEs;
                     alignment.corrected = true;
+                    delete alignment.verse_inner_breaks;
                     // The bookmark finds its sentence by its opening words.
                     if (savedIdx === bookmarkIdx) setBookmark(alignment, true);
 
@@ -2305,6 +2323,7 @@
                 // Optimistic UI update
                 alignment.es = correctedEs;
                 alignment.corrected = true;
+                delete alignment.verse_inner_breaks;
                 if (savedIdx === bookmarkIdx) setBookmark(alignment, true);
                 const el = content.querySelector(`[data-es-idx="${savedIdx}"]`);
                 if (el) {

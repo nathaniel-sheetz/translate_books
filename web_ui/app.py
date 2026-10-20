@@ -1881,29 +1881,50 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
         for ai, a in enumerate(alignments):
             if key_idx >= len(verse_line_keys):
                 break
-            if a.get("para_start"):
+            es_raw = a.get("es", "")
+            if not es_raw.strip():
                 continue
-            es_text = a.get("es", "").strip()
-            if not es_text:
-                continue
-            es_words = " ".join(es_text.split()[:2])
-            target = verse_line_keys[key_idx]
-            matched = False
-            if es_words == target:
-                matched = True
-            elif len(target.split()) >= 2:
-                target_first = target.split()[0]
-                es_first = es_text.split()[0]
-                if target_first and es_first == target_first:
-                    has_exact_later = any(
-                        " ".join(alignments[j].get("es", "").split()[:2]) == target
-                        for j in range(ai + 1, len(alignments))
-                    )
-                    if not has_exact_later:
-                        matched = True
-            if matched:
-                a["verse_line_break"] = True
-                key_idx += 1
+            # A row the aligner merged (es_sentences) can hold several verse
+            # lines joined by single spaces. Each line inside it must consume
+            # its key too, or the walk stalls on that key and every later
+            # line in the chapter loses its break.
+            parts = a.get("es_sentences") or [es_raw]
+            inner_breaks = []
+            cursor = 0
+            for pi, part in enumerate(parts):
+                if key_idx >= len(verse_line_keys):
+                    break
+                part_text = part.strip()
+                pos = es_raw.find(part_text, cursor) if part_text else -1
+                if pos >= 0:
+                    cursor = pos + len(part_text)
+                if not part_text or (pi == 0 and a.get("para_start")):
+                    continue
+                es_words = " ".join(part_text.split()[:2])
+                target = verse_line_keys[key_idx]
+                matched = False
+                if es_words == target:
+                    matched = True
+                elif len(target.split()) >= 2:
+                    target_first = target.split()[0]
+                    es_first = part_text.split()[0]
+                    if target_first and es_first == target_first:
+                        has_exact_later = any(
+                            " ".join(alignments[j].get("es", "").split()[:2]) == target
+                            for j in range(ai + 1, len(alignments))
+                        )
+                        if not has_exact_later:
+                            matched = True
+                if matched:
+                    if pi == 0:
+                        a["verse_line_break"] = True
+                    elif pos > 0 and es_raw[pos - 1] == " ":
+                        inner_breaks.append(pos - 1)
+                    key_idx += 1
+            if inner_breaks:
+                # Offsets of the joining spaces in `es`; reader.js swaps them
+                # for line breaks at display time, so `es` stays byte-identical.
+                a["verse_inner_breaks"] = inner_breaks
 
     # Tag caption paragraphs. The [CAPTION] marker sits at the start of the
     # paragraph's first sentence; the flag is propagated across the rest of the
