@@ -61,6 +61,31 @@ def test_fetch_rdf_reads_the_cache(tmp_path):
     assert error is None and record["lcc"] == ["PT"]
 
 
+def test_fetch_rdf_does_not_cache_an_unparseable_reply(tmp_path, monkeypatch):
+    import requests
+
+    class _Reply:
+        text = "<html><body>Please wait…"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Reply())
+    record, error = gutenberg.fetch_rdf(72577, tmp_path)
+    assert record is None and "unparseable" in error
+    assert not (tmp_path / "gutenberg_72577.rdf").exists()
+
+    # A bad file already in the cache is dropped, so the next call refetches.
+    (tmp_path / "gutenberg_72577.rdf").write_text("<html>", encoding="utf-8")
+    gutenberg.fetch_rdf(72577, tmp_path)
+    assert not (tmp_path / "gutenberg_72577.rdf").exists()
+
+    good = (FIXTURES / "gutenberg_72577.rdf").read_text(encoding="utf-8")
+    monkeypatch.setattr(_Reply, "text", good)
+    record, error = gutenberg.fetch_rdf(72577, tmp_path)
+    assert error is None and (tmp_path / "gutenberg_72577.rdf").exists()
+
+
 def _project(tmp_path: Path) -> Path:
     project = tmp_path / "book"
     (project / ".harness" / "images").mkdir(parents=True)

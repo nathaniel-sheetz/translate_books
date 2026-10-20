@@ -62,7 +62,8 @@ def kdp_form(
         series_value += f" #{series['number']}"
     reading_age = ""
     if audience.get("reading_age_min") is not None or audience.get("reading_age_max") is not None:
-        reading_age = f"{audience.get('reading_age_min', '')}–{audience.get('reading_age_max', '')}"
+        low, high = audience.get("reading_age_min"), audience.get("reading_age_max")
+        reading_age = f"{'' if low is None else low}–{'' if high is None else high}"
     territories = listing.get("territories") or {}
     rows = [
         ("Details", "Language", listing.get("language") or "Spanish"),
@@ -136,12 +137,16 @@ def planned_writes(
     }
 
 
-def _read(path: Path) -> dict[str, Any]:
+def _read(path: Path) -> Optional[dict[str, Any]]:
+    """The JSON object at ``path``: ``{}`` when the file is missing, None when it
+    exists but is not a readable JSON object."""
+    if not path.exists():
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def apply(
@@ -162,19 +167,27 @@ def apply(
     plan = planned_writes(project_dir, listing, defaults, today=today)
     project_path = project_dir / PROJECT_FILE
     project = _read(project_path)
+    if project is None:
+        # Writing over it would drop every key apply does not own.
+        return {"status": "refused", "reason": f"{PROJECT_FILE} exists but is not a readable "
+                "JSON object; fix it by hand first"}
     changes = []
     for key, after in plan["project_json"].items():
         before = project.get(key)
+        if key == "front_matter" and isinstance(before, dict):
+            after = {**before, **after}
         if before != after:
             changes.append({"file": PROJECT_FILE, "field": key, "before": before, "after": after})
             project[key] = after
 
     notice_path = project_dir / EDITION_NOTICE_FILE
     if plan["edition_notice"] is not None:
-        before = _read(notice_path)
-        if before != plan["edition_notice"]:
-            changes.append({"file": EDITION_NOTICE_FILE, "field": "body",
-                            "before": before.get("body"), "after": plan["edition_notice"]["body"]})
+        before = _read(notice_path) or {}
+        for field in ("heading", "body"):
+            if before.get(field) != plan["edition_notice"][field]:
+                changes.append({"file": EDITION_NOTICE_FILE, "field": field,
+                                "before": before.get(field),
+                                "after": plan["edition_notice"][field]})
 
     record = dict(listing)
     record["publishing_rights"] = verdict["rights_mode"]

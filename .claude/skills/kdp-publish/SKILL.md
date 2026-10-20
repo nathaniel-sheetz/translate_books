@@ -96,7 +96,7 @@ Settle every `needs_input` item before drafting:
   be a translation's year (Bambi's 1928 is the Chambers translation; the novel is
   1923). Research it, then confirm it with the user.
 - **`translator`**: `project.json` and the house default disagree. `apply` writes the
-  default. Ask if it isn't obvious.
+  listing's Translator contributor, which the draft takes from the default. Ask if it isn't obvious.
 
 **Settle Publishing Rights.** `facts.publishing_rights_default` is the house answer:
 - **`public_domain`**: "This is a public domain work". The title carries the

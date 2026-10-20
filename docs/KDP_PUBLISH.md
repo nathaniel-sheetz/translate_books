@@ -189,7 +189,7 @@ Sources: KDP Help G200743940 (public domain), G201298500 (keywords), G200652170
 ## Tests
 
 - `tests/test_book_metadata.py`: resolution order, opt-in, overrides.
-- `tests/test_kdp_validate.py`: every error and warning code.
+- `tests/test_kdp_validate.py`: the error and warning codes.
 - `tests/test_kdp_facts.py`: URL forms, RDF parsing, rights flags, footnote and image
   counts.
 - `tests/test_kdp_amazon.py`: parsers against trimmed live pages in

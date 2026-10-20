@@ -9,7 +9,6 @@ each thing ``apply`` asked for against what is actually in the file.
 
 from __future__ import annotations
 
-import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Any, Optional
 
 from src.book_metadata import load_book_metadata
 from src.kdp.gutenberg import names_trademark
+from src.kdp.validate import _DESCRIPTOR_RE
 
 _NS = {
     "opf": "http://www.idpf.org/2007/opf",
@@ -92,7 +92,7 @@ def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any
     main_titles = [t for i, t in got["titles"] if i != "subtitle"]
     main_title = main_titles[0] if main_titles else ""
     _check("title", main_title == want["title"], f"OPF {main_title!r}, project.json {want['title']!r}")
-    _check("title_has_no_descriptor", not re.search(r"\((?:Translated|Traducid)", main_title),
+    _check("title_has_no_descriptor", not _DESCRIPTOR_RE.search(main_title),
            "the KDP descriptor belongs in the KDP title field, not the book")
     if want["subtitle"]:
         subtitle = dict(got["titles"]).get("subtitle", "")

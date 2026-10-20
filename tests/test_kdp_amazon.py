@@ -1,5 +1,6 @@
 """Tests for src.kdp.amazon parsers and src.kdp.suggest, offline against trimmed pages."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -121,3 +122,82 @@ def test_collect_aggregates_and_filters():
     expanded = suggest.collect(["bambi"], do_expand=True, delay=0, fetch=fake)
     assert expanded["prefixes_queried"] == 27
     assert {p["phrase"]: p["hits"] for p in expanded["phrases"]}["bambi"] == 2
+
+
+# ── kdp_publish comps / category, against a fake session ────────────────────
+
+class _FakeSession:
+    """Stands in for AmazonSession: ``failing`` ASINs/nodes raise PageError."""
+
+    failing: set = set()
+
+    def __init__(self, **kwargs):
+        self.pages_loaded = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def _load(self, key):
+        self.pages_loaded += 1
+        if key in self.failing:
+            raise amazon.BlockedError(f"blocked {key}")
+
+    def search(self, query):
+        self._load(query)
+        return []
+
+    def listing(self, asin):
+        self._load(asin)
+        return {"asin": asin, "title": f"Book {asin}", "language": "Spanish", "bsr": {}}
+
+    def bestsellers(self, node, store="digital-text"):
+        self._load(node)
+        return {"name": f"Node {node}", "tree_label": node, "path": [node],
+                "siblings": [], "children": [], "items": []}
+
+
+def _comps_args(**changes):
+    import argparse
+
+    args = dict(query=None, asin=None, reset=False, refresh=False, max=5, delay=0, top=5)
+    args.update(changes)
+    return argparse.Namespace(**args)
+
+
+def test_comps_retries_errors_and_keeps_good_listings(tmp_path, monkeypatch):
+    from scripts import kdp_publish
+
+    monkeypatch.setattr(amazon, "AmazonSession", _FakeSession)
+    monkeypatch.setattr(_FakeSession, "failing", {"B2", "bad query"})
+    first = kdp_publish.cmd_comps(_comps_args(asin=["B1", "B2"], query=["bad query"]), tmp_path)
+    assert [b.get("error") is not None for b in first["books"]] == [False, True]
+    assert first["queries"][0]["error"] == "blocked bad query"
+
+    # A rerun without --refresh retries B2 only.
+    monkeypatch.setattr(_FakeSession, "failing", set())
+    second = kdp_publish.cmd_comps(_comps_args(asin=["B1", "B2"]), tmp_path)
+    assert [b["asin"] for b in second["books"]] == ["B2"]
+
+    # A failed --refresh keeps the listing B1 already had.
+    monkeypatch.setattr(_FakeSession, "failing", {"B1"})
+    kdp_publish.cmd_comps(_comps_args(asin=["B1"], refresh=True), tmp_path)
+    doc = (tmp_path / ".harness" / "kdp" / "comps.json").read_text(encoding="utf-8")
+    listings = {c["asin"]: c for c in json.loads(doc)["listings"]}
+    assert listings["B1"]["title"] == "Book B1" and "error" not in listings["B1"]
+
+
+def test_category_keeps_the_nodes_that_loaded(tmp_path, monkeypatch):
+    import argparse
+
+    from scripts import kdp_publish
+
+    monkeypatch.setattr(amazon, "AmazonSession", _FakeSession)
+    monkeypatch.setattr(_FakeSession, "failing", {"B"})
+    args = argparse.Namespace(node=["A", "B"], store="digital-text", sample="", delay=0)
+    result = kdp_publish.cmd_category(args, tmp_path)
+    assert [c["node"] for c in result["categories"]] == ["A"]
+    assert result["errors"] == [{"node": "B", "error": "blocked B"}]
+    assert (tmp_path / ".harness" / "kdp" / "categories.json").exists()

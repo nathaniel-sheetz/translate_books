@@ -44,7 +44,11 @@ INSTALL_HINT = (
 )
 
 
-class BlockedError(RuntimeError):
+class PageError(RuntimeError):
+    """One page would not load: a timeout, a network error, or a block."""
+
+
+class BlockedError(PageError):
     """Amazon served a captcha or an error page instead of the one asked for."""
 
 
@@ -259,7 +263,8 @@ class AmazonSession:
 
     Use as a context manager. ``fetch`` returns page HTML, retrying once (after
     a fresh homepage visit) when the store serves a captcha or error page, and
-    raises ``BlockedError`` if it does so twice.
+    raises ``BlockedError`` if it does so twice, or ``PageError`` when the page
+    does not load at all. A browser that will not start raises ``RuntimeError``.
     """
 
     def __init__(self, *, delay: float = 1.5, timeout_ms: int = 45000, headless: bool = True):
@@ -271,16 +276,24 @@ class AmazonSession:
 
     def __enter__(self) -> "AmazonSession":
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.sync_api import Error as PlaywrightError, sync_playwright
         except ImportError as exc:
             raise RuntimeError(INSTALL_HINT) from exc
-        self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=self.headless)
-        context = self._browser.new_context(
-            user_agent=_UA, locale="en-US", viewport={"width": 1366, "height": 900},
-        )
-        self._page = context.new_page()
-        self._warm()
+        self._pw_error = PlaywrightError
+        try:
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(headless=self.headless)
+            context = self._browser.new_context(
+                user_agent=_UA, locale="en-US", viewport={"width": 1366, "height": 900},
+            )
+            self._page = context.new_page()
+            self._warm()
+        except BaseException as exc:
+            # __exit__ never runs when __enter__ raises: close what started.
+            self.__exit__(None, None, None)
+            if isinstance(exc, PlaywrightError):
+                raise RuntimeError(f"the browser session would not start: {exc}") from exc
+            raise
         return self
 
     def __exit__(self, *exc) -> None:
@@ -291,17 +304,22 @@ class AmazonSession:
             if self._pw:
                 self._pw.stop()
 
+    def _goto(self, url: str) -> str:
+        try:
+            self._page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            time.sleep(self.delay)
+            return self._page.content()
+        except self._pw_error as exc:
+            raise PageError(f"{url} did not load: {exc}") from exc
+
     def _warm(self) -> None:
-        self._page.goto(BASE + "/", wait_until="domcontentloaded", timeout=self.timeout_ms)
-        time.sleep(self.delay)
+        self._goto(BASE + "/")
 
     def fetch(self, path_or_url: str) -> str:
         url = path_or_url if path_or_url.startswith("http") else BASE + path_or_url
         for attempt in range(2):
-            self._page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-            time.sleep(self.delay)
+            html = self._goto(url)
             self.pages_loaded += 1
-            html = self._page.content()
             if not is_blocked(html):
                 return html
             if attempt == 0:

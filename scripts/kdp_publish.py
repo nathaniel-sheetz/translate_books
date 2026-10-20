@@ -177,6 +177,10 @@ def cmd_suggest(args: argparse.Namespace, project_dir: Path) -> dict:
 def _merge_comps(existing: dict | None, new: list[dict], queries: list[dict]) -> dict:
     by_asin = {c["asin"]: c for c in (existing or {}).get("listings") or [] if c.get("asin")}
     for listing in new:
+        old = by_asin.get(listing["asin"])
+        # A failed --refresh keeps the listing it already had.
+        if listing.get("error") and old and not old.get("error"):
+            continue
         by_asin[listing["asin"]] = listing
     return {
         "queries": ((existing or {}).get("queries") or []) + queries,
@@ -208,14 +212,19 @@ def cmd_comps(args: argparse.Namespace, project_dir: Path) -> dict:
         _die("pass at least one --query or --asin")
     path = work_dir(project_dir) / "comps.json"
     existing = None if args.reset else _read_json(path)
-    seen = {c.get("asin") for c in (existing or {}).get("listings") or []}
+    # An ASIN that errored last time is retried, not counted as fetched.
+    seen = {c.get("asin") for c in (existing or {}).get("listings") or [] if not c.get("error")}
     fetched: list[dict] = []
     queries: list[dict] = []
     try:
         with amazon.AmazonSession(delay=args.delay) as session:
             targets: list[str] = list(args.asin or [])
             for query in args.query or []:
-                results = session.search(query)
+                try:
+                    results = session.search(query)
+                except amazon.PageError as exc:
+                    queries.append({"query": query, "results": 0, "asins": [], "error": str(exc)})
+                    continue
                 organic = [r for r in results if not r["sponsored"]]
                 queries.append({"query": query, "results": len(results),
                                 "asins": [r["asin"] for r in organic[:args.max]]})
@@ -225,7 +234,7 @@ def cmd_comps(args: argparse.Namespace, project_dir: Path) -> dict:
                     continue
                 try:
                     fetched.append(session.listing(asin))
-                except amazon.BlockedError as exc:
+                except amazon.PageError as exc:
                     fetched.append({"asin": asin, "error": str(exc)})
             pages = session.pages_loaded
     except RuntimeError as exc:
@@ -239,7 +248,8 @@ def cmd_comps(args: argparse.Namespace, project_dir: Path) -> dict:
         "pages_loaded": pages,
         "fetched": len(fetched),
         "total_listings": len(doc["listings"]),
-        "queries": [{"query": q["query"], "results": q["results"], "kept": len(q["asins"])} for q in queries],
+        "queries": [{"query": q["query"], "results": q["results"], "kept": len(q["asins"]),
+                     **({"error": q["error"]} if q.get("error") else {})} for q in queries],
         "books": [
             {"asin": c.get("asin"), "title": (c.get("title") or "")[:60],
              "language": c.get("language"), "reading_age": c.get("reading_age"),
@@ -254,14 +264,23 @@ def cmd_comps(args: argparse.Namespace, project_dir: Path) -> dict:
 def cmd_category(args: argparse.Namespace, project_dir: Path) -> dict:
     from src.kdp import amazon
 
-    sample_ranks = [int(x) for x in args.sample.split(",") if x.strip()]
+    try:
+        sample_ranks = [int(x) for x in args.sample.split(",") if x.strip()]
+    except ValueError:
+        _die("--sample takes comma-separated integers")
     path = work_dir(project_dir) / "categories.json"
     existing = _read_json(path) or {}
     by_node = {c["node"]: c for c in existing.get("categories") or []}
+    errors: list[dict] = []
     try:
         with amazon.AmazonSession(delay=args.delay) as session:
             for node in args.node:
-                page = session.bestsellers(node, store=args.store)
+                try:
+                    page = session.bestsellers(node, store=args.store)
+                except amazon.PageError as exc:
+                    # Keep the nodes that did load; an earlier run's entry stays as it was.
+                    errors.append({"node": node, "error": str(exc)})
+                    continue
                 by_rank = {item["rank"]: item for item in page["items"]}
                 sample = []
                 for rank in sample_ranks:
@@ -271,7 +290,7 @@ def cmd_category(args: argparse.Namespace, project_dir: Path) -> dict:
                     try:
                         detail = session.listing(item["asin"])
                         overall = detail["bsr"]["overall"]
-                    except amazon.BlockedError:
+                    except amazon.PageError:
                         overall = None
                     sample.append({"category_rank": rank, "asin": item["asin"],
                                    "title": item["title"][:80], "overall": overall})
@@ -296,8 +315,9 @@ def cmd_category(args: argparse.Namespace, project_dir: Path) -> dict:
              "path": " › ".join(by_node[n]["path"]),
              "children": len(by_node[n]["children"]),
              "sample": [f"#{s['category_rank']}: overall {s['overall']}" for s in by_node[n]["sample"]]}
-            for n in args.node
+            for n in args.node if n in by_node and not any(e["node"] == n for e in errors)
         ],
+        "errors": errors,
     }
 
 

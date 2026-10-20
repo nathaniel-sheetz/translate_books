@@ -1034,7 +1034,8 @@ def main():
     parser.add_argument("--source-lang", default="English", help="Source language name (default: English)")
     parser.add_argument("--target-lang", default="Spanish", help="Target language name (default: Spanish)")
     parser.add_argument("--source-lang-code", default="en", help="Source language code (default: en)")
-    parser.add_argument("--target-lang-code", default="es", help="Target language code (default: es)")
+    parser.add_argument("--target-lang-code", default=None,
+                        help="Target language code (default: project.json's target_lang_code, else es)")
 
     # Translation API
     parser.add_argument("--provider", default=default_provider_arg(), type=provider_arg,

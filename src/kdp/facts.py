@@ -228,6 +228,8 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
     harness = _obj(project_dir / ".harness" / "config.json")
     answers = _obj(project_dir / ".harness" / "style_answers.json")
     ingest = _obj(project_dir / "ingest_report.json").get("metadata") or {}
+    if not isinstance(ingest, dict):
+        ingest = {}
     cover = _obj(project_dir / "cover" / "spec.json")
     difficulty = _obj(project_dir / "difficulty.json").get("book") or {}
     style = _obj(project_dir / "style.json").get("content") or ""
@@ -267,7 +269,8 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         needs_input.append({
             "field": "translator",
             "why": f"project.json spells it {translator_project!r}; the house default is "
-                   f"{translator_default!r}. apply writes the default unless told otherwise.",
+                   f"{translator_default!r}. apply writes the listing's Translator contributor "
+                   f"(draft it from the default unless told otherwise).",
         })
     if not (project.get("author") or harness.get("author") or ingest.get("creator")):
         needs_input.append({"field": "author", "why": "No author recorded anywhere."})

@@ -194,3 +194,42 @@ def test_owned_copyright_form_and_report(tmp_path):
     result = kdp_listing.apply(project, OWNED, DEFAULTS, today=TODAY)
     record = json.loads((project / "kdp_listing.json").read_text(encoding="utf-8"))
     assert result["status"] == "applied" and record["publishing_rights"] == "own_copyright"
+
+
+def test_apply_refuses_an_unreadable_project_json(tmp_path):
+    project = _project(tmp_path)
+    broken = '{"title": "Old", "chapter_manifest": [],}'
+    (project / "project.json").write_text(broken, encoding="utf-8")
+    for dry_run in (True, False):
+        result = kdp_listing.apply(project, _listing(), DEFAULTS, dry_run=dry_run, today=TODAY)
+        assert result["status"] == "refused" and "project.json" in result["reason"]
+    assert (project / "project.json").read_text(encoding="utf-8") == broken
+    assert not (project / "kdp_listing.json").exists()
+
+
+def test_apply_merges_front_matter(tmp_path):
+    project = _project(tmp_path)
+    (project / "project.json").write_text(json.dumps(
+        {"title": "Old", "front_matter": {"translator_label": "Versión de", "title_page": False}}),
+        encoding="utf-8")
+    kdp_listing.apply(project, _listing(), DEFAULTS, today=TODAY)
+    written = json.loads((project / "project.json").read_text(encoding="utf-8"))
+    assert written["front_matter"] == {"translator_label": "Versión de", "title_page": True}
+
+
+def test_dry_run_names_a_heading_only_notice_change(tmp_path):
+    project = _project(tmp_path)
+    notice = _listing()["epub"]["edition_notice"]
+    (project / "edition_notice.json").write_text(
+        json.dumps({"heading": "Otro", "body": notice["body"]}), encoding="utf-8")
+    result = kdp_listing.apply(project, _listing(), DEFAULTS, dry_run=True, today=TODAY)
+    notice_changes = [c for c in result["changes"] if c["file"] == "edition_notice.json"]
+    assert notice_changes == [{"file": "edition_notice.json", "field": "heading",
+                               "before": "Otro", "after": "Créditos"}]
+
+
+def test_kdp_form_reading_age_with_one_bound():
+    listing = _listing()
+    listing["primary_audience"] = {"reading_age_min": None, "reading_age_max": 14}
+    rows = {r["field"]: r["value"] for r in kdp_listing.kdp_form(listing, DEFAULTS)}
+    assert rows["Reading age"] == "–14"

@@ -282,3 +282,42 @@ def test_rights_mode_falls_back_to_the_house_default():
     assert check(listing, {"publishing_rights": "own_copyright"})["ok"]
     assert "missing_descriptor" in _codes(check(listing))
     assert "missing_descriptor" in _codes(check(_with(publishing_rights="nonsense", descriptor="")))
+
+
+@pytest.mark.parametrize("paragraph", [
+    "<p>Nace en el bosque.</p><p>Es la historia de un cervatillo.</p>",
+    "<p>Felix Salten (1869 - 1945) la escribió en Viena.</p>",
+    "<p>Más de 10.000.000 de copias vendidas.</p>",
+])
+def test_description_false_positives_pass(paragraph):
+    listing = _with(description_html=GOOD["description_html"] + paragraph)
+    assert check(listing)["ok"], check(listing)["errors"]
+
+
+def test_a_real_phone_number_still_fails():
+    listing = _with(description_html=GOOD["description_html"] + "<p>Llame al +34 912 345 678.</p>")
+    assert "description_phone" in _codes(check(listing))
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Más en www.ejemplo.com", "description_url"),
+    ("Del Proyecto Gutenberg", "gutenberg_mention"),
+])
+def test_epub_description_override_is_checked(text, code):
+    listing = _with(epub={"description": text})
+    issues = [i for i in check(listing)["errors"] if i["code"] == code]
+    assert [i["field"] for i in issues] == ["epub.description"]
+
+
+def test_a_null_phrase_is_not_a_keyword():
+    keywords = copy.deepcopy(GOOD["keywords"][:6]) + [{"phrase": None, "evidence": "x"}]
+    assert "keyword_count" in _codes(check(_with(keywords=keywords)))
+
+
+def test_keyword_evidence_skips_a_blank_slot():
+    keywords = [{"phrase": "", "evidence": "x"}] + copy.deepcopy(GOOD["keywords"])
+    del keywords[3]["evidence"]
+    result = check(_with(keywords=keywords))
+    flagged = [(w["field"], w["detail"]) for w in result["warnings"]
+               if w["code"] == "keyword_no_evidence"]
+    assert flagged == [("keywords[3]", f"{keywords[3]['phrase']!r} cites no search evidence.")]

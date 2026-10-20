@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.0.0] - 2026-10-20
+
+### Added
+- **A `kdp-publish` skill takes a finished translation to a Kindle listing.** Its work is done by a new CLI, `scripts/kdp_publish.py`, and the `src/kdp` package.
+  - **`facts`** gathers what is known about the book and this edition. That covers the Gutenberg catalog record, rights flags, editorial footnotes, image-pass changes, the AI models used, and how far the final text moved from the model's drafts.
+  - **`suggest`, `comps` and `category`** research Amazon.com. `suggest` collects search autocomplete phrases. `comps` reads the Best Sellers Rank ladders of comparable books, with node ids. `category` measures demand in a category at ranks 1, 10 and 20.
+  - **`check`** tests a drafted listing against KDP's rules: 7 keywords, 3 categories, the description's length and tags, and no URLs, prices, emoji or Project Gutenberg trademark.
+  - **`report`** writes a dated report for approval.
+  - **`apply`** writes the approved listing to `project.json`, `edition_notice.json` and `kdp_listing.json`.
+  - **`verify-epub`** checks that a built EPUB carries the approved metadata.
+- **Publishing Rights is either public domain or owned copyright.**
+  - Public domain requires the title descriptor and an opening bullet summary of 80 characters or fewer per bullet. The bullets may follow one short lead-in line ending in a colon.
+  - Owned copyright must state its `copyright_basis`.
+- **`build_epub` gains subtitle, subjects and date.** It can also add a title page and a copyright page before nav; both are opt-in.
+- Per-user defaults (`prompts/kdp_defaults.json`) and description examples are gitignored, with tracked `.example` twins.
+- Playwright is an optional dependency (`requirements-kdp.txt`), needed only for `comps` and `category`.
+
+### Changed
+- **`src/book_metadata.py` is now the one source of EPUB metadata.** `harness.py epub`, `build_epub.py`, `translate_book.py`, `corrections_apply` and the web UI all read it. A CLI build now carries the Spanish title, translator, description, rights and publisher that the web UI already wrote. Books without the new keys build as before.
+- `translate_book.py --target-lang-code` now defaults to `project.json`'s `target_lang_code`, then `es`.
+
+### Fixed
+- **`apply` refuses a `project.json` that won't parse.** Before, it rewrote the file with only the KDP fields, which dropped the chapter manifest and every other key.
+- **`apply` keeps the rest of `front_matter`.** Before, it replaced the whole block with `title_page`, which dropped keys such as `translator_label`.
+- **Spanish descriptions no longer fail on two false errors.**
+  - A paragraph that opens with "Es" was read as a `.es` web address.
+  - Year spans such as "(1869 - 1945)" and counts such as "10.000.000" were read as phone numbers.
+- An `epub.description` override gets the same URL, email, phone, price and trademark checks as the description.
+- A keyword with a null phrase no longer fills a slot as "None". A blank slot no longer shifts the keyword-evidence warnings onto the wrong phrases.
+- **`comps` and `category` keep their results when a page fails.**
+  - A page that times out or is blocked is recorded per query, ASIN or node, and the run moves on. Before, the run stopped and wrote nothing.
+  - A browser that won't start exits with one JSON error and closes what it started.
+  - An ASIN that errored is retried on the next run. A failed `--refresh` keeps the listing it already had.
+- An unparseable Gutenberg RDF reply is no longer cached, and a bad cached copy is deleted so the next call fetches again.
+- The web UI's Build EPUB saves only the author typed in the form, not the fallback the resolver found.
+- `verify-epub` catches every KDP descriptor in the book's title, including "(Annotated)", "(Illustrated)" and "(Traducción…)".
+- `category --sample` with a value that isn't a number exits with a JSON error instead of a traceback.
+- A dry run reports a change to the edition notice's heading as a heading change.
+- `kdp_form` no longer prints "None" in a reading age with only one bound.
+- A non-list `subjects` value or a non-object ingest metadata block no longer crashes an EPUB build.
+
 ## [0.77.2.0] - 2026-10-19
 
 ### Added

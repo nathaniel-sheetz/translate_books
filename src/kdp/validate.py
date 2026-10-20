@@ -62,7 +62,10 @@ _STOP = {
 }
 _URL_RE = re.compile(r"(https?://|www\.|\b[\w-]+\.(?:com|net|org|mx|es)\b)", re.I)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
-_PHONE_RE = re.compile(r"\+?\d[\d\s().-]{8,}\d")
+# Nine or more digits, but not a thousands-grouped count ("10.000.000 de copias").
+_PHONE_RE = re.compile(r"(?!\d{1,3}(?:[.,]\d{3})+\b)\+?(?:\d[\s().-]*){8,}\d")
+# Block tags end a run of text: "bosque.</p><p>Es" must not read as "bosque.Es".
+_BLOCK_TAGS = {"p", "br", "li", "ul", "ol", "h4", "h5", "h6"}
 _PRICE_RE = re.compile(r"[$€]\s?\d|\b\d+(?:[.,]\d\d)?\s?(?:USD|dólares|pesos)\b", re.I)
 _EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF]")
 
@@ -92,6 +95,8 @@ class _Tags(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
         self.tags.append(tag)
+        if tag in _BLOCK_TAGS:
+            self.text.append(" ")
         if self._state == "start" and tag in ("ul", "ol"):
             self._state = "in_list"
         if self._state == "in_list":
@@ -101,6 +106,8 @@ class _Tags(HTMLParser):
                 self._item = []
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in _BLOCK_TAGS:
+            self.text.append(" ")
         if self._state != "in_list":
             return
         if tag == "li":
@@ -299,24 +306,28 @@ def check(
                        f"Opening bullet {item!r} is {len(item)} characters "
                        f"(limit {OPENING_SUMMARY_MAX} per bullet).", "description_html")
     text = parsed["text"]
-    for code, pattern, what in (
-        ("description_url", _URL_RE, "a URL or website"),
-        ("description_email", _EMAIL_RE, "an email address"),
-        ("description_phone", _PHONE_RE, "a phone number"),
-        ("description_price", _PRICE_RE, "a price"),
-        ("description_emoji", _EMOJI_RE, "an emoji"),
-    ):
-        match = pattern.search(text)
-        if match:
-            _issue(errors, code, f"The description contains {what} ({match.group(0)!r}).",
-                   "description_html")
+    # An epub.description override goes straight to dc:description: same rules.
+    epub_description = str((listing.get("epub") or {}).get("description") or "")
+    for field, value in (("description_html", text), ("epub.description", epub_description)):
+        for code, pattern, what in (
+            ("description_url", _URL_RE, "a URL or website"),
+            ("description_email", _EMAIL_RE, "an email address"),
+            ("description_phone", _PHONE_RE, "a phone number"),
+            ("description_price", _PRICE_RE, "a price"),
+            ("description_emoji", _EMOJI_RE, "an emoji"),
+        ):
+            match = pattern.search(value)
+            if match:
+                _issue(errors, code, f"The description contains {what} ({match.group(0)!r}).",
+                       field)
 
     # ── keywords ──
-    keywords = [
-        str(k.get("phrase") if isinstance(k, dict) else k or "").strip()
+    keyword_pairs = [
+        (str((k.get("phrase") if isinstance(k, dict) else k) or "").strip(), k)
         for k in listing.get("keywords") or []
     ]
-    keywords = [k for k in keywords if k]
+    keyword_pairs = [(phrase, entry) for phrase, entry in keyword_pairs if phrase]
+    keywords = [phrase for phrase, _ in keyword_pairs]
     if len(keywords) != KEYWORD_SLOTS:
         _issue(errors, "keyword_count",
                f"{len(keywords)} keywords; fill all {KEYWORD_SLOTS} slots.", "keywords")
@@ -372,7 +383,7 @@ def check(
             _issue(warnings, "keyword_duplicate",
                    f"{phrase!r} has the same words as {seen[key]!r}.", field)
         seen.setdefault(key, phrase)
-        entry = (listing.get("keywords") or [])[i - 1]
+        entry = keyword_pairs[i - 1][1]
         if isinstance(entry, dict) and not entry.get("evidence"):
             _issue(warnings, "keyword_no_evidence",
                    f"{phrase!r} cites no search evidence.", field)
@@ -433,7 +444,8 @@ def check(
     epub = listing.get("epub") or {}
     notice = (epub.get("edition_notice") or {}).get("body") or ""
     for field, value in (("title", title), ("subtitle", subtitle),
-                         ("description_html", text), ("epub.edition_notice", notice),
+                         ("description_html", text), ("epub.description", epub_description),
+                         ("epub.edition_notice", notice),
                          ("epub.rights", str(epub.get("rights") or ""))):
         if names_trademark(value):
             _issue(errors, "gutenberg_mention",

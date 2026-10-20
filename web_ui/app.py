@@ -9383,7 +9383,8 @@ def build_epub_route(project_id):
         else:
             metadata[key] = str(config.get(key, "") or "").strip()
     # Also persist author/title when supplied so the form is the source of truth.
-    for key, val in (("author", author), ("title", data.get("title") or "")):
+    # Only what the form sent: a resolver fallback must not get written back.
+    for key, val in (("author", data.get("author") or ""), ("title", data.get("title") or "")):
         if val and config.get(key, "") != val:
             config[key] = val
             config_dirty = True

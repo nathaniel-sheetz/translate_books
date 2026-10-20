@@ -71,6 +71,13 @@ def test_corrupt_json_is_treated_as_missing(tmp_path):
     assert load_book_metadata(tmp_path)["title"] == ""
 
 
+def test_non_list_subjects_are_ignored(tmp_path):
+    _write(tmp_path / "project.json", {"spanish_title": "Bambi", "subjects": 5})
+    _write(tmp_path / "ingest_report.json", {"metadata": "not an object"})
+    meta = load_book_metadata(tmp_path)
+    assert meta["subjects"] == [] and meta["title"] == "Bambi"
+
+
 def test_epub_kwargs_override_wins_and_blanks_become_none(tmp_path):
     _write(tmp_path / "project.json", {"spanish_title": "Bambi", "author": "Salten"})
     kwargs = epub_kwargs(tmp_path, title="Override", author=None, language="")

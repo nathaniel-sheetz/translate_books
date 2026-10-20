@@ -12,7 +12,7 @@ which button built it.
 ``load_book_metadata`` is the one resolver. ``project.json`` is the source of
 truth (the web UI's Export tab and ``kdp_publish.py apply`` both write it);
 the harness config and the ingest report are fallbacks for the title and the
-author only. Every field beyond those is opt-in: a book whose ``project.json``
+author (and the harness config for the language). Every field beyond those is opt-in: a book whose ``project.json``
 lacks a key builds without it, exactly as before.
 """
 
@@ -73,6 +73,8 @@ def load_book_metadata(project_dir: Path) -> dict[str, Any]:
     subjects = project.get("subjects") or []
     if isinstance(subjects, str):
         subjects = [subjects]
+    elif not isinstance(subjects, list):
+        subjects = []
     front_matter = project.get("front_matter")
     note_heading, note_body = _note(project_dir / TRANSLATOR_NOTE_FILE)
     notice_heading, notice_body = _note(project_dir / EDITION_NOTICE_FILE)

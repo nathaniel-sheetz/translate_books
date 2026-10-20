@@ -166,12 +166,16 @@ def fetch_rdf(book_id: int, cache_dir: Path, *, timeout: float = 30.0) -> tuple[
             xml_text = resp.text
         except Exception as exc:  # noqa: BLE001 - catalog facts are advisory
             return None, f"could not fetch Gutenberg RDF for #{book_id}: {exc}"
+    try:
+        record = parse_rdf(xml_text)
+    except (ET.ParseError, ValueError) as exc:
+        # Drop a bad cache (an HTML interstitial, a truncated file) so the next call refetches.
+        cache.unlink(missing_ok=True)
+        return None, f"unparseable Gutenberg RDF for #{book_id}: {exc}"
+    if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(xml_text, encoding="utf-8")
-    try:
-        return parse_rdf(xml_text), None
-    except (ET.ParseError, ValueError) as exc:
-        return None, f"unparseable Gutenberg RDF for #{book_id}: {exc}"
+    return record, None
 
 
 def rights_flags(record: Optional[dict], *, today: Optional[date] = None) -> list[dict[str, str]]:
