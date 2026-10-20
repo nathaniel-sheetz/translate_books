@@ -1,0 +1,31 @@
+{
+  "about": "Per-user defaults for scripts/kdp_publish.py. Copy to kdp_defaults.json (gitignored) to make them your own; this example is what a clone without one reads. `translator` is the one spelling every listing and every EPUB uses. `descriptors` is the public-domain title descriptor KDP requires in the title field ('(Translated)', '(Annotated)' or '(Illustrated)'), keyed by what the edition adds; the Spanish wording is a house choice that check flags for manual review. `edition_notice` is the template for the copyright page: {placeholders} are filled from facts.json and the listing, and a line whose placeholder has no value is dropped. Never name Project Gutenberg anywhere here: its trademark license bars the name on a commercial derivative. `keyword_stoplist` holds words a keyword should not spend characters on (KDP: 'information common to most items in the category'); check warns on them, it does not refuse. `subtitle` and `series` are the house's standing KDP Subtitle and Series fields (blank: decided per book). `variety_label` is how listings name the Spanish ('español latino'); blank lets the book's dialect decide. `publishing_rights` is the house answer to KDP's Publishing Rights question, 'public_domain' or 'own_copyright' (claimed on the translation and any original content; the skill confirms it per book).",
+  "translator": "Translator Name",
+  "publisher": "Imprint Name",
+  "publishing_rights": "public_domain",
+  "series": "",
+  "subtitle": "",
+  "variety_label": "",
+  "marketplace": "amazon.com",
+  "marketplace_id": "ATVPDKIKX0DER",
+  "locale": "es_US",
+  "descriptors": {
+    "translated": "(Traducido)",
+    "translated+annotated": "(Traducido y anotado)",
+    "translated+illustrated": "(Traducido e ilustrado)",
+    "translated+annotated+illustrated": "(Traducido, anotado e ilustrado)"
+  },
+  "rights": "Traducción © {year} {translator}. La obra original es de dominio público.",
+  "edition_notice": {
+    "heading": "Créditos",
+    "lines": [
+      "Título original: {source_title}",
+      "Publicado originalmente en {original_year}.",
+      "Traducción al español: {translator}.",
+      "{edition_additions}",
+      "Traducción © {year} {translator}. La obra original es de dominio público.",
+      "{publisher}"
+    ]
+  },
+  "keyword_stoplist": ["libro", "ebook", "kindle"]
+}

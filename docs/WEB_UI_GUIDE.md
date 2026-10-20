@@ -574,8 +574,17 @@ Images referenced via `[IMAGE:...]` placeholders in translated text are embedded
 | Publisher | `publisher` | `dc:publisher` |
 | Description | `description` | `dc:description` |
 | Rights | `rights` | `dc:rights` |
+| Subtitle | `subtitle` | second `dc:title`, refined `title-type` = `subtitle` |
+| Subjects | `subjects` (list) | one `dc:subject` each |
+| Publication date | `publication_date` | `dc:date` |
+| Title page | `front_matter.title_page` | generated `titlepage.xhtml`, first in the spine |
+| Copyright page | `edition_notice.json` (`{heading, body}`) | generated `copyright.xhtml`, after the title page |
 
-All fields are optional. Values are saved to `project.json` by the `POST /api/project/<id>/config` endpoint when Build EPUB is clicked, and read back by `build_epub()` at build time.
+All fields are optional. Every build path (this button, `harness.py epub`,
+`build_epub.py`, the corrections and `translate_book.py` rebuilds) resolves them through
+`src/book_metadata.py`, so a book carries the same metadata whichever one built it. The
+last five rows have no form field: the `kdp-publish` skill writes them
+(`docs/KDP_PUBLISH.md`). Values are saved to `project.json` by the `POST /api/project/<id>/config` endpoint when Build EPUB is clicked, and read back by `build_epub()` at build time.
 
 ### Translator note (optional final chapter)
 

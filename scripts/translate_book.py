@@ -758,19 +758,29 @@ def stage_combine(args, project_dir: Path, state: dict) -> dict:
     return state
 
 
+def _epub_metadata(args, project_dir: Path) -> dict:
+    """Build kwargs from project.json, with this run's flags as overrides and
+    the project name / "Unknown" as the last resort for title and author."""
+    from src.book_metadata import epub_kwargs
+
+    meta = epub_kwargs(
+        project_dir,
+        author=getattr(args, "author", None),
+        language=getattr(args, "target_lang_code", None),
+    )
+    meta["title"] = meta["title"] or getattr(args, "project_name", None) or project_dir.name
+    meta["author"] = meta["author"] or "Unknown"
+    return meta
+
+
 def stage_epub(args, project_dir: Path, state: dict) -> dict:
     """Stage 7: Build EPUB from fully translated chunks."""
-    project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
-    author = getattr(args, "author", "Unknown") or "Unknown"
-    target_lang_code = getattr(args, "target_lang_code", "es") or "es"
     chapters = parse_chapter_range(args.chapters) if getattr(args, "chapters", None) else None
 
     result = build_epub_from_chunks(
         project_path=project_dir,
-        title=project_name,
-        author=author,
-        language=target_lang_code,
         chapters=chapters,
+        **_epub_metadata(args, project_dir),
     )
 
     print(f"  EPUB written to: {result.path}")
@@ -970,14 +980,9 @@ def stage_footnotes(args, project_dir: Path, state: dict) -> dict:
     print(f"  Wrote {total_written} footnote annotation(s) across {len(changed)} chapter(s)")
 
     if changed:
-        project_name = getattr(args, "project_name", project_dir.name) or project_dir.name
-        author = getattr(args, "author", "Unknown") or "Unknown"
-        target_lang_code = getattr(args, "target_lang_code", "es") or "es"
         result = build_epub_from_chunks(
             project_path=project_dir,
-            title=project_name,
-            author=author,
-            language=target_lang_code,
+            **_epub_metadata(args, project_dir),
         )
         print(f"  Rebuilt EPUB with footnotes: {result.path}")
         state["epub_path"] = str(result.path)
@@ -1016,7 +1021,7 @@ def main():
         help="Existing project directory (skip ingest if source.txt exists)",
     )
     parser.add_argument("--project-name", help="Project/book title")
-    parser.add_argument("--author", default="Unknown", help="Author name for EPUB metadata")
+    parser.add_argument("--author", default=None, help="Author name for EPUB metadata (default: project.json author, else Unknown)")
     parser.add_argument(
         "--footnotes",
         choices=["import", "drop"],
@@ -1029,7 +1034,8 @@ def main():
     parser.add_argument("--source-lang", default="English", help="Source language name (default: English)")
     parser.add_argument("--target-lang", default="Spanish", help="Target language name (default: Spanish)")
     parser.add_argument("--source-lang-code", default="en", help="Source language code (default: en)")
-    parser.add_argument("--target-lang-code", default="es", help="Target language code (default: es)")
+    parser.add_argument("--target-lang-code", default=None,
+                        help="Target language code (default: project.json's target_lang_code, else es)")
 
     # Translation API
     parser.add_argument("--provider", default=default_provider_arg(), type=provider_arg,

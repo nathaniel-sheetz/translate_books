@@ -9359,9 +9359,13 @@ def build_epub_route(project_id):
 
     data = request.get_json(silent=True) or {}
     config = _load_project_config(project_id)
-    title = data.get("title") or config.get("spanish_title") or config.get("title") or project_id
-    author = data.get("author") or config.get("author", "")
-    language = data.get("language") or config.get("target_lang_code", "es")
+    # Same resolver every other build path uses (src.book_metadata): the
+    # request wins, then project.json, then the harness config / ingest report.
+    from src.book_metadata import load_book_metadata
+    book_meta = load_book_metadata(project_dir)
+    title = data.get("title") or book_meta["title"] or project_id
+    author = data.get("author") or book_meta["author"]
+    language = data.get("language") or book_meta["language"]
 
     # Optional Dublin Core metadata: request body wins, otherwise fall back to
     # project.json. Persist whatever the form submitted so re-exports keep the
@@ -9379,7 +9383,8 @@ def build_epub_route(project_id):
         else:
             metadata[key] = str(config.get(key, "") or "").strip()
     # Also persist author/title when supplied so the form is the source of truth.
-    for key, val in (("author", author), ("title", data.get("title") or "")):
+    # Only what the form sent: a resolver fallback must not get written back.
+    for key, val in (("author", data.get("author") or ""), ("title", data.get("title") or "")):
         if val and config.get(key, "") != val:
             config[key] = val
             config_dirty = True
@@ -9422,6 +9427,12 @@ def build_epub_route(project_id):
             rights=metadata["rights"] or None,
             source_title=metadata["source_title"] or None,
             publisher=metadata["publisher"] or None,
+            subtitle=book_meta["subtitle"] or None,
+            subjects=book_meta["subjects"] or None,
+            date=book_meta["date"] or None,
+            front_matter=book_meta["front_matter"],
+            edition_notice_heading=book_meta["edition_notice_heading"] or None,
+            edition_notice_body=book_meta["edition_notice_body"] or None,
         )
         epub_path = result.path
 

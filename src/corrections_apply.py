@@ -357,23 +357,22 @@ def rebuild_epub(project_dir: Path):
     if not config_path.exists():
         config_path = project_dir / "project.json"
 
-    title = project_dir.name
-    author = "Unknown"
-    language = "es"
+    from src.book_metadata import epub_kwargs
 
+    config: dict = {}
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
-        title = config.get("project_name", title)
-        author = config.get("author", author)
-        language = config.get("target_lang_code", language)
 
-    epub_path = build_epub(
-        project_path=project_dir,
-        title=title,
-        author=author,
-        language=language,
-    )
+    # project.json metadata (Spanish title, translator, front matter...) first;
+    # the legacy per-name config and the slug only when it names nothing.
+    metadata = epub_kwargs(project_dir)
+    metadata["title"] = metadata["title"] or config.get("project_name") or project_dir.name
+    metadata["author"] = metadata["author"] or config.get("author") or "Unknown"
+    if config.get("target_lang_code"):
+        metadata["language"] = config["target_lang_code"]
+
+    epub_path = build_epub(project_path=project_dir, **metadata)
     print(f"  EPUB rebuilt: {epub_path}")
     return epub_path
 

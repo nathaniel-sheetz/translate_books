@@ -3773,16 +3773,24 @@ def translate(
 
 
 def epub(project: str, *, title: str | None = None, author: str | None = None, language: str | None = None) -> int | dict:
-    """Build the EPUB from translated chunks (title/author/language default from config)."""
+    """Build the EPUB from translated chunks.
+
+    Metadata resolves through ``src.book_metadata``: ``project.json``
+    (``spanish_title``, translator, description, front matter...) first, the
+    setup config's title/author only as a fallback — so a book whose Spanish
+    title is set no longer ships under its English one.
+    """
+    from src.book_metadata import load_book_metadata
+
     project_dir = state.resolve_project_dir(project)
-    cfg = state.load_config(project_dir)
-    title = title or cfg.get("title") or ""
-    author = author or cfg.get("author") or ""
-    language = language or cfg.get("language_code") or "es"
+    meta = load_book_metadata(project_dir)
+    title = title or meta["title"]
+    author = author or meta["author"]
+    language = language or meta["language"]
     if not title or not author:
         print(
-            "epub needs a title and author. Pass --title/--author, or set them once via "
-            "`setup --title ... --author ...`.",
+            "epub needs a title and author. Pass --title/--author, set spanish_title/author "
+            "in project.json, or set them once via `setup --title ... --author ...`.",
             file=sys.stderr,
         )
         return 2

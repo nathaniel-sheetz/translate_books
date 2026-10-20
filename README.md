@@ -233,6 +233,7 @@ pytest --cov=src tests/         # with coverage
 | [`docs/WEB_UI_GUIDE.md`](docs/WEB_UI_GUIDE.md) | Full dashboard + reader reference |
 | [`docs/READER_RETRANSLATE.md`](docs/READER_RETRANSLATE.md) | Reader sentence-retranslate flow |
 | [`docs/READER_REMOVE_TEXT.md`](docs/READER_REMOVE_TEXT.md) | Reader remove-text gesture |
+| [`docs/KDP_PUBLISH.md`](docs/KDP_PUBLISH.md) | The KDP listing: Amazon evidence, validation, EPUB metadata and front matter |
 
 **Quality and review**
 
