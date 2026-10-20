@@ -2139,7 +2139,9 @@
         const spans = content.querySelectorAll('.sentence');
         for (const s of spans) {
             if (s.getBoundingClientRect().top >= headerH) {
-                return (s.textContent || '').trim().slice(0, 30);
+                // Collapse whitespace: merged verse rows display newlines where
+                // `es` (what the prefix is matched against) has spaces.
+                return (s.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 30);
             }
         }
         return null;

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.1.0] - 2026-10-20
+
+### Fixed
+- **The reader keeps a poem's line breaks after two of its lines were merged into one sentence row.** The reader adds verse line breaks at serve time, matching each line in order by its first two words. A merged row hid its second line, so the matching stalled there and every later verse line in the chapter showed as run-on prose. The EPUB was unaffected. Seen in home-geography chapter 42.
+  - Each line inside a merged row now counts as matched. The row carries `verse_inner_breaks`, the positions of its joining spaces, and `reader.js` shows those spaces as line breaks. The stored sentence text is unchanged, so edits and finding highlights still line up. A Save drops the positions.
+  - After a realign, the reader restores your scroll position correctly even when the top sentence is one of these merged rows.
+
 ## [0.78.0.0] - 2026-10-20
 
 ### Added

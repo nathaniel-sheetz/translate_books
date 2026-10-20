@@ -107,6 +107,78 @@ def test_merged_row_opening_a_stanza_breaks_inside_only(tmp_path):
     assert row["verse_inner_breaks"] == [len("Line one here,")]
 
 
+def test_stale_merged_row_skips_inner_break_without_stalling(tmp_path):
+    """A Save can rewrite `es` while `es_sentences` keeps the aligned text."""
+    chapter = tmp_path / "chapter_01.txt"
+    chapter.write_text(STANZA, encoding="utf-8")
+    a, b = "Cañones de hierro, balas de hierro,", "Pararrayos de hierro en las agujas,"
+    edited = "Cañones de hierro, balas de hierro y pararrayos en las agujas,"
+    data = {"alignments": [
+        _row(0, "Intro paragraph."),
+        _row(1, "Barcos de hierro cruzan el océano.", para_start=True),
+        _row(2, "Casas de hierro, muros de hierro,"),
+        _row(3, edited, parts=[a, b]),
+        _row(5, "Cables telegráficos de hierro,"),
+        _row(6, "Hierro en todo lo que usamos."),
+        _row(7, "Prose after.", para_start=True),
+    ]}
+
+    _enrich_alignment(data, chapter, "p")
+
+    row = _by_start(data, "Cañones")
+    assert row.get("verse_line_break") is True
+    assert "verse_inner_breaks" not in row
+    assert _by_start(data, "Cables").get("verse_line_break") is True
+    assert _by_start(data, "Hierro en").get("verse_line_break") is True
+
+
+def test_three_merged_lines_get_two_inner_breaks(tmp_path):
+    chapter = tmp_path / "chapter_01.txt"
+    chapter.write_text(STANZA, encoding="utf-8")
+    parts = [
+        "Cañones de hierro, balas de hierro,",
+        "Pararrayos de hierro en las agujas,",
+        "Cables telegráficos de hierro,",
+    ]
+    merged = " ".join(parts)
+    data = {"alignments": [
+        _row(0, "Intro paragraph."),
+        _row(1, "Barcos de hierro cruzan el océano.", para_start=True),
+        _row(2, "Casas de hierro, muros de hierro,"),
+        _row(3, merged, parts=parts),
+        _row(6, "Hierro en todo lo que usamos."),
+        _row(7, "Prose after.", para_start=True),
+    ]}
+
+    _enrich_alignment(data, chapter, "p")
+
+    breaks = _by_start(data, "Cañones")["verse_inner_breaks"]
+    assert breaks == [len(parts[0]), len(parts[0]) + 1 + len(parts[1])]
+    assert all(merged[off] == " " for off in breaks)
+    assert _by_start(data, "Hierro en").get("verse_line_break") is True
+
+
+def test_key_list_running_out_inside_merged_row(tmp_path):
+    """The stanza's last line sits in a merged row whose tail is prose."""
+    chapter = tmp_path / "chapter_01.txt"
+    chapter.write_text(
+        "Intro paragraph.\n\nLine one here,\nLine two here.\n\nProse after.\n",
+        encoding="utf-8",
+    )
+    data = {"alignments": [
+        _row(0, "Intro paragraph."),
+        _row(1, "Line one here,", para_start=True),
+        _row(2, "Line two here. Prose after.",
+             parts=["Line two here.", "Prose after."]),
+    ]}
+
+    _enrich_alignment(data, chapter, "p")
+
+    row = _by_start(data, "Line two")
+    assert row.get("verse_line_break") is True
+    assert "verse_inner_breaks" not in row
+
+
 def test_merged_prose_row_gets_no_inner_breaks(tmp_path):
     chapter = tmp_path / "chapter_01.txt"
     chapter.write_text(
