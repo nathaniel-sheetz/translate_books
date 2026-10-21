@@ -38,7 +38,7 @@ ENGLISH_CHARS = 700
 JOB_TOKEN_CAP = 40_000
 BOOK_TOKEN_CAP = 200_000
 
-THEMES = ("glossary", "address_style", "rules", "dismissals")
+THEMES = ("glossary", "address_style", "drift", "rules", "dismissals")
 
 
 def estimate_tokens(text: str) -> int:
@@ -146,10 +146,14 @@ def _artifacts(signal: dict[str, Any], corpus: BookCorpus) -> dict[str, Any]:
 def _theme_of_signal(signal: dict[str, Any]) -> str:
     detector = signal["detector"]
     metrics = signal.get("metrics") or {}
-    if detector == "dead_glossary_keys":
+    if detector in ("dead_glossary_keys", "glossary_sense"):
         return "glossary"
     if detector == "address_style_conflicts":
         return "address_style"
+    if detector == "rule_drift":
+        return "drift"
+    if detector == "opposite_directions":
+        return "address_style" if (metrics.get("judges") or {}).get("address") else "rules"
     if detector == "false_positive_clusters":
         return "glossary" if metrics.get("label") == "glossary_stale" else "dismissals"
     name = metrics.get("name")

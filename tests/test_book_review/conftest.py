@@ -57,8 +57,11 @@ class Book:
         write_json(self.dir / "glossary.json", {"terms": terms, "version": "1.0"})
         return self
 
-    def style(self, content: str) -> "Book":
-        write_json(self.dir / "style.json", {"content": content, "version": "1.0"})
+    def style(self, content: str, *, updated_at: Optional[str] = None) -> "Book":
+        doc = {"content": content, "version": "1.0"}
+        if updated_at:
+            doc["updated_at"] = updated_at
+        write_json(self.dir / "style.json", doc)
         return self
 
     def address_map(self, pairs: list[dict], global_rules: str = "", content: str = "map") -> "Book":
@@ -85,7 +88,8 @@ class Book:
         return self
 
     def judge(self, chunk_id: str, judge: str, issues: list[dict], *,
-              retracted: Optional[list[dict]] = None, filtered: Optional[list[dict]] = None) -> "Book":
+              retracted: Optional[list[dict]] = None, filtered: Optional[list[dict]] = None,
+              prompt_version: Optional[str] = None) -> "Book":
         path = self.dir / "evaluations" / f"{chunk_id}.json"
         doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {
             "chunk_id": chunk_id, "judges": {},
@@ -95,6 +99,8 @@ class Book:
             metadata["retracted"] = retracted
         if filtered:
             metadata["filtered"] = filtered
+        if prompt_version:
+            metadata["prompt_version"] = prompt_version
         doc["judges"][judge] = {
             "eval_name": judge, "issues": issues, "metadata": metadata,
             "executed_at": "2026-09-01T00:00:00",

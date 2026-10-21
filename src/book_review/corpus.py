@@ -91,6 +91,8 @@ class Finding:
     pair: Optional[tuple[str, str]] = None
     #: Address findings only: ``"tú"`` or ``"usted"``.
     expected_form: Optional[str] = None
+    #: The judge prompt's version (hash) this finding was produced under.
+    prompt_version: Optional[str] = None
 
     def text(self) -> str:
         """Message, excerpt and suggestion joined, for term matching."""
@@ -108,6 +110,9 @@ class ChunkInfo:
     #: Lower-cased English keys of the glossary block in the logged prompt, or
     #: ``None`` when no readable log exists for this chunk.
     shipped_glossary: Optional[set[str]] = None
+    #: Fingerprint of the DIALOGUE FORMATTING block the chunk was translated
+    #: with: ``""`` when the logged prompt carried none, ``None`` with no log.
+    dialogue_rules: Optional[str] = None
 
 
 @dataclass
@@ -210,7 +215,32 @@ def parse_shipped_glossary(prompt: str) -> set[str]:
     return keys
 
 
-def _shipped_from_log(log_path: Optional[str], repo_root: Path) -> Optional[set[str]]:
+_DIALOGUE_HEADER = "DIALOGUE FORMATTING"
+
+
+def dialogue_fingerprint(block_or_prompt: str) -> str:
+    """A stable fingerprint of a DIALOGUE FORMATTING block's rules, or ``""``.
+
+    Accepts a whole rendered prompt or the block alone. Whitespace is folded so
+    a re-wrapped but unchanged rule set fingerprints the same.
+    """
+    start = block_or_prompt.find(_DIALOGUE_HEADER)
+    if start < 0:
+        return ""
+    body = block_or_prompt[start + len(_DIALOGUE_HEADER):]
+    body = re.sub(r"^\s*=+\s*", "", body, count=1)
+    end = re.search(r"^=+\s*$", body, re.MULTILINE)
+    if end:
+        body = body[: end.start()]
+    folded = re.sub(r"\s+", " ", body).strip()
+    if not folded:
+        return ""
+    import hashlib
+
+    return hashlib.sha256(folded.encode("utf-8")).hexdigest()[:12]
+
+
+def _read_log(log_path: Optional[str], repo_root: Path) -> Optional[str]:
     if not log_path:
         return None
     path = Path(log_path)
@@ -219,7 +249,7 @@ def _shipped_from_log(log_path: Optional[str], repo_root: Path) -> Optional[set[
     doc = _read_json(path)
     if not isinstance(doc, dict) or not isinstance(doc.get("prompt"), str):
         return None
-    return parse_shipped_glossary(doc["prompt"])
+    return doc["prompt"]
 
 
 def _repo_root() -> Path:
@@ -234,6 +264,7 @@ def _load_chunks(project_dir: Path, repo_root: Path) -> dict[str, ChunkInfo]:
             continue
         chunk_id = doc.get("id") or path.stem
         log = doc.get("last_llm_log")
+        prompt = _read_log(log, repo_root)
         out[chunk_id] = ChunkInfo(
             id=chunk_id,
             chapter_id=doc.get("chapter_id") or chapter_of(chunk_id),
@@ -241,7 +272,8 @@ def _load_chunks(project_dir: Path, repo_root: Path) -> dict[str, ChunkInfo]:
             translated_text=doc.get("translated_text") or "",
             translated_at=doc.get("translated_at"),
             last_llm_log=log,
-            shipped_glossary=_shipped_from_log(log, repo_root),
+            shipped_glossary=parse_shipped_glossary(prompt) if prompt is not None else None,
+            dialogue_rules=dialogue_fingerprint(prompt) if prompt is not None else None,
         )
     return out
 
@@ -305,6 +337,9 @@ def _load_findings(project_dir: Path) -> list[Finding]:
             if not isinstance(result, dict):
                 continue
             executed_at = result.get("executed_at")
+            metadata = result.get("metadata") or {}
+            version = metadata.get("prompt_version") or result.get("prompt_version")
+            start = len(findings)
             for i, issue in enumerate(result.get("issues") or []):
                 if not isinstance(issue, dict):
                     continue
@@ -312,7 +347,6 @@ def _load_findings(project_dir: Path) -> list[Finding]:
                 record = feedback_mark(by_key, by_index, judge, i, issue)
                 finding.mark = record.get("feedback_type") if record else None
                 findings.append(finding)
-            metadata = result.get("metadata") or {}
             for i, item in enumerate(metadata.get("retracted") or []):
                 if isinstance(item, dict):
                     findings.append(
@@ -324,6 +358,8 @@ def _load_findings(project_dir: Path) -> list[Finding]:
                     findings.append(_normalize_issue(
                         judge, chunk_id, i, item, f"filtered:{reason}", executed_at,
                     ))
+            for finding in findings[start:]:
+                finding.prompt_version = version
     return findings
 
 

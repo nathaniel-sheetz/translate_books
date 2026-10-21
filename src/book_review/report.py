@@ -18,9 +18,12 @@ from src.book_review.corpus import BookCorpus, Finding
 
 _SECTIONS = (
     ("dead_glossary_keys", "Glossary entries the translator did not get"),
+    ("glossary_sense", "Glossary entries judges keep replacing"),
     ("address_style_conflicts", "Forms of address: the style guide, the map and the judges disagree"),
+    ("rule_drift", "Findings judged against rules the translation never saw"),
     ("recurring_rules", "Rules that fire across many chapters"),
     ("false_positive_clusters", "Dismissals bunched on one rule"),
+    ("opposite_directions", "Suggestions that undo each other"),
 )
 
 _EXAMPLES = 4
@@ -66,6 +69,22 @@ def _metrics_line(signal: dict[str, Any]) -> str:
         rate = m.get("accept_rate")
         return (f"{m.get('label')}; marks {m.get('marks') or 'none'}"
                 + (f"; accepted {int(rate * 100)}%" if rate is not None else ""))
+    if detector == "glossary_sense":
+        line = f"→ `{m.get('spanish')}`"
+        if m.get("context"):
+            line += f"; context (never shipped): “{_clip(m['context'], 140)}”"
+        if m.get("concordance"):
+            line += "\n  English uses: " + " | ".join(_clip(c, 110) for c in m["concordance"][:4])
+        return line
+    if detector == "rule_drift":
+        if m.get("kind") == "judge_prompt":
+            return "versions: " + ", ".join(f"{k} ({v['findings']} findings, {v['chapters']} chapters, "
+                                            f"last {v['judged']})" for k, v in m["versions"].items())
+        if m.get("kind") == "dialogue_rules":
+            return (f"translated {m.get('translated')}; rules {m.get('rules')}; marks {m.get('marks') or 'none'}")
+        return f"{m.get('artifact')} at {m.get('at')}"
+    if detector == "opposite_directions":
+        return f"judges {m.get('judges')}; rules {m.get('rules')}"
     if detector == "false_positive_clusters":
         return f"{m.get('label')}; marks {m.get('marks')}; rules {m.get('rules')}"
     return json.dumps(m, ensure_ascii=False)[:200]

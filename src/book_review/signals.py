@@ -703,11 +703,242 @@ def _unverified_editorial(corpus: BookCorpus) -> int:
     return count
 
 
+# ---------------------------------------------------------------------------
+# D2 glossary entries applied in the wrong sense
+
+_SENSE_NOTE_RE = re.compile(
+    r"\bnot\b|—\s*not|\bonly\b|\bnever\b|\bas in\b|\bwhen\b|\bsense\b|\bno es\b|\bno el\b",
+    re.IGNORECASE,
+)
+CONCORDANCE = 12
+
+
+def _concordance(corpus: BookCorpus, key: str) -> list[str]:
+    out = []
+    pattern = re.compile(r"(?<![\w'])" + re.escape(key) + r"(?:e?s)?(?![\w])", re.IGNORECASE)
+    for c in corpus.chunks_in_order():
+        for m in pattern.finditer(c.source_text):
+            start, end = max(0, m.start() - 60), min(len(c.source_text), m.end() + 60)
+            out.append(f"{c.chapter_id}: …{c.source_text[start:end].strip()}…".replace("\n", " "))
+            if len(out) >= CONCORDANCE:
+                return out
+    return out
+
+
+def glossary_sense(corpus: BookCorpus) -> list[Signal]:
+    """Entries a judge wants replaced where the source uses the word another way.
+
+    The translator gets ``english → spanish`` and never the ``context`` that
+    restricts the sense, so a homonym key ("scales → balanza", "weighing
+    instrument, not escamas") is applied wherever the word occurs. The sign is
+    a finding, in a chunk the entry reached, whose suggestion removes the
+    entry's Spanish. The English concordance lets the reader see the senses.
+    """
+    by_chunk: dict[str, list[Finding]] = defaultdict(list)
+    for f in corpus.findings:
+        if f.status == "kept" and f.location and f.suggestion:
+            by_chunk[f.chunk_id].append(f)
+    signals = []
+    for term in corpus.glossary:
+        key = str(term.get("english") or "").strip()
+        forms = [s for s in _spanish_forms(term) if len(s) >= 4]
+        if not key or not forms or key.lower() == str(term.get("spanish") or "").lower():
+            continue
+        hits = []
+        for c in corpus.chunks_in_order():
+            reached = (c.shipped_glossary is not None and key.lower() in c.shipped_glossary) or (
+                c.shipped_glossary is None and term_occurs(key, c.source_text.lower()))
+            if not reached:
+                continue
+            for f in by_chunk.get(c.id, []):
+                before, after = f.location.lower(), f.suggestion.lower()
+                if any(s in before and s not in after for s in forms):
+                    hits.append(f)
+        if not hits:
+            continue
+        note = str(term.get("context") or "")
+        signals.append(Signal(
+            id=f"D2:{key.lower()}",
+            detector="glossary_sense",
+            title=f"Judges replace the glossary rendering of '{key}' ({term.get('spanish')}) "
+                  f"{len(hits)}× in chunks it reached",
+            score=2.0 * len(hits) + (1.0 if _SENSE_NOTE_RE.search(note) else 0.0),
+            chapters=_chapters(hits),
+            finding_ids=[f.id for f in hits],
+            artifact_refs=[f"glossary:{key}"],
+            metrics={"spanish": term.get("spanish"), "context": note or None,
+                     "sense_note": bool(_SENSE_NOTE_RE.search(note)),
+                     "concordance": _concordance(corpus, key),
+                     "marks": dict(Counter(f.mark for f in hits if f.mark))},
+            tier_hint="A",
+        ))
+    return sorted(signals, key=lambda s: -s.score)
+
+
+# ---------------------------------------------------------------------------
+# D4 rules written after the translation
+
+def _current_dialogue_rules() -> Optional[str]:
+    try:
+        from src.book_review.corpus import dialogue_fingerprint
+        from src.utils.text_utils import _load_dialogue_block
+
+        return dialogue_fingerprint(_load_dialogue_block())
+    except Exception:  # an unreadable rules file just disables this check
+        return None
+
+
+def rule_drift(corpus: BookCorpus, *, current_dialogue: Optional[str] = None) -> list[Signal]:
+    """Findings judged against rules the translation never saw.
+
+    Three checks:
+    - the DIALOGUE FORMATTING block each chunk's logged prompt carried, against
+      the rules the dialogue judge applies now;
+    - a judge's own prompt changing partway through the book;
+    - the style guide or address map changing after chunks were translated.
+    """
+    signals: list[Signal] = []
+    current = current_dialogue if current_dialogue is not None else _current_dialogue_rules()
+    dialogue_by_chunk: dict[str, list[Finding]] = defaultdict(list)
+    for f in corpus.findings:
+        if f.judge == "dialogue" and f.status == "kept":
+            dialogue_by_chunk[f.chunk_id].append(f)
+
+    if current and dialogue_by_chunk:
+        groups: dict[str, list] = defaultdict(list)
+        for c in corpus.chunks_in_order():
+            if c.dialogue_rules is not None and c.dialogue_rules != current:
+                groups["none" if c.dialogue_rules == "" else c.dialogue_rules].append(c)
+        for fingerprint, chunks in groups.items():
+            findings = [f for c in chunks for f in dialogue_by_chunk.get(c.id, [])]
+            if not findings:
+                continue
+            stamps = sorted(c.translated_at for c in chunks if c.translated_at)
+            label = ("with no dialogue rules in the prompt" if fingerprint == "none"
+                     else "under an older set of dialogue rules")
+            signals.append(Signal(
+                id=f"D4:dialogue:{fingerprint}",
+                detector="rule_drift",
+                title=(f"{len(chunks)} chunks were translated {label}; {len(findings)} dialogue "
+                       f"findings on them judge against today's rules"),
+                score=2.0 + 0.05 * len(findings),
+                chapters=_chapters(findings),
+                finding_ids=[f.id for f in findings],
+                metrics={"kind": "dialogue_rules", "fingerprint": fingerprint, "current": current,
+                         "chunks": len(chunks),
+                         "translated": [stamps[0][:10], stamps[-1][:10]] if stamps else None,
+                         "rules": dict(Counter(f.rule for f in findings).most_common(6)),
+                         **_mark_rates(findings)},
+                tier_hint="B",
+            ))
+
+    by_judge: dict[str, dict[str, list[Finding]]] = defaultdict(lambda: defaultdict(list))
+    for f in corpus.findings:
+        if f.status == "kept" and f.prompt_version:
+            by_judge[f.judge][f.prompt_version].append(f)
+    for judge, versions in by_judge.items():
+        if len(versions) < 2:
+            continue
+        rows = {v[:8]: {"findings": len(fs), "chapters": len({f.chapter_id for f in fs}),
+                        "judged": sorted(f.executed_at or "" for f in fs)[-1][:10]}
+                for v, fs in versions.items()}
+        signals.append(Signal(
+            id=f"D4:judge-prompt:{judge}",
+            detector="rule_drift",
+            title=f"The {judge} judge's prompt changed partway through the book ({len(versions)} versions)",
+            score=1.5,
+            chapters=sorted({f.chapter_id for fs in versions.values() for f in fs}),
+            metrics={"kind": "judge_prompt", "judge": judge, "versions": rows},
+            tier_hint="C",
+        ))
+
+    stamps = [c.translated_at for c in corpus.chunks.values() if c.translated_at]
+    if stamps:
+        for artifact, doc, field_name in (
+            ("style guide", corpus.style_meta, "updated_at"),
+            ("address map", corpus.address_map or {}, "created_at"),
+        ):
+            when = str((doc or {}).get(field_name) or "")[:19]
+            if not when:
+                continue
+            before = [s for s in stamps if s[:19] < when]
+            if not before:
+                continue
+            judge = "address" if artifact == "address map" else "editorial"
+            findings = [f for f in corpus.findings if f.judge == judge and f.status == "kept"
+                        and (corpus.chunks.get(f.chunk_id) and (corpus.chunks[f.chunk_id].translated_at or "")[:19] < when)]
+            if not findings:
+                continue
+            verb = "written" if field_name == "created_at" else "last changed"
+            signals.append(Signal(
+                id=f"D4:artifact:{artifact}",
+                detector="rule_drift",
+                title=(f"The {artifact} was {verb} {when[:10]}, after {len(before)} of "
+                       f"{len(stamps)} chunks were translated; {len(findings)} {judge} findings "
+                       f"fall on those chunks"),
+                score=1.0 + 0.05 * len(findings),
+                chapters=_chapters(findings),
+                finding_ids=[f.id for f in findings][:200],
+                artifact_refs=["address:global_rules"] if artifact == "address map" else [],
+                metrics={"kind": "artifact_after_translation", "artifact": artifact, "at": when,
+                         "chunks_before": len(before), "chunks": len(stamps),
+                         "style_guide_summary": bool((corpus.address_map or {}).get("style_guide_summary"))
+                         if artifact == "address map" else None},
+                tier_hint="B",
+            ))
+    return sorted(signals, key=lambda s: -s.score)
+
+
+# ---------------------------------------------------------------------------
+# D6 opposite-direction suggestions
+
+def _swap(f: Finding) -> Optional[tuple[tuple[str, ...], tuple[str, ...]]]:
+    before = Counter(re.findall(r"[\wáéíóúñü]+", f.location.lower()))
+    after = Counter(re.findall(r"[\wáéíóúñü]+", f.suggestion.lower()))
+    removed, added = before - after, after - before
+    if 1 <= sum(removed.values()) <= 2 and 1 <= sum(added.values()) <= 2:
+        return tuple(sorted(removed)), tuple(sorted(added))
+    return None
+
+
+def opposite_directions(corpus: BookCorpus) -> list[Signal]:
+    """One word pushed to another in some chapters and back again in others."""
+    swaps: dict[tuple, list[Finding]] = defaultdict(list)
+    for f in corpus.findings:
+        if f.status == "kept" and f.location and f.suggestion:
+            key = _swap(f)
+            if key:
+                swaps[key].append(f)
+    signals = []
+    for (removed, added), forward in swaps.items():
+        backward = swaps.get((added, removed))
+        if not backward or removed > added:
+            continue
+        findings = forward + backward
+        signals.append(Signal(
+            id=f"D6:{'+'.join(removed)}~{'+'.join(added)}",
+            detector="opposite_directions",
+            title=(f"«{' '.join(removed)}» → «{' '.join(added)}» {len(forward)}×, and back "
+                   f"{len(backward)}×"),
+            score=1.5 * min(len(forward), len(backward)) + 1.0,
+            chapters=_chapters(findings),
+            finding_ids=[f.id for f in findings],
+            metrics={"forward": len(forward), "backward": len(backward),
+                     "judges": dict(Counter(f.judge for f in findings)),
+                     "rules": dict(Counter(f.rule for f in findings).most_common(6))},
+            tier_hint="A",
+        ))
+    return sorted(signals, key=lambda s: -s.score)
+
+
 DETECTORS = (
     dead_glossary_keys,
+    glossary_sense,
     address_style_conflicts,
+    rule_drift,
     recurring_rules,
     false_positive_clusters,
+    opposite_directions,
 )
 
 

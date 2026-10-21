@@ -266,3 +266,54 @@ def test_signals_cli_writes_report_and_json(book, monkeypatch, capsys):
     report = open(out["report_path"], encoding="utf-8").read()
     assert "never reached the translator" in report and "porte-cochere" in report
     assert json.loads(open(out["signals_path"], encoding="utf-8").read())["findings"] == 1
+
+
+# ---------------------------------------------------------------------------
+# D2 glossary sense, D4 rule drift, D6 opposite directions
+
+from src.book_review.signals import glossary_sense, opposite_directions, rule_drift  # noqa: E402
+
+
+def test_judge_replacing_a_shipped_rendering_is_a_sense_signal(book):
+    found = issue("wrong-lexeme", "Balanzas nombra el instrumento de pesar, no las escamas.",
+                  "Dos pobres balanzas", "Dos pobres escamas", category="NATURALNESS")
+    (book.glossary([term("scales", "balanza", context="Weighing instrument, not escamas")])
+     .chunk("chapter_60_chunk_000", "Two poor scales serve it for calyx.", shipped=[("scales", "balanza")])
+     .judge("chapter_60_chunk_000", "editorial", [found]))
+    [signal] = glossary_sense(book.load())
+    assert signal.metrics["sense_note"] is True
+    assert "Two poor scales" in signal.metrics["concordance"][0]
+
+
+def test_dialogue_findings_on_chunks_translated_without_the_rules(book):
+    found = issue("narration-separation", "Intro narration on its own line.", "a", "b")
+    book.chunk("chapter_01_chunk_000", "text", shipped=[]).judge("chapter_01_chunk_000", "dialogue", [found])
+    [signal] = [s for s in rule_drift(book.load(), current_dialogue="abc") if s.id.startswith("D4:dialogue")]
+    assert signal.id == "D4:dialogue:none"
+    assert signal.metrics["chunks"] == 1
+
+
+def test_judge_prompt_version_split(book):
+    for n, version in ((1, "aaaa1111"), (2, "bbbb2222")):
+        chunk_id = f"chapter_{n:02d}_chunk_000"
+        book.chunk(chunk_id, "text").judge(chunk_id, "dialogue", [issue("x", f"m{n}")],
+                                           prompt_version=version)
+    ids = by_key(rule_drift(book.load(), current_dialogue=""))
+    assert set(ids["D4:judge-prompt:dialogue"].metrics["versions"]) == {"aaaa1111", "bbbb2222"}
+
+
+def test_style_guide_changed_after_translation(book):
+    book.style("Keep it plain.", updated_at="2026-08-01T00:00:00")
+    book.chunk("chapter_01_chunk_000", "text").judge(
+        "chapter_01_chunk_000", "editorial", [issue("calque-x", "m", finding_key="c1")])
+    ids = by_key(rule_drift(book.load(), current_dialogue=""))
+    assert ids["D4:artifact:style guide"].metrics["chunks_before"] == 1
+
+
+def test_suggestions_that_undo_each_other(book):
+    book.chunk("chapter_01_chunk_000", "text").judge(
+        "chapter_01_chunk_000", "editorial", [issue("a", "m", "lo sabe", "lo sabes", finding_key="k1")])
+    book.chunk("chapter_02_chunk_000", "text").judge(
+        "chapter_02_chunk_000", "editorial", [issue("b", "m", "lo sabes", "lo sabe", finding_key="k2")])
+    [signal] = opposite_directions(book.load())
+    assert signal.metrics["forward"] == 1 and signal.metrics["backward"] == 1

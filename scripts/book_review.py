@@ -102,10 +102,34 @@ HEADLINE = 10
 _DETECTOR_RANK = {
     "address_style_conflicts": 0,
     "dead_glossary_keys": 1,
-    "false_positive_clusters": 2,
-    "recurring_rules": 3,
+    "glossary_sense": 2,
+    "rule_drift": 3,
+    "false_positive_clusters": 4,
+    "opposite_directions": 5,
+    "recurring_rules": 6,
 }
 _LABEL_RANK = {"resisted": 0, "disputed": 1, "recurring": 2, "unreviewed": 3}
+
+
+PER_DETECTOR = 3
+
+
+def _headline(signals: list[dict]) -> list[dict]:
+    """At most three lines per detector, upstream causes first, then the rest by rank.
+
+    A book with twenty dead glossary keys would otherwise fill the headline with
+    them and hide the address conflict underneath.
+    """
+    ranked = sorted(signals, key=_headline_rank)
+    taken: dict[str, int] = {}
+    head, rest = [], []
+    for s in ranked:
+        if taken.get(s["detector"], 0) < PER_DETECTOR:
+            taken[s["detector"]] = taken.get(s["detector"], 0) + 1
+            head.append(s)
+        else:
+            rest.append(s)
+    return (head + rest)[:HEADLINE]
 
 
 def _headline_rank(signal: dict) -> tuple:
@@ -183,7 +207,7 @@ def _cmd_signals(args: argparse.Namespace) -> int:
     counts: dict[str, int] = {}
     for s in result["signals"]:
         counts[s["detector"]] = counts.get(s["detector"], 0) + 1
-    ranked = sorted(result["signals"], key=_headline_rank)[:HEADLINE]
+    ranked = _headline(result["signals"])
     return _print({
         "status": "ok",
         "project": project_dir.name,

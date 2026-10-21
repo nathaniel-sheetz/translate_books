@@ -90,6 +90,29 @@ whole set, and reports these patterns with the evidence behind each.
 - At least 3 dismissed findings on one judge and theme.
 - Labels: `glossary_stale`, `missing_context`, or `judge_miscalibrated`.
 
+**`glossary_sense`**
+- A finding in a chunk the entry reached, whose suggestion removes the entry's
+  Spanish. That is a sign the key is a homonym applied in the wrong sense (fabre2
+  `scales → balanza`, `locust → langosta` for the locust tree).
+- It carries the entry's `context`, which the translator never gets, and an
+  English concordance (±60 characters, up to 12 uses), so the reader can see the
+  senses.
+
+**`rule_drift`**
+- Each chunk's logged prompt is fingerprinted on its DIALOGUE FORMATTING block,
+  folding whitespace, and compared with the rules in `prompts/dialogue.txt` today.
+  Dialogue findings on chunks translated under older rules, or with no dialogue
+  block at all, are judged against rules the translator never had. On 2026-10-20
+  no reviewed book had been translated with the current rules, and
+  among-the-farmyard-people had none.
+- A judge's `prompt_version` that changes partway through a book.
+- The style guide (`updated_at`) or the address map (`created_at`) postdating
+  translated chunks, counted against the findings on those chunks.
+
+**`opposite_directions`**
+- A one- or two-word replacement that appears in some chapters and is reversed
+  in others (pollyanna «sabe» → «sabes» 5×, and back 14×).
+
 `coverage` reports the chapters each judge still owes and the editorial chunks
 awaiting pass 2, so the report says what it could not see.
 

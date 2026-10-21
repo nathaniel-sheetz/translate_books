@@ -13,7 +13,9 @@ A Spanish translation of a book has been checked by three LLM judges:
   and the full glossary).
 
 Coded detectors then read every finding together and flagged patterns that a
-single finding cannot show. You get one theme of those patterns with the evidence
+single finding cannot show. The themes are glossary, address_style, drift (findings judged against rules the
+translation never saw), rules (rules firing across many chapters) and dismissals.
+You get one theme of those patterns with the evidence
 behind each. Your job is to say what upstream change would make each pattern go
 away: an edit to the glossary, the style guide or the address map, a house rule,
 a re-judge, a re-translation, or dismissing findings that were wrong.

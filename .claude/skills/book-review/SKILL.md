@@ -87,8 +87,16 @@ object with a `_schema` block.
      (`punctuation`, `parenthetical`, `slash`, `plural_ies`, `head_noun`), or that
      it is `not_in_logged_prompt` (added after translation).
      `blind_spot_findings` is how many judge findings blamed the translator for it.
+   - **wrong sense** (`glossary_sense`): judges replacing an entry's Spanish where
+     the English uses the word another way. The concordance shows the senses.
    - **forms of address** (`address_style_conflicts`): which artifact says what,
      and which judge pulls which way.
+   - **drift** (`rule_drift`): findings judged against rules the chunk's prompt
+     never carried (older or missing dialogue rules, a style guide or address map
+     written after translation, a judge prompt that changed mid-book). These are
+     usually not the translator's fault.
+   - **undoing** (`opposite_directions`): one replacement pushed both ways across
+     chapters.
    - **rules** (`recurring_rules`): `resisted` means the translator was told and
      kept missing it, so a coded check or a stronger instruction is the fix.
      `disputed` means the user keeps dismissing it, so the rule or the judge is
