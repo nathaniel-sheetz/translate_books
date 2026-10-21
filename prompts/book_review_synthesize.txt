@@ -1,7 +1,7 @@
 # book review — turn detector signals into upstream fixes
-# Version: 1.2
+# Version: 1.3
 # Reads one theme of a book's book-review evidence (glossary, address_style,
-# rules, dismissals) and proposes the fewest upstream changes that would remove
+# rules, drift, dismissals) and proposes the fewest upstream changes that would remove
 # the patterns, each as a concrete patch. Run by scripts/book_review.py fanout.
 # Preamble variables: book_context.
 # Body: one job's evidence items, rendered by src/book_review/synthesize.py.
@@ -35,16 +35,17 @@ you. Work from them alone: do not search or open files.
     written**.
 
   It never sees the address map, and never sees a glossary entry's `context` note.
+  So, for glossary entries:
+  - A key with a hyphen or space the source lacks, a curly apostrophe, a
+    "(sense)" label or a "/" never matches.
+  - A homonym key ("scales", "locust") reaches chunks where the word means
+    something else.
 - Dialogue punctuation is governed by the shared dialogue rules, not the style
   guide. Never propose copying or restating dialogue-punctuation rules into the
   style guide. If those rules are wrong or unclear, propose a `manual` patch naming
   the rule. If findings on them come only from chunks translated under an older
   version of the rules, that is drift: they need a re-judge or nothing, not a rule
   change.
-  - A key with a hyphen or space the source lacks, a curly apostrophe, a
-    "(sense)" label or a "/" never matches.
-  - A homonym key ("scales", "locust") reaches chunks where the word means
-    something else.
 - The **address judge** reads the address map. The **editorial judge** reads the
   style guide and the whole glossary. When the two disagree, the judges pull the
   same speaker in opposite directions, and the translator follows the style guide.

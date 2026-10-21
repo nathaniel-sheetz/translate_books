@@ -106,6 +106,8 @@
 
     function scheduleSave() {
         dirty = true;
+        var approve = document.querySelector('.br-gate .br-btn-primary');
+        if (approve) approve.disabled = true;
         updateBar();
         barSave.textContent = S.saving;
         clearTimeout(saveTimer);

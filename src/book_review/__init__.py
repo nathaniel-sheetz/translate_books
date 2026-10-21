@@ -8,7 +8,8 @@ judge finding a book has, runs coded detectors over the whole set, and reports
 the patterns -- each with the evidence an operator (or a synthesis model) needs
 to decide what to change upstream.
 
-Nothing here edits the book or deletes a finding.
+Only an approved apply (:mod:`src.book_review.apply`) edits the book -- its
+glossary, style guide and address map. Nothing deletes a finding.
 """
 
 from __future__ import annotations

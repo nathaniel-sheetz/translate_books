@@ -72,6 +72,8 @@ def prepare(
     write_signals(corpus, signals_result)
     evidence = ev.build(corpus, signals_result)
     if not evidence["themes"]:
+        # A previous run's manifest would let `commit` re-stamp its old drafts as new.
+        _manifest_path(project_dir).unlink(missing_ok=True)
         return {"status": "ok", "jobs": 0, "evidence": evidence,
                 "instructions": "The detectors found nothing to synthesize."}
 

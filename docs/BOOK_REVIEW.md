@@ -139,8 +139,8 @@ holds the book's lock, or when the CLI preflight fails.
 ## Synthesis
 
 `prepare` builds the evidence (`.harness/book_review/evidence.json`) and renders one
-job per theme: `glossary`, `address_style`, `rules`, `dismissals`. A theme over the
-job cap is split. The preamble is shared and cacheable: the instructions, the full
+job per theme: `glossary`, `address_style`, `rules`, `drift`, `dismissals`. A theme
+is never split; over the job cap, its signals drop a tier. The preamble is shared and cacheable: the instructions, the full
 style guide, and the address map's content, global rules and pairs.
 
 Each signal gets one of three tiers:

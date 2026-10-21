@@ -180,7 +180,7 @@ def render_recommendations(corpus: BookCorpus, doc: dict[str, Any]) -> str:
         "",
         f"_{date.today().isoformat()} · {len(recs)} recommendations from "
         f"{doc.get('worker_model') or 'the synthesis model'} ({doc.get('cli') or 'headless'}). "
-        "Nothing has been changed. Pick recommendations by id to apply them._",
+        "Nothing has been changed. Pick recommendations on the board page to apply them._",
         "",
     ]
     cov = doc.get("coverage") or {}

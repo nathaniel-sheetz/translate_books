@@ -1,10 +1,12 @@
 """Apply the recommendations the operator picked, through the normal save paths.
 
-Before anything is written, every selected recommendation is checked against
-the book as it is now (:func:`stale_reasons`): each patch must still apply, and
-a glossary entry or address pair it edits by name must be as it was when the
-review was committed. A selection with a stale recommendation is refused whole.
-The patches are then applied in order.
+Before anything is written, the selection goes through the board's
+:func:`~src.book_review.board.check_selection`: no recommendation already
+applied, no change number out of range, no two conflicting picks, and nothing
+stale (:func:`stale_reasons`) -- each patch must still apply, and a glossary
+entry or address pair it edits by name must be as it was when the review was
+committed. A selection with any problem is refused whole. The patches are then
+applied in order, and every edited artifact is validated before any is saved.
 
 What each patch does:
 
@@ -34,7 +36,7 @@ from typing import Any, Optional
 
 from src.book_review import review_dir
 from src.book_review.evidence import ARTIFACT_FILES as _FILES
-from src.book_review.evidence import artifact_hashes, load_artifacts
+from src.book_review.evidence import load_artifacts
 from src.book_review.patches import apply_patch, artifact_of, stale_changes
 from src.book_review.synthesize import recommendations_path
 
@@ -86,17 +88,22 @@ def _diff(name: str, before: Optional[dict], after: dict) -> str:
     ))
 
 
-def _save(project_dir: Path, name: str, doc: dict, reason: str) -> None:
+def _validate(name: str, doc: dict) -> Any:
+    """The artifact as its model, stamped as edited now; raises on an invalid edit."""
     from src.models import AddressMap, Glossary, StyleGuide
+
+    model = {"glossary": Glossary, "style": StyleGuide, "address_map": AddressMap}[name]
+    validated = model.model_validate(doc)
+    validated.updated_at = datetime.now()
+    return validated
+
+
+def _save(project_dir: Path, name: str, validated: Any, reason: str) -> None:
     from src.utils.file_io import save_address_map, save_glossary, save_style_guide
 
-    path = project_dir / _FILES[name]
-    if name == "glossary":
-        save_glossary(Glossary.model_validate(doc), path, writer=WRITER, reason=reason)
-    elif name == "style":
-        save_style_guide(StyleGuide.model_validate(doc), path, writer=WRITER, reason=reason)
-    else:
-        save_address_map(AddressMap.model_validate(doc), path, writer=WRITER, reason=reason)
+    save = {"glossary": save_glossary, "style": save_style_guide,
+            "address_map": save_address_map}[name]
+    save(validated, project_dir / _FILES[name], writer=WRITER, reason=reason)
 
 
 def apply(project_dir: Path, selection: list[str], *, yes: bool = False) -> dict[str, Any]:
@@ -105,18 +112,17 @@ def apply(project_dir: Path, selection: list[str], *, yes: bool = False) -> dict
         doc = json.loads(recommendations_path(project_dir).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"status": "error", "error": "no recommendations.json; run `commit` first"}
+    from src.book_review.board import check_selection
+
     by_id = {r["id"]: r for r in doc.get("recommendations") or []}
+    problems = check_selection(project_dir, doc, selection)
+    if problems:
+        return {"status": "error", "error": "; ".join(problems), "problems": problems}
     chosen = parse_selection(selection)
-    unknown = sorted(set(chosen) - set(by_id))
-    if not chosen or unknown:
-        return {"status": "error", "error": f"unknown recommendation ids: {unknown or selection}"}
+    if not chosen:
+        return {"status": "error", "error": "nothing is selected"}
 
     loaded = load_artifacts(project_dir)
-    current = artifact_hashes(project_dir)
-    stale = [f"{rid}: {why}" for rid in chosen for why in stale_reasons(by_id[rid], loaded, current)]
-    if stale:
-        return {"status": "error", "error": "the book changed since the review: " + "; ".join(stale),
-                "stale": stale}
 
     working = copy.deepcopy(loaded)
     touched: dict[str, list[str]] = {}
@@ -147,8 +153,13 @@ def apply(project_dir: Path, selection: list[str], *, yes: bool = False) -> dict
         return {"status": "dry_run", "diffs": diffs, "actions": actions,
                 "instructions": "Show the diffs; on approval re-run with --yes."}
 
+    # Validate every artifact before saving any, so a bad edit leaves the book untouched.
+    try:
+        validated = {name: _validate(name, working[name]) for name in touched}
+    except ValueError as exc:
+        return {"status": "error", "error": f"the edited artifacts do not validate: {exc}"}
     for name, ids in touched.items():
-        _save(project_dir, name, working[name], reason=", ".join(sorted({i.split('.')[0] for i in ids})))
+        _save(project_dir, name, validated[name], reason=", ".join(sorted({i.split('.')[0] for i in ids})))
     results = [_side_effect(project_dir, a) for a in actions]
     log = review_dir(project_dir) / "applied.jsonl"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -176,16 +187,20 @@ def _side_effect(project_dir: Path, action: dict[str, Any]) -> dict[str, Any]:
         from web_ui.evaluations import append_feedback
 
         findings = {f.id: f for f in load_book(project_dir).findings}
-        written = 0
+        # Finding ids are positions in a chunk's list: a re-judged chunk can put a
+        # different issue at the same id, so the key stamped at commit must still match.
+        stamped = patch.get("finding_keys") or {}
+        written, moved = 0, []
         for fid in patch["finding_ids"]:
             f = findings.get(fid)
-            if not f:
+            if not f or (fid in stamped and stamped[fid] != f.issue_key):
+                moved.append(fid)
                 continue
             append_feedback(project_dir, f.chunk_id, f.judge, int(fid.rsplit(":", 1)[-1]),
                             patch["feedback_type"], message=f.message, note=f"book review {rid}",
                             key=f.issue_key)
             written += 1
-        return {**action, "status": "done", "marked": written}
+        return {**action, "status": "done", "marked": written, "skipped_changed": moved}
     if kind == "rejudge":
         from web_ui.evaluations import mark_evaluation_stale
 

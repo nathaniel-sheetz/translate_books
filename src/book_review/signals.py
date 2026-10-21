@@ -13,14 +13,22 @@ What each one looks for, and the case that motivated it:
   ``stalk (mushroom)``, ``the old stag / the old Prince``. The editorial judge
   reads the whole glossary, so it flags the translator for entries it never saw;
   those are the *blind-spot* findings this detector counts.
+- :func:`glossary_sense` (D2) -- an entry applied where the source uses the
+  word in another sense: the translator never sees the entry's ``context``, so
+  a homonym key ("scales → balanza") lands everywhere the word occurs.
 - :func:`address_style_conflicts` (D3) -- the style guide (which the translator
   reads) and the address map (which the address judge reads) disagree about a
   pair, or the map disagrees with itself. Shows up as the address judge and the
   editorial judge pushing the same speaker in opposite directions.
+- :func:`rule_drift` (D4) -- findings judged against rules the translation
+  never saw: a dialogue block, judge prompt, style guide or address map that
+  changed after the chunks were translated.
 - :func:`recurring_rules` (D5) -- one rule firing across many chapters. Accepted
   every time means the translator keeps missing a rule it was given (a coded
   check or a stronger instruction is the fix); dismissed every time means the
   rule or the judge is wrong.
+- :func:`opposite_directions` (D6) -- one word pushed to another in some
+  chapters and back again in others.
 - :func:`false_positive_clusters` (D7) -- dismissals bunched on one rule:
   a miscalibrated judge or a stale glossary entry.
 - :func:`coverage` (D9) -- what has not been judged yet, so the report can say

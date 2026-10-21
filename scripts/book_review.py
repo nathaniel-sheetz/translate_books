@@ -35,7 +35,8 @@ Each subcommand prints one JSON object with a ``_schema`` block:
     python scripts/book_review.py judge   --project pollyanna --yes
     python scripts/book_review.py signals --project pollyanna
 
-Nothing here edits the book or deletes a finding.
+Only `apply --yes` edits the book (glossary, style guide, address map); nothing
+deletes a finding.
 """
 
 from __future__ import annotations
@@ -231,8 +232,8 @@ def _cmd_signals(args: argparse.Namespace) -> int:
 
 _PREPARE_SCHEMA = {
     "status": "'ok' | 'error'",
-    "jobs": "synthesis jobs rendered (one per theme, split when a theme exceeds the job cap)",
-    "by_theme": "jobs per theme (glossary, address_style, rules, dismissals)",
+    "jobs": "synthesis jobs rendered (one per theme, never split)",
+    "by_theme": "jobs per theme (glossary, address_style, rules, drift, dismissals)",
     "input_tokens": "estimated input tokens across all jobs, preamble included",
     "omitted": "signals shown in less detail to fit the budget: [{signal_id, from, to, reason}]",
     "effective": "the profile the wave would run under, with provenance",
@@ -258,8 +259,9 @@ def _profile_kwargs(args: argparse.Namespace) -> dict:
 
 def _cmd_prepare(args: argparse.Namespace) -> int:
     out = synthesize.prepare(_resolve_project(args.project), **_profile_kwargs(args))
-    out["instructions"] = ("Quote jobs, input_tokens and effective as one consent gate and stop; "
-                           "on approval run `fanout`, then `commit`.")
+    if out.get("jobs"):
+        out["instructions"] = ("Quote jobs, input_tokens and effective as one consent gate and stop; "
+                               "on approval run `fanout`, then `commit`.")
     out["_schema"] = _PREPARE_SCHEMA
     return _print(out)
 
@@ -349,7 +351,7 @@ def _cmd_board(args: argparse.Namespace) -> int:
     base = args.base_url.rstrip("/")
     out = {"status": "ok", "project": project_dir.name,
            "url": f"{base}/book-review/{project_dir.name}",
-           "server_running": _board_is_served(f"{base}/api/project/{project_dir.name}/book-review"),
+           "server_running": _board_is_served(f"{base}/book-review/{project_dir.name}"),
            **review_board.summary(project_dir)}
     out["instructions"] = (
         "Give the user url and end the turn: they pick, read the diffs and approve on the "

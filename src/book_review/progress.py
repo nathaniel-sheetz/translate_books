@@ -54,7 +54,7 @@ def newest_translation(project_dir: Path) -> Optional[str]:
 
 
 def record_review(project_dir: Path, *, kind: str, report_path: Optional[str] = None) -> dict[str, Any]:
-    """Mark the current translations as reviewed (``kind``: ``signals`` | ``skipped``)."""
+    """Mark the current translations as reviewed (``kind``: ``signals`` | ``synthesis`` | ``skipped``)."""
     doc = {
         "kind": kind,
         "reviewed_at": datetime.now().isoformat(timespec="seconds"),

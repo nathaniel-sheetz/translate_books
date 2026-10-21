@@ -173,8 +173,9 @@ def run(
         return {"status": "error", "error": blocked, "plan": p}
 
     with locks.project_lock(project_dir, kind=LOCK_KIND):
-        if p["owed"]:
-            names = list(p["owed"])
+        names = list(p["owed"])
+        summary: dict[str, Any] = {"ran": 0, "error_count": 0, "errors": []}
+        if names:
             context, err = _context(project_dir, names)
             if err:
                 return {"status": "error", "error": err, "plan": p}
@@ -184,7 +185,9 @@ def run(
                 prompt_cache=cache, default_cli=prof.cli,
                 adjudicate_scopes=["book"],
             )
-        else:
+        # The sweep adjudicates only when editorial is among the judges it ran; pass 2
+        # can still be owed (and was quoted) when editorial itself is current.
+        if "editorial" not in names and p["pending_pass2_chunks"] and not summary.get("fatal"):
             context, err = _context(project_dir, ["editorial"])
             if err:
                 return {"status": "error", "error": err, "plan": p}
@@ -193,8 +196,9 @@ def run(
                 cli=cli, worker_model=worker_model, effort=effort,
                 prompt_cache=cache or "auto",
             )
-            summary = {"ran": 0, "adjudication": adjudication,
-                       "error_count": len(errors), "errors": errors[:5]}
+            summary = {**summary, "adjudication": adjudication,
+                       "error_count": (summary.get("error_count") or 0) + len(errors),
+                       "errors": ((summary.get("errors") or []) + errors)[:5]}
     status = "error" if summary.get("fatal") else "ok"
     return {"status": status, "plan": p, "summary": summary,
             **({"error": summary["fatal"]} if summary.get("fatal") else {})}

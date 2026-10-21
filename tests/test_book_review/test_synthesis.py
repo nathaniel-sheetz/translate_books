@@ -209,7 +209,7 @@ def test_apply_refuses_when_the_artifact_changed(book):
         "recommendations"][0]["id"]
     book.glossary([term("porte cochere", "otra cosa")])
     out = apply(book.dir, [rid], yes=True)
-    assert out["status"] == "error" and out["stale"]
+    assert out["status"] == "error" and "changed since the review" in out["error"]
 
 
 def test_dismiss_writes_keyed_feedback(book):
@@ -226,6 +226,85 @@ def test_dismiss_writes_keyed_feedback(book):
     [finding] = [f for f in book.load().findings if f.id == fid]
     assert finding.mark == "false_positive"
 
+
+
+def committed(book, **overrides):
+    """Prepare, write one glossary-theme draft and commit it; the recommendation's id."""
+    synthesize.prepare(book.dir, cli="claude")
+    write_drafts(book.dir, draft_payload(**overrides))
+    synthesize.commit(book.dir)
+    return json.loads(synthesize.recommendations_path(book.dir).read_text(encoding="utf-8"))[
+        "recommendations"][0]["id"]
+
+
+def test_dismiss_skips_a_finding_whose_chunk_was_rejudged(book):
+    fid = "editorial:chapter_01_chunk_000:kept:0"
+    rid = committed(book, title="Dismiss the porte-cochere finding", follow_ups=[],
+                    patches=[{"type": "judge.dismiss", "finding_ids": [fid]}])
+    other = issue("units", "Keep miles.", "diez kilómetros", "diez millas", finding_key="u1")
+    book.judge("chapter_01_chunk_000", "editorial", [other])
+    out = apply(book.dir, [rid], yes=True)
+    action = out["actions"][0]
+    assert action["marked"] == 0 and action["skipped_changed"] == [fid]
+    assert not (book.dir / "evaluations" / "_feedback.jsonl").exists()
+
+
+def test_apply_twice_is_refused_and_appends_once(book):
+    rid = committed(book, title="Note the porch", follow_ups=[],
+                    patches=[{"type": "style.append", "text": "PORCH\nSay cochera."}])
+    assert apply(book.dir, [rid], yes=True)["status"] == "ok"
+    after_first = (book.dir / "style.json").read_text(encoding="utf-8")
+    again = apply(book.dir, [rid], yes=True)
+    assert again["status"] == "error" and "already applied" in again["error"]
+    assert (book.dir / "style.json").read_text(encoding="utf-8") == after_first
+
+
+def test_apply_refuses_bad_change_numbers_without_logging(book):
+    rid = committed(book)
+    out = apply(book.dir, [f"{rid}.9"], yes=True)
+    assert out["status"] == "error" and "no change numbered [9]" in out["error"]
+    bad = apply(book.dir, [f"{rid}.abc"], yes=True)
+    assert bad["status"] == "error" and "not a selection" in bad["error"]
+    assert not (book.dir / ".harness" / "book_review" / "applied.jsonl").exists()
+
+
+def test_apply_validates_every_artifact_before_saving_any(book, monkeypatch):
+    import src.book_review.apply as apply_mod
+
+    rid = committed(book, patches=[
+        {"type": "glossary.rekey", "english": "porte cochere", "new_english": "porte-cochere"},
+        {"type": "style.append", "text": "PORCH\nSay cochera."},
+    ])
+    real = apply_mod._validate
+
+    def failing(name, doc):
+        if name == "style":
+            raise ValueError("bad style guide")
+        return real(name, doc)
+
+    monkeypatch.setattr(apply_mod, "_validate", failing)
+    before = (book.dir / "glossary.json").read_text(encoding="utf-8")
+    out = apply(book.dir, [rid], yes=True)
+    assert out["status"] == "error" and "bad style guide" in out["error"]
+    assert (book.dir / "glossary.json").read_text(encoding="utf-8") == before
+
+
+def test_apply_stamps_updated_at(book):
+    book.style("FORMS OF ADDRESS\nThe owl keeps a familiar tú with Bambi.\n\nUNITS\nKeep miles.",
+               updated_at="2025-01-01T00:00:00")
+    rid = committed(book, follow_ups=[],
+                    patches=[{"type": "style.append", "text": "PORCH\nSay cochera."}])
+    assert apply(book.dir, [rid], yes=True)["status"] == "ok"
+    style = json.loads((book.dir / "style.json").read_text(encoding="utf-8"))
+    assert style["updated_at"] > "2025-01-02"
+
+
+def test_prepare_with_no_themes_drops_the_old_manifest(book, monkeypatch):
+    committed(book)
+    monkeypatch.setattr(synthesize.ev, "build", lambda corpus, signals: {"themes": []})
+    out = synthesize.prepare(book.dir, cli="claude")
+    assert out["jobs"] == 0 and not synthesize._manifest_path(book.dir).exists()
+    assert synthesize.commit(book.dir)["status"] == "error"
 
 def test_parse_selection():
     assert parse_selection(["R-1,R-2.3", "R-2.1"]) == {"R-1": None, "R-2": {1, 3}}

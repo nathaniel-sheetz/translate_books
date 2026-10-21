@@ -106,6 +106,10 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
                 return None, "glossary.edit changes nothing"
             if "spanish" in changes and not _str(changes["spanish"]):
                 return None, "glossary.edit cannot blank spanish"
+            if "spanish" in changes:
+                changes["spanish"] = _str(changes["spanish"])
+            if "context" in changes:
+                changes["context"] = _str(changes["context"]) or None
             if "alternatives" in changes:
                 changes["alternatives"] = [_str(a) for a in changes["alternatives"] or [] if _str(a)]
             out.update(changes)
@@ -196,7 +200,8 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
         feedback = _str(patch.get("feedback_type")) or "false_positive"
         if feedback not in ("false_positive", "missing_context_gap", "bad_message"):
             return None, f"feedback_type {feedback!r} is not a dismissal"
-        out.update(finding_ids=ids, feedback_type=feedback)
+        keys = {f.id: f.issue_key for f in corpus.findings}
+        out.update(finding_ids=ids, finding_keys={i: keys[i] for i in ids}, feedback_type=feedback)
         return out, None
     if kind in FOLLOW_UP_TYPES:
         wanted = [c for c in patch.get("chapters") or [] if isinstance(c, str)]
