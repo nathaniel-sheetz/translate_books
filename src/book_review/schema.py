@@ -29,7 +29,7 @@ PATCH_TYPES = frozenset({
     "glossary.rekey", "glossary.add_variant", "glossary.edit", "glossary.split_sense",
     "glossary.add", "glossary.remove",
     "style.replace_text", "style.append",
-    "address.set_direction", "address.replace_global_rules_text",
+    "address.set_direction", "address.add_pair", "address.replace_global_rules_text",
     "judge.dismiss", "rejudge", "retranslate", "house.rule_proposal", "manual",
 })
 FOLLOW_UP_TYPES = frozenset({"rejudge", "retranslate"})
@@ -168,6 +168,24 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
         out.update(a=pair["a"], b=pair["b"], direction=direction, form=form,
                    notes=_str(patch.get("notes")) or None)
         return out, None
+    if kind == "address.add_pair":
+        if not corpus.address_map:
+            return None, "the book has no address map"
+        a, b = _str(patch.get("a")), _str(patch.get("b"))
+        if not a or not b or a == b:
+            return None, "address.add_pair needs two different parties"
+        if _pair(corpus, a, b):
+            return None, f"the map already has {a}/{b}; use address.set_direction"
+        forms = {}
+        for direction in ("a_to_b", "b_to_a"):
+            form = _str(patch.get(direction)).lower()
+            form = "tú" if form in ("tú", "tu") else "usted" if form == "usted" else ""
+            if not form:
+                return None, f"{direction} must be tú or usted"
+            forms[direction] = form
+        out.update(a=a, b=b, **forms, relationship=_str(patch.get("relationship")) or None,
+                   notes=_str(patch.get("notes")) or None)
+        return out, None
     if kind == "address.replace_global_rules_text":
         rules = str((corpus.address_map or {}).get("global_rules") or "")
         before = str(patch.get("before") or "")
@@ -295,31 +313,39 @@ def check_recommendation(
     }, problems
 
 
-def _target(patch: dict[str, Any]) -> Optional[str]:
+def _targets(patch: dict[str, Any]) -> list[str]:
+    """What a patch changes, as keys two recommendations would collide on."""
     kind = patch["type"]
     if kind.startswith("glossary."):
-        return f"glossary:{patch['english'].lower()}"
+        return [f"glossary:{patch['english'].lower()}"]
     if kind == "style.replace_text":
-        return f"style:{patch['before'][:60]}"
+        return [f"style:{patch['before'][:60]}"]
     if kind == "address.set_direction":
-        return f"address:{patch['a']}|{patch['b']}|{patch['direction']}"
+        return [f"address:{patch['a']}|{patch['b']}|{patch['direction']}"]
+    if kind == "address.add_pair":
+        return [f"address:pair:{'|'.join(sorted((patch['a'].lower(), patch['b'].lower())))}"]
     if kind == "address.replace_global_rules_text":
-        return f"address:global:{patch['before'][:60]}"
-    return None
+        return [f"address:global:{patch['before'][:60]}"]
+    if kind == "judge.dismiss":
+        return [f"finding:{i}" for i in patch["finding_ids"]]
+    return []
 
 
 def reconcile(recommendations: list[dict[str, Any]]) -> None:
-    """Mark recommendations whose patches touch the same target (in place)."""
+    """Mark recommendations whose patches touch the same target (in place).
+
+    Two recommendations dismissing the same findings count as touching the same
+    target: applying both would mark each finding twice.
+    """
     owners: dict[str, list[str]] = {}
     for rec in recommendations:
         for patch in rec["patches"]:
-            target = _target(patch)
-            if target:
+            for target in _targets(patch):
                 owners.setdefault(target, []).append(rec["id"])
     for rec in recommendations:
         clashes = sorted({
-            other for patch in rec["patches"] for other in owners.get(_target(patch) or "", [])
-            if other != rec["id"]
+            other for patch in rec["patches"] for target in _targets(patch)
+            for other in owners.get(target, []) if other != rec["id"]
         })
         if clashes:
             rec["conflicts_with"] = clashes

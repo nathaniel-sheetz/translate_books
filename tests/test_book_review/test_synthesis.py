@@ -252,3 +252,40 @@ def test_address_signals_from_any_detector_share_one_job():
         "theme": "address", "label": "judge_miscalibrated"}}) == "address_style"
     assert _theme_of_signal({"detector": "recurring_rules", "metrics": {
         "level": "rule", "name": "calque-syntax", "judge": "editorial"}}) == "rules"
+
+
+def test_budget_shrinks_generic_clusters_before_conflicts(book):
+    corpus = book.load()
+    signals = {"signals": [
+        {"id": "D3:x", "detector": "address_style_conflicts", "title": "t", "score": 1.0,
+         "finding_ids": [], "artifact_refs": [], "metrics": {}, "tier_hint": "A"},
+        {"id": "D5:y", "detector": "recurring_rules", "title": "t", "score": 50.0,
+         "finding_ids": ["editorial:chapter_01_chunk_000:kept:0"] * 40, "artifact_refs": [],
+         "metrics": {"name": "calque-x", "level": "rule"}, "tier_hint": "A"},
+    ]}
+    ev.MIN_DEMOTE_TOKENS, saved = 0, ev.MIN_DEMOTE_TOKENS
+    try:
+        built = ev.build(corpus, signals, job_cap=200, book_cap=10_000)
+    finally:
+        ev.MIN_DEMOTE_TOKENS = saved
+    assert built["omitted"][0]["signal_id"] == "D5:y"
+
+
+def test_add_pair_validates_and_applies(book):
+    from src.book_review.patches import apply_address
+
+    clean, why = check(book, {"type": "address.add_pair", "a": "la ardilla", "b": "la madre",
+                              "a_to_b": "tu", "b_to_a": "tú"})
+    assert clean and clean["a_to_b"] == "tú", why
+    assert check(book, {"type": "address.add_pair", "a": "Bambi", "b": "the owl",
+                        "a_to_b": "tú", "b_to_a": "tú"})[0] is None
+    doc = {"pairs": []}
+    apply_address(doc, clean)
+    assert doc["pairs"][0]["directions"]["b_to_a"][0]["form"] == "tú"
+
+
+def test_overlapping_dismissals_are_conflicts():
+    recs = [{"id": "R-1", "patches": [{"type": "judge.dismiss", "finding_ids": ["f1", "f2"]}]},
+            {"id": "R-2", "patches": [{"type": "judge.dismiss", "finding_ids": ["f2"]}]}]
+    schema.reconcile(recs)
+    assert recs[0]["conflicts_with"] == ["R-2"]

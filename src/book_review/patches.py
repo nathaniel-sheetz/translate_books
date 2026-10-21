@@ -66,6 +66,18 @@ def apply_address(doc: dict, patch: dict) -> None:
             raise ValueError("the global-rules text to replace is no longer there exactly once")
         doc["global_rules"] = rules.replace(patch["before"], patch["after"], 1)
         return
+    if patch["type"] == "address.add_pair":
+        def segment(form):
+            seg = {"form": form, "when": "default"}
+            if patch.get("notes"):
+                seg["notes"] = patch["notes"]
+            return [seg]
+        doc.setdefault("pairs", []).append({
+            "a": patch["a"], "b": patch["b"],
+            **({"relationship": patch["relationship"]} if patch.get("relationship") else {}),
+            "directions": {"a_to_b": segment(patch["a_to_b"]), "b_to_a": segment(patch["b_to_a"])},
+        })
+        return
     for pair in doc.get("pairs") or []:
         if pair.get("a") == patch["a"] and pair.get("b") == patch["b"]:
             segment = {"form": patch["form"], "when": "default"}

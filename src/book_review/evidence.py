@@ -36,6 +36,20 @@ C_SAMPLES = 2
 EXCERPT_CHARS = 400
 ENGLISH_CHARS = 700
 JOB_TOKEN_CAP = 40_000
+#: Below this an item costs too little to be worth shrinking.
+MIN_DEMOTE_TOKENS = 1_000
+#: Which detectors' signals lose detail first when a budget is hit. Scores are
+#: not comparable across detectors, so the order is by kind: generic recurring
+#: clusters and surface echoes go before the conflicts and dead keys they echo.
+DEMOTE_ORDER = {
+    "recurring_rules": 0,
+    "opposite_directions": 1,
+    "rule_drift": 2,
+    "false_positive_clusters": 3,
+    "glossary_sense": 4,
+    "dead_glossary_keys": 5,
+    "address_style_conflicts": 6,
+}
 BOOK_TOKEN_CAP = 200_000
 
 THEMES = ("glossary", "address_style", "drift", "rules", "dismissals")
@@ -223,14 +237,23 @@ def build(corpus: BookCorpus, signals_result: dict[str, Any], *,
     for s in signals:
         grouped[_theme_of_signal(s)].append(s)
 
+    def pick_victim(pool):
+        """The signal to show in less detail next: least valuable, and big enough to matter."""
+        candidates = [s for s in pool if tiers[s["id"]] != "C"]
+        sized = [(s, _size(_item(s, tiers[s["id"]], corpus, by_id))) for s in candidates]
+        worth = [(s, n) for s, n in sized if n >= MIN_DEMOTE_TOKENS] or sized
+        if not worth:
+            return None
+        return min(worth, key=lambda sn: (DEMOTE_ORDER.get(sn[0]["detector"], 0),
+                                          sn[0]["score"], -sn[1]))[0]
+
     def demote_until(theme_signals, cap):
-        """Drop the lowest-scoring items a tier at a time until the set fits ``cap``."""
+        """Show signals in less detail, a tier at a time, until the set fits ``cap``."""
         items = items_for(theme_signals)
         while sum(_size(i) for i in items) > cap:
-            candidates = [s for s in reversed(theme_signals) if tiers[s["id"]] != "C"]
-            if not candidates:
+            victim = pick_victim(theme_signals)
+            if victim is None:
                 break
-            victim = candidates[0]
             old = tiers[victim["id"]]
             tiers[victim["id"]] = "B" if old == "A" else "C"
             omitted.append({"signal_id": victim["id"], "from": old, "to": tiers[victim["id"]],
@@ -243,31 +266,20 @@ def build(corpus: BookCorpus, signals_result: dict[str, Any], *,
         theme_signals = grouped.get(theme) or []
         if not theme_signals:
             continue
-        items = demote_until(theme_signals, job_cap * 3)
+        # One job per theme, never split: two jobs each holding half of one
+        # conflict each propose their own fix for it. Over the cap, the
+        # lowest-scoring signals are shown in less detail instead.
+        items = demote_until(theme_signals, job_cap)
         # Full-evidence items first: they are the ones the model must not skim.
         items.sort(key=lambda i: (i["tier"], -i["score"]))
-        # Split into jobs no bigger than the job cap, keeping score order.
-        jobs: list[list[dict[str, Any]]] = [[]]
-        used = 0
-        for item in items:
-            size = _size(item)
-            if jobs[-1] and used + size > job_cap:
-                jobs.append([])
-                used = 0
-            jobs[-1].append(item)
-            used += size
-        themes.append({
-            "theme": theme,
-            "jobs": [{"job_id": f"{theme}-{n + 1}", "items": job} for n, job in enumerate(jobs) if job],
-        })
+        themes.append({"theme": theme, "jobs": [{"job_id": f"{theme}-1", "items": items}]})
 
     total = sum(_size(i) for t in themes for j in t["jobs"] for i in j["items"])
     while total > book_cap:
-        # Book-wide overflow: demote across themes, lowest score first.
-        candidates = [s for s in reversed(signals) if tiers[s["id"]] != "C"]
-        if not candidates:
+        # Book-wide overflow: demote across themes, least valuable first.
+        victim = pick_victim(signals)
+        if victim is None:
             break
-        victim = candidates[0]
         old = tiers[victim["id"]]
         tiers[victim["id"]] = "B" if old == "A" else "C"
         omitted.append({"signal_id": victim["id"], "from": old, "to": tiers[victim["id"]],

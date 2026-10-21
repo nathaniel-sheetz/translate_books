@@ -1,5 +1,5 @@
 # book review — turn detector signals into upstream fixes
-# Version: 1.1
+# Version: 1.2
 # Reads one theme of a book's book-review evidence (glossary, address_style,
 # rules, dismissals) and proposes the fewest upstream changes that would remove
 # the patterns, each as a concrete patch. Run by scripts/book_review.py fanout.
@@ -94,6 +94,7 @@ Each patch is an object with a `type` and the fields shown.
 | `style.replace_text` | `before` (exact text now in the style guide, occurring once), `after` |
 | `style.append` | `text` |
 | `address.set_direction` | `a`, `b` (an existing pair, as written in the map), `direction` (`a_to_b` or `b_to_a`), `form` (`tú` or `usted`), optional `notes` |
+| `address.add_pair` | `a`, `b` (a pair the map does not have yet), `a_to_b`, `b_to_a` (`tú` or `usted`), optional `relationship`, `notes` |
 | `address.replace_global_rules_text` | `before` (exact, occurring once), `after` |
 | `judge.dismiss` | `finding_ids` (ids from the evidence), optional `feedback_type` (default `false_positive`) |
 | `rejudge` | `chapters` (ids like `chapter_07`) |

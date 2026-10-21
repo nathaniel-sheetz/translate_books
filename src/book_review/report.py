@@ -158,6 +158,9 @@ def describe_patch(patch: dict[str, Any]) -> str:
     if kind == "address.set_direction":
         a, b = (patch["a"], patch["b"]) if patch["direction"] == "a_to_b" else (patch["b"], patch["a"])
         return f"address map: {a}→{b} uses {patch['form']}"
+    if kind == "address.add_pair":
+        return (f"address map: add pair {patch['a']}→{patch['b']} {patch['a_to_b']}, "
+                f"{patch['b']}→{patch['a']} {patch['b_to_a']}")
     if kind == "address.replace_global_rules_text":
         return (f"address map global rules: replace “{_clip(patch['before'], 140)}” with "
                 f"“{_clip(patch['after'], 180)}”")
