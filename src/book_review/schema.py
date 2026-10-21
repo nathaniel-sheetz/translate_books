@@ -16,10 +16,13 @@ valid patch and no follow-up is rejected whole.
 
 from __future__ import annotations
 
+import copy
 import hashlib
+from dataclasses import replace
 from typing import Any, Optional
 
 from src.book_review.corpus import BookCorpus
+from src.book_review.patches import apply_address, apply_glossary, apply_style
 from src.house.match import term_occurs
 
 PATCH_TYPES = frozenset({
@@ -232,13 +235,36 @@ def check_recommendation(
         problems.append(f"dropped unknown evidence ids {unknown[:5]}")
     evidence = [e for e in evidence if e in known_ids]
 
+    # Patches are replayed in order on working copies, so each one is checked
+    # against the artifact as the earlier ones leave it: "rekey X to Y, then add
+    # Z as a variant of Y" is valid even though Y does not exist yet.
     patches = []
+    view = replace(
+        corpus,
+        glossary=copy.deepcopy(corpus.glossary),
+        address_map=copy.deepcopy(corpus.address_map),
+    )
     for n, patch in enumerate(raw.get("patches") or []):
-        clean, why = check_patch(patch, corpus, finding_ids, chapters)
-        if clean:
-            patches.append(clean)
-        else:
+        clean, why = check_patch(patch, view, finding_ids, chapters)
+        if not clean:
             problems.append(f"patch {n + 1} dropped: {why}")
+            continue
+        patches.append(clean)
+        family = clean["type"].split(".", 1)[0]
+        try:
+            if family == "glossary":
+                doc = {"terms": view.glossary}
+                apply_glossary(doc, clean)
+                view.glossary = doc["terms"]
+            elif family == "style":
+                doc = {"content": view.style_text}
+                apply_style(doc, clean)
+                view.style_text = doc["content"]
+            elif family == "address" and view.address_map is not None:
+                apply_address(view.address_map, clean)
+        except ValueError as exc:
+            patches.pop()
+            problems.append(f"patch {n + 1} dropped: {exc}")
     follow_ups = []
     for n, item in enumerate(raw.get("follow_ups") or []):
         if isinstance(item, dict) and _str(item.get("type")) in FOLLOW_UP_TYPES:

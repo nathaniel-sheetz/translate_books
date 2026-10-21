@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.book_review import review_dir
+from src.book_review.patches import apply_address, apply_glossary, apply_style
 from src.book_review.evidence import artifact_hashes
 from src.book_review.synthesize import recommendations_path
 
@@ -65,70 +66,6 @@ def parse_selection(raw: list[str]) -> dict[str, Optional[set[int]]]:
             else:
                 out[rid] = None
     return out
-
-
-def _entry(terms: list[dict], english: str) -> Optional[dict]:
-    wanted = english.lower()
-    return next((t for t in terms if str(t.get("english") or "").lower() == wanted), None)
-
-
-def _apply_glossary(doc: dict, patch: dict) -> None:
-    terms = doc.setdefault("terms", [])
-    kind = patch["type"]
-    if kind == "glossary.add":
-        terms.append({"english": patch["english"], "spanish": patch["spanish"], "type": "other",
-                      "alternatives": patch.get("alternatives") or [],
-                      **({"context": patch["context"]} if patch.get("context") else {})})
-        return
-    entry = _entry(terms, patch["english"])
-    if entry is None:
-        raise ValueError(f"glossary entry {patch['english']!r} is gone")
-    if kind == "glossary.rekey":
-        entry["english"] = patch["new_english"]
-    elif kind == "glossary.add_variant":
-        twin = copy.deepcopy(entry)
-        twin["english"] = patch["new_english"]
-        terms.insert(terms.index(entry) + 1, twin)
-    elif kind == "glossary.edit":
-        for field in ("spanish", "alternatives", "context"):
-            if field in patch:
-                entry[field] = patch[field]
-    elif kind == "glossary.split_sense":
-        at = terms.index(entry)
-        terms.pop(at)
-        for offset, e in enumerate(patch["entries"]):
-            terms.insert(at + offset, {"english": e["english"], "spanish": e["spanish"],
-                                       "type": entry.get("type") or "other", "alternatives": [],
-                                       **({"context": e["context"]} if e.get("context") else {})})
-    elif kind == "glossary.remove":
-        terms.remove(entry)
-
-
-def _apply_style(doc: dict, patch: dict) -> None:
-    content = doc.get("content") or ""
-    if patch["type"] == "style.replace_text":
-        if content.count(patch["before"]) != 1:
-            raise ValueError("the style guide text to replace is no longer there exactly once")
-        doc["content"] = content.replace(patch["before"], patch["after"], 1)
-    else:
-        doc["content"] = content.rstrip() + "\n\n" + patch["text"]
-
-
-def _apply_address(doc: dict, patch: dict) -> None:
-    if patch["type"] == "address.replace_global_rules_text":
-        rules = doc.get("global_rules") or ""
-        if rules.count(patch["before"]) != 1:
-            raise ValueError("the global-rules text to replace is no longer there exactly once")
-        doc["global_rules"] = rules.replace(patch["before"], patch["after"], 1)
-        return
-    for pair in doc.get("pairs") or []:
-        if pair.get("a") == patch["a"] and pair.get("b") == patch["b"]:
-            segment = {"form": patch["form"], "when": "default"}
-            if patch.get("notes"):
-                segment["notes"] = patch["notes"]
-            pair.setdefault("directions", {})[patch["direction"]] = [segment]
-            return
-    raise ValueError(f"address pair {patch['a']}/{patch['b']} is gone")
 
 
 def _diff(name: str, before: Optional[dict], after: dict) -> str:
@@ -194,8 +131,8 @@ def apply(project_dir: Path, selection: list[str], *, yes: bool = False) -> dict
                     name = {"glossary": "glossary", "style": "style", "address": "address_map"}[family]
                     if name not in working:
                         raise ValueError(f"{_FILES[name]} does not exist")
-                    {"glossary": _apply_glossary, "style": _apply_style,
-                     "address": _apply_address}[family](working[name], patch)
+                    {"glossary": apply_glossary, "style": apply_style,
+                     "address": apply_address}[family](working[name], patch)
                     touched.setdefault(name, []).append(f"{rid}.{n}")
                     actions.append({"id": f"{rid}.{n}", "type": kind, "status": "staged"})
                 else:

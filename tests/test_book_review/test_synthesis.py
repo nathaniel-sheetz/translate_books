@@ -229,3 +229,26 @@ def test_dismiss_writes_keyed_feedback(book):
 
 def test_parse_selection():
     assert parse_selection(["R-1,R-2.3", "R-2.1"]) == {"R-1": None, "R-2": {1, 3}}
+
+
+def test_later_patches_are_validated_against_earlier_ones(book):
+    corpus = book.load()
+    raw = {"title": "Rekey then add a variant", "patches": [
+        {"type": "glossary.rekey", "english": "porte cochere", "new_english": "porte-cochere"},
+        {"type": "glossary.add_variant", "english": "porte-cochere", "new_english": "porte"},
+    ]}
+    rec, problems = schema.check_recommendation(raw, "glossary", corpus, set())
+    assert [p["type"] for p in rec["patches"]] == ["glossary.rekey", "glossary.add_variant"], problems
+
+
+def test_address_signals_from_any_detector_share_one_job():
+    from src.book_review.evidence import _theme_of_signal
+
+    assert _theme_of_signal({"detector": "recurring_rules", "metrics": {
+        "level": "rule", "name": "forms-of-address-usted", "judge": "editorial"}}) == "address_style"
+    assert _theme_of_signal({"detector": "rule_drift", "metrics": {
+        "kind": "artifact_after_translation", "artifact": "address map"}}) == "address_style"
+    assert _theme_of_signal({"detector": "false_positive_clusters", "metrics": {
+        "theme": "address", "label": "judge_miscalibrated"}}) == "address_style"
+    assert _theme_of_signal({"detector": "recurring_rules", "metrics": {
+        "level": "rule", "name": "calque-syntax", "judge": "editorial"}}) == "rules"

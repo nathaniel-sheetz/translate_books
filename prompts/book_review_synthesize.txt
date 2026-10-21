@@ -1,5 +1,5 @@
 # book review — turn detector signals into upstream fixes
-# Version: 1.0
+# Version: 1.1
 # Reads one theme of a book's book-review evidence (glossary, address_style,
 # rules, dismissals) and proposes the fewest upstream changes that would remove
 # the patterns, each as a concrete patch. Run by scripts/book_review.py fanout.
@@ -25,9 +25,22 @@ you. Work from them alone: do not search or open files.
 
 ## How the pipeline works (what each artifact reaches)
 
-- The translator reads the **style guide** and only the **glossary entries whose
-  English key occurs in its chunk's source as written**. It never sees the address
-  map, and never sees a glossary entry's `context` note.
+- The translator reads:
+  - the **style guide**;
+  - the **house rules** (shared by every book), plus house notes triggered by words
+    in its chunk;
+  - on chunks with dialogue, the shared **DIALOGUE FORMATTING rules**, the same
+    rules the dialogue judge applies;
+  - only the **glossary entries whose English key occurs in its chunk's source as
+    written**.
+
+  It never sees the address map, and never sees a glossary entry's `context` note.
+- Dialogue punctuation is governed by the shared dialogue rules, not the style
+  guide. Never propose copying or restating dialogue-punctuation rules into the
+  style guide. If those rules are wrong or unclear, propose a `manual` patch naming
+  the rule. If findings on them come only from chunks translated under an older
+  version of the rules, that is drift: they need a re-judge or nothing, not a rule
+  change.
   - A key with a hyphen or space the source lacks, a curly apostrophe, a
     "(sense)" label or a "/" never matches.
   - A homonym key ("scales", "locust") reaches chunks where the word means

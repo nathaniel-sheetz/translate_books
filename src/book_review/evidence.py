@@ -144,6 +144,14 @@ def _artifacts(signal: dict[str, Any], corpus: BookCorpus) -> dict[str, Any]:
 
 
 def _theme_of_signal(signal: dict[str, Any]) -> str:
+    """Which synthesis job reads a signal.
+
+    Everything about forms of address goes to one job, whichever detector raised
+    it: three jobs each seeing a slice of the same conflict each propose their own
+    rewrite of FORMS OF ADDRESS.
+    """
+    from src.book_review.corpus import theme_of
+
     detector = signal["detector"]
     metrics = signal.get("metrics") or {}
     if detector in ("dead_glossary_keys", "glossary_sense"):
@@ -151,15 +159,20 @@ def _theme_of_signal(signal: dict[str, Any]) -> str:
     if detector == "address_style_conflicts":
         return "address_style"
     if detector == "rule_drift":
+        if metrics.get("artifact") == "address map" or metrics.get("judge") == "address":
+            return "address_style"
         return "drift"
     if detector == "opposite_directions":
         return "address_style" if (metrics.get("judges") or {}).get("address") else "rules"
     if detector == "false_positive_clusters":
-        return "glossary" if metrics.get("label") == "glossary_stale" else "dismissals"
-    name = metrics.get("name")
-    if metrics.get("level") == "theme" and name == "glossary" or str(name).startswith("glossary"):
+        if metrics.get("label") == "glossary_stale":
+            return "glossary"
+        return "address_style" if metrics.get("theme") == "address" else "dismissals"
+    name = str(metrics.get("name") or "")
+    family = name if metrics.get("level") == "theme" else theme_of(name, None, "")
+    if family == "glossary":
         return "glossary"
-    if name == "address" or metrics.get("judge") == "address":
+    if family == "address" or metrics.get("judge") == "address":
         return "address_style"
     return "rules"
 
