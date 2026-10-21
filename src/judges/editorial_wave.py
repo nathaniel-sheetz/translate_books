@@ -939,6 +939,12 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
     # A manifest written before the field existed was rendered under the
     # requested-only rule, which is what the default reproduces.
     source = manifest.get("source") or "requested"
+    if source not in ev.SOURCE_MODES:
+        return {
+            "status": "error",
+            "command": "commit",
+            "error": f"manifest source {source!r} not in {ev.SOURCE_MODES}",
+        }
 
     for entry in manifest.get("entries") or []:
         chunk_id = entry["chunk_id"]

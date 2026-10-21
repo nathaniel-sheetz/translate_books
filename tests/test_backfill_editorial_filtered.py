@@ -11,7 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.backfill_editorial_filtered import backfill_project  # noqa: E402
+from scripts.backfill_editorial_filtered import (  # noqa: E402
+    backfill_project,
+    discover_projects,
+)
 from src.judges.base import JudgeTarget  # noqa: E402
 from src.judges.editorial_judge import EditorialJudge  # noqa: E402
 
@@ -130,6 +133,47 @@ def test_a_replay_that_disagrees_is_left_alone(tmp_path):
 
     assert stats["mismatched"] == 1
     assert path.read_bytes() == before
+
+
+def test_a_grouped_draft_is_not_read_as_lost(tmp_path):
+    """A batch draft may hold this chunk; a permanent ``filtered_lost`` would bury it."""
+    project = _project(tmp_path, DROPPY, draft=False)
+    judges = project / ".harness" / "judges"
+    judges.mkdir(parents=True)
+    (judges / "batch_001.editorial.draft.json").write_text("{}", encoding="utf-8")
+    path = project / "evaluations" / f"{CHUNK}.json"
+    before = path.read_bytes()
+
+    stats = backfill_project(project, write=True)
+
+    assert stats["mismatched"] == 1
+    assert stats["files_written"] == 0
+    assert path.read_bytes() == before
+
+
+def test_a_malformed_judges_field_is_skipped_and_the_run_continues(tmp_path):
+    project = _project(tmp_path, DROPPY)
+    (project / "evaluations" / "chapter_00_chunk_000.json").write_text(
+        json.dumps({"judges": ["editorial"]}), encoding="utf-8"
+    )
+
+    stats = backfill_project(project, write=True)
+
+    assert stats["recovered"] == 1
+
+
+def test_discover_skips_snapshots_at_any_depth(tmp_path):
+    root = tmp_path / "projects"
+    for rel in (
+        "book",
+        ".published/other",
+        "book/ab_chapter_02/A_backup",
+        ".backburner/book.bak-migration",
+        ".backburner/book.bak-migration/ab_chapter_02/B",
+    ):
+        (root / rel / "evaluations").mkdir(parents=True)
+
+    assert discover_projects(root) == [root / ".published" / "other", root / "book"]
 
 
 def test_nothing_dropped_writes_an_empty_list_without_a_draft(tmp_path):

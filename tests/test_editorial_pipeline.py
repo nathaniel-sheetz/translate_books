@@ -423,6 +423,24 @@ def test_source_all_shows_the_english_on_every_candidate(project, capsys):
     assert persisted["source_attached"] == 2
 
 
+def test_commit_refuses_a_manifest_with_an_unknown_source(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    manifest_path = project / ".harness" / "editorial" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"] = "ALL"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    evaluation = project / "evaluations" / f"{CHUNK_ID}.json"
+    before = evaluation.read_bytes()
+
+    assert _run(["commit", "--project", str(project), "--persist"]) == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "error"
+    assert "ALL" in out["error"]
+    assert evaluation.read_bytes() == before
+
+
 def test_the_default_source_mode_is_stamped_too(project, capsys):
     result = _persist_pass_one(project, [_candidate()])
     _prepare(project, capsys)
@@ -967,6 +985,32 @@ def test_metrics_report_volume_and_anchoring(project):
     assert report["volume"]["clean_chunk_pct"] == 0.0
     assert report["anchoring"]["anchored"] == 1
     assert report["anchoring"]["anchor_pct"] == 100.0
+
+
+@pytest.mark.parametrize("mode", ["requested", "all"])
+def test_metrics_keep_source_all_out_of_the_requested_rate(project, mode):
+    """English attached to everything answers a different question than
+    English attached because pass 1 asked; one rate must not blend the two."""
+    _persist_pass_one(project, [_candidate()])
+    path = project / "evaluations" / f"{CHUNK_ID}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["judges"]["editorial"]["metadata"].update(
+        verified=True, source_mode=mode, source_requested=1, source_attached=4, source_used=1
+    )
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    adjudication = editorial_metrics.analyse_project(project)["adjudication"]
+
+    assert adjudication["source_requested"] == 1
+    if mode == "all":
+        assert adjudication["source_attached"] == 0
+        assert adjudication["source_used_pct"] is None
+        assert adjudication["source_all_attached"] == 4
+        assert adjudication["source_all_used_pct"] == 25.0
+    else:
+        assert adjudication["source_attached"] == 4
+        assert adjudication["source_used_pct"] == 25.0
+        assert adjudication["source_all_attached"] == 0
 
 
 def test_metrics_count_a_clean_chunk(project):

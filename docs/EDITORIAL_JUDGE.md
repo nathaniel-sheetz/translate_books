@@ -36,7 +36,10 @@ eight books) put the existing checkers here:
 
 A judge in that range gets ignored, correctly. So the threshold is defended in
 code, not only in the prompt — the dialogue judge already has a carefully worded
-prompt-only threshold and still runs 45% false positive. Four gates, in order:
+prompt-only threshold and still runs 45% false positive. Four gates. The three
+coded ones run in `select_findings` as non-issue, then confidence floor, then
+budget, and each finding pass 1 drops is kept in `metadata.filtered` with the
+`drop_reason` of the first gate that caught it:
 
 1. **A findings budget.** `FINDINGS_PER_1000_WORDS = 6`, floored at
    `MIN_FINDINGS_BUDGET = 2` for very short chunks. Stated in the prompt and
@@ -69,8 +72,8 @@ prompt-only threshold and still runs 45% false positive. Four gates, in order:
    narrates its inspection ("this is fine") and tags it with a severity anyway.
 4. **Adjudication.** Pass two, below.
 
-A malformed enum never promotes a finding: an unrecognized `confidence` reads as
-the *weakest* allowed value, and an unrecognized `source_check` reads as
+A malformed enum never promotes a finding: an unrecognized `confidence` (including
+`low` and a missing field) fails every floor, `medium` included, and an unrecognized `source_check` reads as
 `not_needed` so a finding cannot conscript an English window it never asked for.
 
 ### Targets

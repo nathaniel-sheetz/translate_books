@@ -160,8 +160,12 @@ def analyse_project(project_dir: Path) -> dict[str, Any]:
             adjudication["reclassified"] += int(metadata.get("reclassified") or 0)
             adjudication["retracted"] += int(metadata.get("retracted_count") or 0)
             adjudication["source_requested"] += int(metadata.get("source_requested") or 0)
-            adjudication["source_attached"] += int(metadata.get("source_attached") or 0)
-            adjudication["source_used"] += int(metadata.get("source_used") or 0)
+            # ``--source all`` attaches English to every candidate, so its usage
+            # rate answers a different question; kept apart so it cannot dilute
+            # the requested-only rate that decides whether the gate earns its cost.
+            prefix = "source_all" if metadata.get("source_mode") == "all" else "source"
+            adjudication[f"{prefix}_attached"] += int(metadata.get("source_attached") or 0)
+            adjudication[f"{prefix}_used"] += int(metadata.get("source_used") or 0)
 
         # Anchoring is only meaningful where the judged text is the current text.
         ledger = (payload.get("eval_runs") or {}).get(JUDGE_NAME) or {}
@@ -247,6 +251,7 @@ def _adjudication_block(
 ) -> dict[str, Any]:
     adjudicated = counter.get("adjudicated", 0)
     attached = counter.get("source_attached", 0)
+    all_attached = counter.get("source_all_attached", 0)
     return {
         "verified_chunks": verified,
         "unverified_chunks": chunks - verified,
@@ -268,6 +273,12 @@ def _adjudication_block(
         # it. Low and stable means tighten the gate.
         "source_used_pct": round(counter.get("source_used", 0) / attached * 100, 1)
         if attached
+        else None,
+        # Chunks adjudicated under ``--source all``.
+        "source_all_attached": all_attached,
+        "source_all_used": counter.get("source_all_used", 0),
+        "source_all_used_pct": round(counter.get("source_all_used", 0) / all_attached * 100, 1)
+        if all_attached
         else None,
     }
 
@@ -390,6 +401,12 @@ def _print_report(name: str, report: dict[str, Any]) -> None:
         f"reclassify {_fmt_pct(adjudication['reclassify_pct'])}  "
         f"source used {_fmt_pct(adjudication['source_used_pct'])} "
         f"of {adjudication['source_attached']} attached"
+        + (
+            f"  (--source all: {_fmt_pct(adjudication['source_all_used_pct'])} "
+            f"of {adjudication['source_all_attached']})"
+            if adjudication["source_all_attached"]
+            else ""
+        )
     )
     print(
         f"  anchoring    {anchoring['checked']:4d} checked   "

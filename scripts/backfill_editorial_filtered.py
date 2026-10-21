@@ -12,16 +12,19 @@ gates (``EditorialJudge.select_findings``) over the draft, under the confidence
 floor and budget the result recorded, and writes the drops back -- but only when
 the replay reproduces what is stored: the draft's finding count equals
 ``proposed_count``, every ``filtered_*`` count matches, and the survivors are the
-stored ``candidates`` in order. Anything else came from a different run and is
-reported, not guessed at.
+stored ``candidates`` in order. A draft whose finding count differs is another
+run's record, so the chunk counts as ``lost``; a draft with the right count that
+still disagrees is reported as ``mismatched`` and left alone.
 
 Outcomes, per chunk:
 - ``recovered``: ``filtered`` written from the draft, ``filtered_backfilled: true``.
 - ``zero_drop``: nothing was dropped; ``filtered: []`` written.
-- ``lost``: drops were counted but no usable draft remains; ``filtered_lost: true``
-  written so the gap is on record rather than silent.
-- ``mismatched``: a draft exists but the replay disagrees with the result;
-  left alone.
+- ``lost``: drops were counted but no usable draft remains (none, unparseable, or
+  one with a different finding count); ``filtered_lost: true`` written so the gap
+  is on record rather than silent.
+- ``mismatched``: a draft exists but the replay disagrees with the result, or no
+  solo draft exists while grouped ``batch_*`` drafts do (this script does not
+  split those); left alone.
 - ``already``: ``filtered`` is present (a run after the field existed).
 - ``legacy``: the result predates the ``filtered_*`` counts; left alone.
 
@@ -87,8 +90,6 @@ def replay(
     judge: EditorialJudge, chunk_id: str, metadata: dict[str, Any], raw_findings: list[dict]
 ) -> Optional[list[dict[str, Any]]]:
     """Re-run the gates over ``raw_findings``; the drops, or None on disagreement."""
-    if len(raw_findings) != metadata.get("proposed_count"):
-        return None
     context = {
         "editorial_min_confidence": metadata.get("min_confidence"),
         "max_findings_override": metadata.get("findings_budget"),
@@ -120,6 +121,10 @@ def classify(
         return "zero_drop", {"filtered": []}
 
     draft = project_dir / ".harness" / "judges" / f"{chunk_id}.editorial.draft.json"
+    if not draft.exists() and any(draft.parent.glob("batch_*.editorial.draft.json")):
+        # A grouped worker's draft may hold this chunk; a permanent ``lost``
+        # marker would block recovering it later.
+        return "mismatched", {}
     raw_findings = _draft_findings(judge, draft) if draft.exists() else None
     if raw_findings is None:
         return "lost", {"filtered_lost": True}
@@ -155,7 +160,8 @@ def backfill_project(project_dir: Path, write: bool) -> collections.Counter:
         except (json.JSONDecodeError, OSError):
             stats["unreadable"] += 1
             continue
-        result = (payload.get("judges") or {}).get("editorial") if isinstance(payload, dict) else None
+        judges = payload.get("judges") if isinstance(payload, dict) else None
+        result = judges.get("editorial") if isinstance(judges, dict) else None
         if not isinstance(result, dict):
             continue
         metadata = result.get("metadata")
@@ -179,13 +185,18 @@ def discover_projects(projects_root: Path) -> list[Path]:
     """Every project directory holding an ``evaluations/`` folder.
 
     rglob, not iterdir: books also live under hidden group directories
-    (``projects/.published/``, ...). ``.bak`` directories are snapshots of
-    another project and are skipped.
+    (``projects/.published/``, ...). ``.bak`` and ``*_backup`` directories, at
+    any depth, are snapshots of another project and are skipped.
     """
     return sorted(
         p.parent
         for p in projects_root.rglob("evaluations")
-        if p.is_dir() and ".bak" not in p.parent.name and p.parent.parent.name != "evaluations"
+        if p.is_dir()
+        and p.parent.parent.name != "evaluations"
+        and not any(
+            ".bak" in part or part.endswith("_backup")
+            for part in p.relative_to(projects_root).parts[:-1]
+        )
     )
 
 

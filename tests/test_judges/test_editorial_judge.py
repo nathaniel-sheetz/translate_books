@@ -173,6 +173,20 @@ def test_unknown_confidence_reads_as_the_weakest_value():
     assert result.metadata["filtered_low_confidence"] == 1
 
 
+@pytest.mark.parametrize("confidence", ["low", None, "bogus"])
+def test_unknown_confidence_fails_a_relaxed_floor_too(confidence):
+    """At a medium floor the weakest value is the floor, so reading an unknown
+    value as medium would let it through."""
+    judge, target = EditorialJudge(), _target()
+    ctx = _ctx(editorial_min_confidence="medium")
+    raw = _response([_finding(), _finding(confidence=confidence, rule="other")])
+
+    result = judge.parse_response(target, raw, ctx)
+
+    assert len(result.issues) == 1
+    assert result.metadata["filtered_low_confidence"] == 1
+
+
 def test_self_described_non_issues_are_dropped():
     judge, target, ctx = EditorialJudge(), _target(), _ctx()
     raw = _response([_finding(message="This is fine, no change needed.")])

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.78.2.0] - 2026-10-20
+
+### Added
+- **The editorial judge keeps the findings pass 1 drops.** Pass 1 drops findings at three gates: non-issue, confidence floor and per-passage budget. Until now only the counts survived; the findings themselves lived in the worker's draft, which the next `prepare` deletes. Each dropped finding is now stored in `metadata.filtered`, tagged with a `drop_reason` naming the first gate that caught it. Pass 2 never reads them, and none of them becomes an issue.
+- **`scripts/backfill_editorial_filtered.py` recovers the drops for older results** from the drafts still on disk.
+  - It re-runs the gates under the floor and budget the result recorded. It writes the drops back only when the re-run reproduces the stored counts and candidates.
+  - A result whose draft is gone, or whose draft has a different finding count, is marked `filtered_lost`.
+  - A chunk that may sit in a grouped `batch_*` draft is reported and left alone.
+  - It only reports unless given `--write`, and it backs up each file before writing it. Snapshot folders (`.bak`, `*_backup`) are skipped at any depth.
+- **`run_judges.py run`/`prepare` take `--min-confidence medium`** for the editorial judge. The floor is applied at commit, so the subagent manifest records it.
+- **`verify_editorial.py --source all` attaches the English to every candidate,** not only the ones pass 1 marked recommended or required. The manifest carries the mode so `commit` attaches the English the same way. The result records `source_mode` and `source_attached` beside `source_requested`.
+- **`editorial_metrics.py` reports chunks adjudicated with `--source all` separately** (`source_all_attached`, `source_all_used_pct`), so they don't dilute `source_used_pct`.
+
+### Fixed
+- **Under a `medium` floor, a finding with `low`, missing or unrecognized confidence passed.** It was read as `medium`, which was also the floor. Any value outside `high`/`medium` now fails every floor.
+- **A manifest with an unknown `source` crashed the editorial wave's `commit`.** It now returns a structured error.
+
 ## [0.78.1.0] - 2026-10-20
 
 ### Fixed

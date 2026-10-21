@@ -171,9 +171,12 @@ def normalize_confidence(value: Any) -> str:
 
 def _meets_confidence(finding: dict[str, Any], minimum: str) -> bool:
     floor = minimum if minimum in CONFIDENCE_ORDER else DEFAULT_MIN_CONFIDENCE
-    return CONFIDENCE_ORDER.index(
-        normalize_confidence(finding.get("confidence"))
-    ) <= CONFIDENCE_ORDER.index(floor)
+    # Checked before normalizing: once the floor is the weakest allowed value,
+    # reading an unknown value as that value would let it through.
+    raw = str(finding.get("confidence") or "").strip().lower()
+    if raw not in CONFIDENCE_ORDER:
+        return False
+    return CONFIDENCE_ORDER.index(raw) <= CONFIDENCE_ORDER.index(floor)
 
 
 def normalize_source_check(value: Any) -> str:
