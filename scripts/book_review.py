@@ -21,8 +21,10 @@ Each subcommand prints one JSON object with a ``_schema`` block:
     fanout    run the synthesis jobs as one headless wave             (subscription)
     commit    validate the proposals; write recommendations.json + the report (no spend)
     run       prepare -> fanout -> commit in one call (needs --yes)    (subscription)
-    apply     apply picked recommendations: --select R-1a2b3c[,R-4d5e6f.2]; a dry run
-              with diffs unless --yes                                  (no spend)
+    board     where the review page is, and what the user picked and approved on it
+    apply     apply picked recommendations: --from-board (what the user approved on
+              the page) or --select R-1a2b3c[,R-4d5e6f.2]; a dry run with diffs
+              unless --yes                                             (no spend)
     skip      mark the current translations reviewed without reviewing them,
               so the harness stops routing here until new chunks land
 
@@ -39,6 +41,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.error
+import urllib.request
 import warnings
 from pathlib import Path
 
@@ -51,6 +55,7 @@ for _stream in (sys.stdout, sys.stderr):
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 
 from src.book_review import judging, progress, review_dir  # noqa: E402
+from src.book_review import board as review_board  # noqa: E402
 from src.book_review import synthesize  # noqa: E402
 from src.book_review.apply import apply as apply_selection  # noqa: E402
 from src.book_review.corpus import load_book  # noqa: E402
@@ -266,8 +271,7 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
 
 def _cmd_commit(args: argparse.Namespace) -> int:
     out = synthesize.commit(_resolve_project(args.project))
-    out["instructions"] = ("Show the report grouped by priority; let the user pick ids, then "
-                           "`apply --select <ids>` (dry run) before `--yes`.")
+    out["instructions"] = _AFTER_COMMIT
     out["_schema"] = _COMMIT_SCHEMA
     return _print(out)
 
@@ -284,10 +288,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if fan.get("error"):
         return _print({"status": "error", "error": fan["error"], "fanout": fan})
     out = synthesize.commit(project_dir)
+    out["instructions"] = _AFTER_COMMIT
     out["fanout"] = {"counts": fan.get("counts"), "failed": fan.get("failed"), "usage": fan.get("usage")}
     out["_schema"] = _COMMIT_SCHEMA
     return _print(out)
 
+
+_AFTER_COMMIT = (
+    "With more than two recommendations, run `board` and give the user its url: they pick "
+    "and approve there. With one or two, show them in the chat and `apply --select`."
+)
+
+DEFAULT_BASE_URL = "http://127.0.0.1:5000"
+
+_BOARD_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "url": "the review page: give it to the user",
+    "server_running": "false when the web UI did not answer at --base-url",
+    "recommendations": "recommendations in the last commit",
+    "applied": "ids already applied",
+    "open": "ids not applied yet",
+    "selection": "what is picked on the page now (apply --select tokens)",
+    "notes": "{id: note} the user typed on a recommendation: read and act on them",
+    "approved": "true when the picks are approved and still match the artifacts",
+    "approved_selection": "what `apply --from-board --yes` would write",
+    "not_approved_because": "why there is nothing to apply yet",
+    "instructions": "next step",
+}
 
 _APPLY_SCHEMA = {
     "status": "'dry_run' | 'ok' | 'error'",
@@ -296,12 +323,66 @@ _APPLY_SCHEMA = {
     "offer, ...}; 'offer' rows (retranslate, manual) are never executed here",
     "saved": "--yes only: artifacts written (each via its save path, history-logged)",
     "stale": "on error: recommendations whose artifacts changed since commit",
+    "selection": "the --select tokens applied (with --from-board, the ones read off the page)",
     "instructions": "next step",
 }
 
 
+def _board_is_served(url: str) -> bool:
+    """Whether the web UI answers for this project's review page right now."""
+    try:
+        with urllib.request.urlopen(url, timeout=1) as response:
+            return response.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _cmd_board(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    if not synthesize.recommendations_path(project_dir).exists():
+        return _print({"status": "error", "error": "no recommendations yet: run the synthesis "
+                       "(`prepare`, `fanout`, `commit`) first"})
+    base = args.base_url.rstrip("/")
+    out = {"status": "ok", "project": project_dir.name,
+           "url": f"{base}/book-review/{project_dir.name}",
+           "server_running": _board_is_served(f"{base}/api/project/{project_dir.name}/book-review"),
+           **review_board.summary(project_dir)}
+    out["instructions"] = (
+        "Give the user url and end the turn: they pick, read the diffs and approve on the "
+        "page. When they come back, run `board` again. approved: run `apply --from-board "
+        "--yes`. notes: what they asked for beyond the picks; answer or act on each."
+    )
+    if not out["server_running"]:
+        out["instructions"] = (
+            "The web UI is not answering at that address, so the page will not open: ask the "
+            "user to start it (`python web_ui/app.py`), or pass --base-url. " + out["instructions"]
+        )
+    out["_schema"] = _BOARD_SCHEMA
+    return _print(out)
+
+
 def _cmd_apply(args: argparse.Namespace) -> int:
-    out = apply_selection(_resolve_project(args.project), args.select, yes=args.yes)
+    project_dir = _resolve_project(args.project)
+    if args.from_board:
+        if args.select:
+            return _print({"status": "error", "error": "pass --from-board or --select, not both"})
+        if args.yes:
+            selection, problem = review_board.approved_selection(project_dir)
+            if selection is None:
+                return _print({"status": "error", "error": f"nothing to apply: {problem}",
+                               "instructions": "Give the user the board url (`board`)."})
+        else:
+            selection = review_board.load(project_dir)["selection"]
+            if not selection:
+                return _print({"status": "error", "error": "nothing is picked on the board"})
+    elif not args.select:
+        return _print({"status": "error", "error": "pass --select <ids> or --from-board"})
+    else:
+        selection = args.select
+    out = apply_selection(project_dir, selection, yes=args.yes)
+    if args.from_board and args.yes and out.get("status") == "ok":
+        review_board.clear_after_apply(project_dir)
+    out["selection"] = selection
     out["_schema"] = _APPLY_SCHEMA
     return _print(out)
 
@@ -354,9 +435,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_p = sub.add_parser("apply", help="apply picked recommendations (dry run unless --yes)")
     apply_p.add_argument("--project", required=True, help="Project id (under projects/) or path")
-    apply_p.add_argument("--select", action="append", required=True,
+    apply_p.add_argument("--select", action="append", default=None,
                          help="recommendation ids, comma-separated; R-xxxxxx.N picks one patch")
+    apply_p.add_argument("--from-board", action="store_true",
+                         help="what the user picked on the review page (--yes needs their approval)")
     apply_p.add_argument("--yes", action="store_true", help="write the changes")
+
+    board_p = sub.add_parser("board", help="the review page's url and what the user picked on it")
+    board_p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    board_p.add_argument("--base-url", default=DEFAULT_BASE_URL,
+                         help=f"where the web UI is listening (default: {DEFAULT_BASE_URL})")
 
     judge = sub.add_parser(
         "judge", help="run every judge over owed chapters, then editorial pass 2 (subscription)"
@@ -388,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         "commit": _cmd_commit,
         "run": _cmd_run,
         "apply": _cmd_apply,
+        "board": _cmd_board,
         "skip": _cmd_skip,
     }[args.command](args)
 

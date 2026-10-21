@@ -39,8 +39,9 @@ Design and detector details: `docs/BOOK_REVIEW.md`.
 
 **Rules this stage never breaks:**
 
-- **Nothing changes without the user's pick.** The detectors and the report are
-  read-only.
+- **Nothing changes without the user's pick.** The detectors, the report and the
+  review page are read-only; only `apply … --yes` writes, and from the board only
+  what the user approved.
 - **Subscription only.** The judge sweep is a headless wave; it refuses on a
   metered login and has no override.
 - **It never deletes a finding.**
@@ -61,7 +62,10 @@ object with a `_schema` block.
 | `fanout` | subscription | runs the synthesis jobs as one headless wave (resumes: skips jobs with a draft) |
 | `commit` | none | validates every proposed patch; writes `.harness/book_review/recommendations.json` and `reports/book_review_<date>.md` |
 | `run --yes` | subscription | `prepare` → `fanout` → `commit` in one call, after the user approved `prepare`'s gate |
-| `apply --select R-xxxxxx[,R-yyyyyy.2]` | none | dry run: the diff of every artifact the selection edits |
+| `board` | none | the review page's `url`, whether the web UI answers, and what the user picked, noted and approved there |
+| `apply --from-board` | none | dry run of the picks on the page |
+| `apply --from-board --yes` | none | writes the picks the user **approved on the page**; refuses anything else |
+| `apply --select R-xxxxxx[,R-yyyyyy.2]` | none | dry run: the diff of every artifact the selection edits (for one or two items picked in the chat) |
 | `apply --select … --yes` | none | writes the changes through the normal save paths (history-logged) |
 | `skip` | none | marks the current translations reviewed so the harness router moves on |
 
@@ -110,15 +114,33 @@ object with a `_schema` block.
    `commit`. Re-run `fanout` for any `failed` job before committing. If the user
    only wants the coded report, stop after step 4.
 
-6. **Present the recommendations.** Read `report_path`. Group them by priority:
-   1 is fix before translating more, 2 is before publishing, 3 is worth doing.
-   For each, give the id, the title, the one-line patch list and the confidence.
-   Flag `conflicts_with` pairs: the user picks one of the two. Let the user pick
-   with AskUserQuestion (multiSelect, up to four per question; group the rest by
-   theme). `R-xxxxxx.N` picks one patch of a recommendation.
+6. **Hand over the review page.** The user picks on a page, not by typing ids.
+   Run `board` and give them its `url`, with two or three lines on what stands
+   out (the priority-1 items, any `conflicts_with` pair, a retranslate the review
+   wants). **END your turn.** If `server_running` is false, ask them to start the
+   web UI (`python web_ui/app.py`) instead of handing over a dead link.
 
-7. **`apply --select <ids>`** (dry run). Show the `diffs`. **STOP for approval**,
-   then `apply --select <ids> --yes`. Relay `actions`:
+   The page (`/book-review/<slug>`, also in the reader's card menu) shows every
+   recommendation by priority with its rationale, each change in full (the passage
+   a style patch rewrites, the glossary entry a patch edits, the findings a
+   dismissal marks) and the evidence behind it, English included. Ticking one, or
+   single changes inside one, saves at once and redraws the dry-run diffs at the
+   bottom; a conflicting pair unpicks its other half. A note box on each card
+   carries anything the picks cannot ("yes, but keep the old key"). The user
+   approves the diffs there.
+
+   Only with **one or two** recommendations, or when the user asks for the chat,
+   present them inline instead and use `apply --select`.
+
+7. **When they come back, `board` again.** Answer or act on each of `notes`
+   first: a note can change what they want applied. Then:
+   - `approved: true`: run `apply --from-board --yes`. Their approval on the page
+     is the gate; it covers exactly the diffs they saw.
+   - not approved: `not_approved_because` says why (nothing picked, picks changed
+     after approval, an artifact or the review changed). Relay it and give the
+     `url` again.
+
+   Relay `actions`:
    - `saved` rows: edits to the glossary, style guide or address map. They reach
      chunks translated from now on.
    - `done` rows: dismissals, re-judge flags, house proposals.
@@ -126,7 +148,9 @@ object with a `_schema` block.
      `.claude/skills/translate-harness/references/retranslate.md`, which has its own gate. `manual` needs a person
      or a code change.
 
-   A `stale` error means an artifact changed after `commit`; re-run from step 5.
+   The page shows applied recommendations as applied. Others that edit the same
+   artifact show as stale: their patches were checked against the old text, so
+   re-run from step 5 to pick them.
 
 ## Notes
 

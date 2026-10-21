@@ -2370,6 +2370,90 @@ def serve_image_board_cover(project_id, filename):
     return send_from_directory(str(folder), filename)
 
 
+# ---------------------------------------------------------------------------
+# Book review board (/book-review/<id>): the recommendations a book review
+# wrote, with the evidence behind each. The state, the dry run of what is
+# picked and the one file the page writes (board.json) all belong to
+# src.book_review.board; nothing here edits the book. Applying an approved
+# selection stays with `book_review.py apply --from-board --yes`.
+# ---------------------------------------------------------------------------
+
+def _book_review_dir(project_id: str):
+    """The project directory, or the error response to return instead."""
+    if not _safe_id(project_id):
+        return None, (jsonify({"error": "Bad request"}), 400)
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return None, (jsonify({"error": "Project not found"}), 404)
+    return project_dir, None
+
+
+@app.route("/book-review/<project_id>")
+def book_review_page(project_id):
+    """One book's review: pick the fixes, read the diffs, approve."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    if not _resolve_project_dir(project_id).exists():
+        return "Project not found", 404
+    return render_template(
+        "book_review_board.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        project_id=project_id,
+        project_title=_project_title(project_id),
+    )
+
+
+@app.route("/api/project/<project_id>/book-review", methods=["GET"])
+def book_review_state(project_id):
+    from src.book_review import board as review_board
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    return jsonify(review_board.build(project_dir))
+
+
+@app.route("/api/project/<project_id>/book-review/selection", methods=["POST"])
+def book_review_selection(project_id):
+    """Save the picks and notes; the reply is the rebuilt state with its dry run."""
+    from src.book_review import board as review_board
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("selection"), list):
+        return jsonify({"error": "Missing required fields"}), 400
+    notes = data.get("notes") if isinstance(data.get("notes"), dict) else None
+    saved = review_board.save(project_dir, data["selection"], notes)
+    if saved["status"] != "ok":
+        return jsonify({"error": "; ".join(saved["problems"]), "problems": saved["problems"]}), 400
+    return jsonify(review_board.build(project_dir))
+
+
+@app.route("/api/project/<project_id>/book-review/approve", methods=["POST"])
+def book_review_approve(project_id):
+    """Approve the saved picks (``{selection}``), or withdraw it (``{withdraw: true}``)."""
+    from src.book_review import board as review_board
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Missing required fields"}), 400
+    if data.get("withdraw"):
+        review_board.unapprove(project_dir)
+    else:
+        if not isinstance(data.get("selection"), list):
+            return jsonify({"error": "Missing required fields"}), 400
+        done = review_board.approve(project_dir, data["selection"])
+        if done["status"] != "ok":
+            return jsonify({"error": "; ".join(done["problems"]), "problems": done["problems"]}), 400
+    return jsonify(review_board.build(project_dir))
+
+
 _FROM_FINDING_TEXT_KEYS = ("eval_name", "chunk_id", "issue_key", "category", "suggestion")
 _FROM_FINDING_MODES = frozenset({"apply", "edit"})
 _FROM_FINDING_MAX_CHARS = 2000

@@ -28,6 +28,8 @@ whole set, and reports these patterns with the evidence behind each.
 | `src/book_review/synthesize.py` | The synthesis wave: prepare, fanout, commit |
 | `src/book_review/schema.py` | Validation of proposed patches against the book as it is |
 | `src/book_review/apply.py` | Applying picked recommendations through the normal save paths |
+| `src/book_review/board.py` | The review page's state, the user's picks and their approval (`board.json`) |
+| `web_ui/templates/book_review_board.html`, `web_ui/static/book_review_board.*` | The review page, `/book-review/<slug>` |
 | `prompts/book_review_synthesize.txt` | The synthesis prompt |
 | `src/book_review/judging.py` | The judge sweep: every judge over owed chapters, then editorial pass 2 |
 | `src/book_review/progress.py` | When the harness router sends a book here |
@@ -167,6 +169,26 @@ table) and `no_action[]`. `commit` validates each patch (`schema.check_patch`):
 A recommendation with no valid patch is rejected and listed in the report.
 Recommendations that touch the same target are cross-marked `conflicts_with`.
 Each one is stamped with the content hash of every artifact it edits.
+
+## The review page
+
+The user picks recommendations on `/book-review/<slug>` in the web UI rather
+than by typing ids. The page draws `board.build`: every recommendation by
+priority, each change in full (the passage a style patch rewrites, the glossary
+entry a patch edits, the findings a dismissal marks), the evidence behind it with
+the English, and which ones are already applied or went stale. Ticking a
+recommendation, or single changes inside one, saves the selection to
+`.harness/book_review/board.json` and returns the dry run of exactly that
+selection, which the page shows as diffs with the changed words marked. Each card
+has a note box for what a pick cannot say.
+
+Approval is per selection. `approve` stores the selection with a fingerprint of
+the commit and the three artifacts' hashes; saving different picks, re-running
+the review or editing an artifact voids it. `apply --from-board --yes` applies
+only a selection whose approval still holds, then clears the picks. `board`
+reports the url, the picks, the notes and why nothing is approved yet. Saving
+refuses an unknown id, a patch number out of range, an applied or stale
+recommendation, and both halves of a `conflicts_with` pair.
 
 ## Apply
 

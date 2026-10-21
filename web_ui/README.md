@@ -62,16 +62,17 @@ web_ui/
 | `/review-inbox` | review_inbox.html | Outstanding annotation resolutions, every book |
 | `/recommendations/<id>` | recommendations.html | One book's findings and notes, to read and to flag for later |
 | `/image-pass/<id>` | image_board.html | One book's images through an image pass, and your requests and picks |
+| `/book-review/<id>` | book_review_board.html | One book's review recommendations: pick, read the diffs, approve |
 
 ## API surface
 
-`app.py` defines 104 routes — 93 under `/api/`, plus 11 page routes (the table
-above lists the eight you navigate to; the rest serve images, reports and
+`app.py` defines 108 routes — 96 under `/api/`, plus 12 page routes (the table
+above lists the nine you navigate to; the rest serve images, reports and
 `/healthz`). By prefix:
 
 | Prefix | Count | Covers |
 |---|---|---|
-| `/api/project/<id>/...` | 52 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs, and the recommendations feed and its favorites |
+| `/api/project/<id>/...` | 55 | Dashboard stages (ingest, split, chunk, translate + SSE, combine, align, export), plus judge and review runs, the recommendations feed and its favorites, and the book-review board |
 | `/api/setup/<id>/...` | 13 | Style guide and glossary wizards |
 | `/api/alignment`, `/api/annotation(s)`, `/api/reviewed`, `/api/correction`, `/api/apply-corrections` | 9 | Reader data and review state |
 | `/api/llm-config`, `/api/llm/models`, `/api/split-patterns`, `/api/edit-tags`, `/api/set-*` | 8 | Config and UI preferences |
