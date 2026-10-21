@@ -93,7 +93,8 @@ def test_applied_recommendations_show_and_cannot_be_picked_again(reviewed):
     rec = next(r for r in state["recommendations"] if r["id"] == reviewed.rid)
     assert rec["applied_at"]
     twin = next(r for r in state["recommendations"] if r["id"] == "R-twin00")
-    assert twin["stale"] == ["glossary"]  # its glossary moved under it
+    assert twin["stale"] == [  # the entry it edits moved under it
+        "change 1: the glossary entry 'porte cochere' changed since the review"]
     assert board.save(reviewed.dir, [reviewed.rid])["status"] == "error"
     assert board.summary(reviewed.dir)["applied"] == [reviewed.rid]
 

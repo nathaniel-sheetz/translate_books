@@ -35,16 +35,6 @@ PATCH_TYPES = frozenset({
 FOLLOW_UP_TYPES = frozenset({"rejudge", "retranslate"})
 CONFIDENCE = ("high", "medium", "low")
 
-#: Which artifact file each patch type edits, for preconditions and conflicts.
-ARTIFACT_OF = {
-    "glossary": "glossary", "style": "style", "address": "address_map",
-}
-
-
-def artifact_of(patch_type: str) -> Optional[str]:
-    return ARTIFACT_OF.get(patch_type.split(".", 1)[0])
-
-
 def _str(value: Any) -> str:
     return str(value or "").strip()
 
@@ -349,3 +339,5 @@ def reconcile(recommendations: list[dict[str, Any]]) -> None:
         })
         if clashes:
             rec["conflicts_with"] = clashes
+        else:
+            rec.pop("conflicts_with", None)

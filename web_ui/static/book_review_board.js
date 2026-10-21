@@ -23,6 +23,7 @@
     var data = null;
     var picked = {};      /* rec id -> {n: true} for the changes picked */
     var notes = {};       /* rec id -> note text */
+    var revise = {};      /* rec id -> true: the agent rewrites it from the note */
     var saveTimer = null;
     var inFlight = 0;
     var dirty = false;
@@ -114,7 +115,10 @@
     function save() {
         saveTimer = null;
         inFlight++;
-        var body = JSON.stringify({ selection: selection(), notes: notes });
+        var body = JSON.stringify({
+            selection: selection(), notes: notes,
+            revise: Object.keys(revise).filter(function (id) { return revise[id]; })
+        });
         fetch(API + '/selection', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body
         }).then(function (response) {
@@ -293,23 +297,81 @@
         notice.textContent = dropped.length ? fill(S.unpicked, { id: dropped.join(', ') }) : '';
     }
 
+    function blockedOf(rec) {
+        return !!rec.applied_at || rec.stale.length > 0 || !!revise[rec.id];
+    }
+
     function syncCard(id) {
         var card = document.getElementById('card-' + id);
         var rec = recOf(id);
         if (!card || !rec) return;
         var on = isPicked(id);
+        var blocked = blockedOf(rec);
         card.classList.toggle('br-picked', on);
+        card.classList.toggle('br-waiting', !!revise[id]);
         var main = card.querySelector('.br-pick input');
         var count = rec.patches.filter(function (p) { return picked[id] && picked[id][p.n]; }).length;
         main.checked = on;
+        main.disabled = blocked;
         main.indeterminate = on && count < rec.patches.length;
         card.querySelectorAll('.br-patch-pick input').forEach(function (box) {
             box.checked = !!(picked[id] && picked[id][box.dataset.n]);
+            box.disabled = blocked;
         });
+        var ask = card.querySelector('.br-revise input');
+        if (ask) {
+            ask.checked = !!revise[id];
+            ask.disabled = !!rec.applied_at || !(notes[id] || '').trim();
+        }
+    }
+
+    function patchList(patches, pickable, rec, node) {
+        var list = el('ol', 'br-patches');
+        patches.forEach(function (p) {
+            var item = el('li', 'br-patch');
+            var line = el('div', 'br-patch-line');
+            if (pickable && patches.length > 1) {
+                var sub = el('label', 'br-patch-pick');
+                var subBox = document.createElement('input');
+                subBox.type = 'checkbox';
+                subBox.dataset.n = p.n;
+                subBox.setAttribute('aria-label', fill(S.change_n, { n: p.n }));
+                subBox.addEventListener('change', function () {
+                    picked[rec.id] = picked[rec.id] || {};
+                    picked[rec.id][p.n] = subBox.checked;
+                    if (subBox.checked) unpickConflicts(rec, node);
+                    syncCard(rec.id);
+                    scheduleSave();
+                });
+                sub.appendChild(subBox);
+                line.appendChild(sub);
+            }
+            line.appendChild(el('span', 'br-patch-sum', p.summary));
+            item.appendChild(line);
+            var detail = patchDetail(p);
+            if (detail) item.appendChild(detail);
+            list.appendChild(item);
+        });
+        return list;
+    }
+
+    function revisionView(rec) {
+        var r = rec.revision;
+        var box = el('div', 'br-revision');
+        box.appendChild(el('p', 'br-revision-head', fill(S.revised, { n: r.n, date: day(r.at) })));
+        if (r.note) box.appendChild(textBlock(S.your_note, r.note));
+        box.appendChild(textBlock(S.what_changed, r.why));
+        var more = el('details', 'br-more');
+        more.appendChild(el('summary', null, fill(S.original_changes, { count: r.original.length })));
+        if (r.original_rationale && r.original_rationale !== rec.rationale) {
+            more.appendChild(el('p', 'br-muted', r.original_rationale));
+        }
+        more.appendChild(patchList(r.original, false, rec, null));
+        box.appendChild(more);
+        return box;
     }
 
     function card(rec) {
-        var blocked = !!rec.applied_at || rec.stale.length > 0;
         var node = el('article', 'br-card');
         node.id = 'card-' + rec.id;
         if (rec.applied_at) node.classList.add('br-applied');
@@ -319,7 +381,6 @@
         var pick = el('label', 'br-pick');
         var box = document.createElement('input');
         box.type = 'checkbox';
-        box.disabled = blocked;
         box.addEventListener('change', function () {
             setPicked(rec, box.checked);
             if (box.checked) unpickConflicts(rec, node);
@@ -341,8 +402,9 @@
         node.appendChild(head);
 
         if (rec.stale.length) {
-            node.appendChild(el('p', 'br-warn', fill(S.stale, { files: rec.stale.join(', ') })));
+            node.appendChild(el('p', 'br-warn', fill(S.stale, { reasons: rec.stale.join('; ') })));
         }
+        if (rec.revision) node.appendChild(revisionView(rec));
         if (rec.conflicts_with.length) {
             node.appendChild(el('p', 'br-conflict', fill(S.conflicts, { ids: rec.conflicts_with.join(', ') })));
         }
@@ -354,34 +416,7 @@
 
         var changes = el('section', 'br-changes');
         changes.appendChild(el('h4', null, S.changes));
-        var list = el('ol', 'br-patches');
-        rec.patches.forEach(function (p) {
-            var item = el('li', 'br-patch');
-            var line = el('div', 'br-patch-line');
-            if (rec.patches.length > 1) {
-                var sub = el('label', 'br-patch-pick');
-                var subBox = document.createElement('input');
-                subBox.type = 'checkbox';
-                subBox.disabled = blocked;
-                subBox.dataset.n = p.n;
-                subBox.setAttribute('aria-label', fill(S.change_n, { n: p.n }));
-                subBox.addEventListener('change', function () {
-                    picked[rec.id] = picked[rec.id] || {};
-                    picked[rec.id][p.n] = subBox.checked;
-                    if (subBox.checked) unpickConflicts(rec, node);
-                    syncCard(rec.id);
-                    scheduleSave();
-                });
-                sub.appendChild(subBox);
-                line.appendChild(sub);
-            }
-            line.appendChild(el('span', 'br-patch-sum', p.summary));
-            item.appendChild(line);
-            var detail = patchDetail(p);
-            if (detail) item.appendChild(detail);
-            list.appendChild(item);
-        });
-        changes.appendChild(list);
+        changes.appendChild(patchList(rec.patches, true, rec, node));
         node.appendChild(changes);
 
         if (rec.follow_ups.length) {
@@ -409,10 +444,26 @@
         note.value = notes[rec.id] || '';
         note.addEventListener('input', function () {
             notes[rec.id] = note.value;
+            if (!note.value.trim()) revise[rec.id] = false;
+            syncCard(rec.id);
             scheduleSave();
         });
         noteWrap.appendChild(note);
         node.appendChild(noteWrap);
+
+        var ask = el('label', 'br-revise');
+        var askBox = document.createElement('input');
+        askBox.type = 'checkbox';
+        askBox.addEventListener('change', function () {
+            revise[rec.id] = askBox.checked;
+            if (askBox.checked) setPicked(rec, false);
+            syncCard(rec.id);
+            scheduleSave();
+        });
+        ask.appendChild(askBox);
+        ask.appendChild(el('span', null, S.revise_label));
+        node.appendChild(ask);
+        node.appendChild(el('p', 'br-waiting-note', S.revise_waiting));
         return node;
     }
 
@@ -589,6 +640,8 @@
             return;
         }
         notes = Object.assign({}, data.notes || {});
+        revise = {};
+        (data.revise || []).forEach(function (id) { revise[id] = true; });
         readSelection(data.selection);
 
         board.appendChild(el('p', 'br-meta', fill(S.meta, {

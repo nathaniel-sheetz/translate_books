@@ -22,6 +22,8 @@ Each subcommand prints one JSON object with a ``_schema`` block:
     commit    validate the proposals; write recommendations.json + the report (no spend)
     run       prepare -> fanout -> commit in one call (needs --yes)    (subscription)
     board     where the review page is, and what the user picked and approved on it
+    revise    rewrite one recommendation's changes as the user's note asked
+              (--id R-1a2b3c --from revised.json); they approve it on the page (no spend)
     apply     apply picked recommendations: --from-board (what the user approved on
               the page) or --select R-1a2b3c[,R-4d5e6f.2]; a dry run with diffs
               unless --yes                                             (no spend)
@@ -57,6 +59,7 @@ warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.
 from src.book_review import judging, progress, review_dir  # noqa: E402
 from src.book_review import board as review_board  # noqa: E402
 from src.book_review import synthesize  # noqa: E402
+from src.book_review.revise import revise as revise_recommendation  # noqa: E402
 from src.book_review.apply import apply as apply_selection  # noqa: E402
 from src.book_review.corpus import load_book  # noqa: E402
 from src.book_review.report import write_signals  # noqa: E402
@@ -310,6 +313,7 @@ _BOARD_SCHEMA = {
     "open": "ids not applied yet",
     "selection": "what is picked on the page now (apply --select tokens)",
     "notes": "{id: note} the user typed on a recommendation: read and act on them",
+    "revise": "{id: note} the user asked to have rewritten from the note: `revise` each",
     "approved": "true when the picks are approved and still match the artifacts",
     "approved_selection": "what `apply --from-board --yes` would write",
     "not_approved_because": "why there is nothing to apply yet",
@@ -322,7 +326,7 @@ _APPLY_SCHEMA = {
     "actions": "one row per patch and follow-up: {id, type, status: staged | saved | done | "
     "offer, ...}; 'offer' rows (retranslate, manual) are never executed here",
     "saved": "--yes only: artifacts written (each via its save path, history-logged)",
-    "stale": "on error: recommendations whose artifacts changed since commit",
+    "stale": "on error: '<id>: change N: why' for each change that no longer fits the book",
     "selection": "the --select tokens applied (with --from-board, the ones read off the page)",
     "instructions": "next step",
 }
@@ -349,8 +353,10 @@ def _cmd_board(args: argparse.Namespace) -> int:
            **review_board.summary(project_dir)}
     out["instructions"] = (
         "Give the user url and end the turn: they pick, read the diffs and approve on the "
-        "page. When they come back, run `board` again. approved: run `apply --from-board "
-        "--yes`. notes: what they asked for beyond the picks; answer or act on each."
+        "page. When they come back, run `board` again. revise: write each one's changes as "
+        "its note asks and store them with `revise`, then send the user back to the page to "
+        "pick and approve the revision. approved: run `apply --from-board --yes`. notes: "
+        "what they asked for beyond the picks; answer or act on each."
     )
     if not out["server_running"]:
         out["instructions"] = (
@@ -384,6 +390,30 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         review_board.clear_after_apply(project_dir)
     out["selection"] = selection
     out["_schema"] = _APPLY_SCHEMA
+    return _print(out)
+
+
+_REVISE_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "id": "the recommendation revised",
+    "revision": "how many times it has been revised",
+    "problems": "on error: why the revision was refused (fix the file and run again)",
+    "instructions": "next step",
+}
+
+
+def _cmd_revise(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    try:
+        change = json.loads(Path(args.from_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _print({"status": "error", "problems": [f"cannot read {args.from_file}: {exc}"]})
+    out = revise_recommendation(project_dir, args.id, change)
+    if out["status"] == "ok":
+        out["instructions"] = ("The card now shows the revision beside the original. Tell the "
+                               "user what changed and send them back to the page to pick and "
+                               "approve it; nothing is applied yet.")
+    out["_schema"] = _REVISE_SCHEMA
     return _print(out)
 
 
@@ -446,6 +476,13 @@ def build_parser() -> argparse.ArgumentParser:
     board_p.add_argument("--base-url", default=DEFAULT_BASE_URL,
                          help=f"where the web UI is listening (default: {DEFAULT_BASE_URL})")
 
+    revise_p = sub.add_parser("revise", help="rewrite one recommendation as the user's note asked")
+    revise_p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    revise_p.add_argument("--id", required=True, help="the recommendation, e.g. R-1a2b3c")
+    revise_p.add_argument("--from", dest="from_file", required=True,
+                          help='JSON file: {"patches": [...], "why": "...", optional '
+                          '"follow_ups": [...] and "rationale"}')
+
     judge = sub.add_parser(
         "judge", help="run every judge over owed chapters, then editorial pass 2 (subscription)"
     )
@@ -477,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": _cmd_run,
         "apply": _cmd_apply,
         "board": _cmd_board,
+        "revise": _cmd_revise,
         "skip": _cmd_skip,
     }[args.command](args)
 

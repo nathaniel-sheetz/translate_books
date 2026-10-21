@@ -9,14 +9,19 @@ The page writes one file, ``board.json``::
 
     {"selection": ["R-ab12cd", "R-ef34gh.2"],      # apply's --select tokens
      "notes": {"R-ab12cd": "but keep the old key too"},
+     "revise": ["R-9f8e7d"],                       # rewrite these from their notes
      "saved_at": "...",
      "approved": {"selection": [...], "fingerprint": "...", "at": "..."} | null}
 
 Saving a different selection drops the approval, so an approval always covers
 the diffs the user last saw. ``apply --from-board --yes`` applies an approved
-selection only while its fingerprint (the commit plus the three artifacts'
-hashes) still matches; otherwise the diffs it would write are not the ones that
-were approved.
+selection only while its fingerprint (``recommendations.json`` plus the three
+artifacts' hashes) still matches; otherwise the diffs it would write are not
+the ones that were approved.
+
+A recommendation flagged ``revise`` waits for the agent: it reads the note,
+writes the changes the user asked for, and stores them with
+:func:`src.book_review.revise.revise`. Until then it cannot be picked.
 """
 
 from __future__ import annotations
@@ -29,8 +34,8 @@ from typing import Any, Optional
 
 from src.book_review import review_dir
 from src.book_review.apply import apply as apply_selection
-from src.book_review.apply import parse_selection
-from src.book_review.evidence import _finding_full, artifact_hashes
+from src.book_review.apply import parse_selection, stale_reasons
+from src.book_review.evidence import _finding_full, artifact_hashes, load_artifacts
 from src.book_review.patches import find_entry
 from src.book_review.report import _metrics_line, describe_patch
 from src.book_review.synthesize import recommendations_path
@@ -57,6 +62,7 @@ def load(project_dir: Path) -> dict[str, Any]:
         "selection": [s for s in saved.get("selection") or [] if isinstance(s, str)],
         "notes": {k: v for k, v in (saved.get("notes") or {}).items()
                   if isinstance(k, str) and isinstance(v, str) and v.strip()},
+        "revise": [r for r in saved.get("revise") or [] if isinstance(r, str)],
         "saved_at": saved.get("saved_at"),
         "approved": saved.get("approved") if isinstance(saved.get("approved"), dict) else None,
     }
@@ -74,8 +80,9 @@ def _recommendations(project_dir: Path) -> Optional[dict[str, Any]]:
 
 
 def fingerprint(project_dir: Path, doc: dict[str, Any]) -> str:
+    """Changes when the review is re-run, a recommendation is revised or an artifact edited."""
     digest = hashlib.sha256()
-    digest.update(str(doc.get("committed_at")).encode())
+    digest.update(json.dumps(doc, sort_keys=True, ensure_ascii=False).encode("utf-8"))
     digest.update(json.dumps(artifact_hashes(project_dir), sort_keys=True).encode())
     return digest.hexdigest()[:16]
 
@@ -97,12 +104,8 @@ def applied_ids(project_dir: Path) -> dict[str, str]:
     return out
 
 
-def _stale(rec: dict[str, Any], current: dict[str, Optional[str]]) -> list[str]:
-    return [name for name, stamped in (rec.get("precondition") or {}).items()
-            if stamped != current.get(name)]
-
-
-def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str]) -> list[str]:
+def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str],
+                    revise: Optional[list[str]] = None) -> list[str]:
     """Why this selection cannot be saved; empty when it can."""
     by_id = {r["id"]: r for r in doc.get("recommendations") or []}
     try:
@@ -111,16 +114,20 @@ def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str]
         return [f"not a selection: {selection}"]
     problems = []
     done = applied_ids(project_dir)
-    current = artifact_hashes(project_dir)
+    docs, current = load_artifacts(project_dir), artifact_hashes(project_dir)
+    waiting = set(load(project_dir)["revise"] if revise is None else revise)
     for rid, numbers in chosen.items():
         rec = by_id.get(rid)
         if rec is None:
             problems.append(f"{rid}: no such recommendation")
             continue
+        stale = stale_reasons(rec, docs, current)
         if rid in done:
             problems.append(f"{rid}: already applied")
-        elif _stale(rec, current):
-            problems.append(f"{rid}: {', '.join(_stale(rec, current))} changed since the review")
+        elif rid in waiting:
+            problems.append(f"{rid}: waiting for a revision from your note")
+        elif stale:
+            problems.append(f"{rid}: {'; '.join(stale)}")
         bad = sorted(n for n in numbers or () if not 1 <= n <= len(rec["patches"]))
         if bad:
             problems.append(f"{rid}: no change numbered {bad}")
@@ -131,24 +138,33 @@ def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str]
     return problems
 
 
-def save(project_dir: Path, selection: list[str], notes: Optional[dict[str, str]] = None) -> dict[str, Any]:
-    """Store what the page has picked; an approval survives only an identical selection."""
+def save(project_dir: Path, selection: list[str], notes: Optional[dict[str, str]] = None,
+         revise: Optional[list[str]] = None) -> dict[str, Any]:
+    """Store what the page has picked; an approval survives only an identical selection.
+
+    ``revise`` names recommendations to rewrite from their notes; one without a
+    note, or already applied, is dropped from it.
+    """
     project_dir = Path(project_dir)
     doc = _recommendations(project_dir)
     if doc is None:
         return {"status": "error", "problems": ["no recommendations.json; run the review first"]}
+    board = load(project_dir)
+    known = {r["id"] for r in doc.get("recommendations") or []}
+    if notes is not None:
+        board["notes"] = {k: v.strip() for k, v in notes.items()
+                          if k in known and isinstance(v, str) and v.strip()}
+    if revise is not None:
+        done = applied_ids(project_dir)
+        board["revise"] = sorted({r for r in revise if isinstance(r, str) and r in known
+                                  and r in board["notes"] and r not in done})
     selection = [s for s in selection if isinstance(s, str) and s.strip()]
-    problems = check_selection(project_dir, doc, selection)
+    problems = check_selection(project_dir, doc, selection, board["revise"])
     if problems:
         return {"status": "error", "problems": problems}
-    board = load(project_dir)
     if board["approved"] and board["approved"].get("selection") != selection:
         board["approved"] = None
     board["selection"] = selection
-    if notes is not None:
-        known = {r["id"] for r in doc.get("recommendations") or []}
-        board["notes"] = {k: v.strip() for k, v in notes.items()
-                          if k in known and isinstance(v, str) and v.strip()}
     board["saved_at"] = datetime.now().isoformat(timespec="seconds")
     _write(project_dir, board)
     return {"status": "ok"}
@@ -268,17 +284,26 @@ def build(project_dir: Path) -> dict[str, Any]:
     findings = {f.id: f for f in corpus.findings}
     signals_doc = _read_json(review_dir(project_dir) / "signals.json") or {}
     signals = {s["id"]: s for s in signals_doc.get("signals") or []}
-    current = artifact_hashes(project_dir)
+    docs, current = load_artifacts(project_dir), artifact_hashes(project_dir)
     done = applied_ids(project_dir)
 
     recs = []
     for rec in doc.get("recommendations") or []:
+        revision = rec.get("revision")
+        if revision:
+            original = revision.get("original") or {}
+            revision = {**{k: revision.get(k) for k in ("n", "at", "why", "note")},
+                        "original": [_patch_view(n, p, corpus, findings)
+                                     for n, p in enumerate(original.get("patches") or [], 1)],
+                        "original_rationale": original.get("rationale")}
         recs.append({
             **{k: rec.get(k) for k in ("id", "theme", "title", "rationale", "confidence",
                                        "priority", "problems")},
             "conflicts_with": rec.get("conflicts_with") or [],
             "applied_at": done.get(rec["id"]),
-            "stale": _stale(rec, current),
+            "stale": [] if rec["id"] in done else stale_reasons(rec, docs, current),
+            "revision": revision,
+            "revise_requested": rec["id"] in board["revise"],
             "patches": [_patch_view(n, p, corpus, findings)
                         for n, p in enumerate(rec["patches"], 1)],
             "follow_ups": [{"type": p["type"], "summary": describe_patch(p), "patch": p}
@@ -318,6 +343,7 @@ def build(project_dir: Path) -> dict[str, Any]:
         "omitted": doc.get("omitted") or [],
         "selection": board["selection"],
         "notes": board["notes"],
+        "revise": board["revise"],
         "approved": approved if approval_current else None,
         "preview": preview,
     }
@@ -337,6 +363,7 @@ def summary(project_dir: Path) -> dict[str, Any]:
         "open": [r["id"] for r in recs if r["id"] not in done],
         "selection": board["selection"],
         "notes": board["notes"],
+        "revise": {rid: board["notes"].get(rid, "") for rid in board["revise"]},
         "approved": selection is not None,
         "approved_selection": selection,
         "not_approved_because": problem,

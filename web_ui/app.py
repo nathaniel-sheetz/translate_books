@@ -2416,7 +2416,7 @@ def book_review_state(project_id):
 
 @app.route("/api/project/<project_id>/book-review/selection", methods=["POST"])
 def book_review_selection(project_id):
-    """Save the picks and notes; the reply is the rebuilt state with its dry run."""
+    """Save the picks, notes and revision requests; the reply is the rebuilt state with its dry run."""
     from src.book_review import board as review_board
 
     project_dir, error = _book_review_dir(project_id)
@@ -2426,7 +2426,8 @@ def book_review_selection(project_id):
     if not isinstance(data, dict) or not isinstance(data.get("selection"), list):
         return jsonify({"error": "Missing required fields"}), 400
     notes = data.get("notes") if isinstance(data.get("notes"), dict) else None
-    saved = review_board.save(project_dir, data["selection"], notes)
+    revise = data.get("revise") if isinstance(data.get("revise"), list) else None
+    saved = review_board.save(project_dir, data["selection"], notes, revise)
     if saved["status"] != "ok":
         return jsonify({"error": "; ".join(saved["problems"]), "problems": saved["problems"]}), 400
     return jsonify(review_board.build(project_dir))

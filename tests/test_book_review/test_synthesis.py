@@ -173,7 +173,7 @@ def test_commit_validates_and_writes_the_report(book):
     assert out["recommendations"] == 1 and out["by_priority"][1] == 1
     doc = json.loads(synthesize.recommendations_path(book.dir).read_text(encoding="utf-8"))
     rec = doc["recommendations"][0]
-    assert rec["id"].startswith("R-") and rec["precondition"]["glossary"]
+    assert rec["id"].startswith("R-") and rec["targets"][0] and "precondition" not in rec
     report = open(out["report_path"], encoding="utf-8").read()
     assert "rekey `porte cochere` → `porte-cochere`" in report
     assert progress.load_state(book.dir)["kind"] == "synthesis"

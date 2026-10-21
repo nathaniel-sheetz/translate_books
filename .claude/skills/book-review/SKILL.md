@@ -63,6 +63,7 @@ object with a `_schema` block.
 | `commit` | none | validates every proposed patch; writes `.harness/book_review/recommendations.json` and `reports/book_review_<date>.md` |
 | `run --yes` | subscription | `prepare` → `fanout` → `commit` in one call, after the user approved `prepare`'s gate |
 | `board` | none | the review page's `url`, whether the web UI answers, and what the user picked, noted and approved there |
+| `revise --id R-xxxxxx --from revised.json` | none | rewrites one recommendation's changes as the user's note asked; validated like `commit`, shown on the page beside the original for the user to pick and approve |
 | `apply --from-board` | none | dry run of the picks on the page |
 | `apply --from-board --yes` | none | writes the picks the user **approved on the page**; refuses anything else |
 | `apply --select R-xxxxxx[,R-yyyyyy.2]` | none | dry run: the diff of every artifact the selection edits (for one or two items picked in the chat) |
@@ -126,14 +127,27 @@ object with a `_schema` block.
    dismissal marks) and the evidence behind it, English included. Ticking one, or
    single changes inside one, saves at once and redraws the dry-run diffs at the
    bottom; a conflicting pair unpicks its other half. A note box on each card
-   carries anything the picks cannot ("yes, but keep the old key"). The user
+   carries anything the picks cannot ("yes, but keep the old key"); ticking "Ask
+   the agent to rewrite this from my note" under it turns the note into a
+   revision request and blocks the pick until the revision is there. The user
    approves the diffs there.
 
    Only with **one or two** recommendations, or when the user asks for the chat,
    present them inline instead and use `apply --select`.
 
-7. **When they come back, `board` again.** Answer or act on each of `notes`
-   first: a note can change what they want applied. Then:
+7. **When they come back, `board` again.** Handle `revise` first, then answer
+   or act on each of `notes`: a note can change what they want applied.
+   - `revise` (`{id: note}`): for each, write the changes the note asks for as a
+     JSON file in the scratchpad, `{"patches": [...], "why": "one line on what
+     changed", "follow_ups": [...]}` (patches in the recommendation's own shape;
+     leave out `follow_ups` to keep its own, `[]` to drop them; `rationale` is
+     optional), and run `revise --id … --from <file>`. A refusal lists the
+     `problems`: fix the file and run it again. Read the note against the
+     evidence: drop a part the note makes wrong (a house rule it contradicts, a
+     retranslate it makes moot) and say so in `why`. When every request is
+     revised, tell the user in a line each what changed and send them back to
+     the `url` to pick and approve. **END your turn**; nothing is applied yet.
+     Never apply a note's wording yourself outside the page.
    - `approved: true`: run `apply --from-board --yes`. Their approval on the page
      is the gate; it covers exactly the diffs they saw.
    - not approved: `not_approved_because` says why (nothing picked, picks changed
@@ -148,9 +162,12 @@ object with a `_schema` block.
      `.claude/skills/translate-harness/references/retranslate.md`, which has its own gate. `manual` needs a person
      or a code change.
 
-   The page shows applied recommendations as applied. Others that edit the same
-   artifact show as stale: their patches were checked against the old text, so
-   re-run from step 5 to pick them.
+   The page shows applied recommendations as applied. Another one goes stale
+   only when something it edits changed: the passage it rewrites is gone, or the
+   glossary entry or address pair it edits by name is no longer as it was at the
+   review. The card says which change and why; re-run from step 5 to pick it, or
+   `revise` it if the user asks. (Reviews committed before these per-change
+   checks go stale on any edit to a file they touch.)
 
 ## Notes
 

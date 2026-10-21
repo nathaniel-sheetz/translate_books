@@ -317,13 +317,24 @@ def _file_hash(path) -> Optional[str]:
         return None
 
 
+ARTIFACT_FILES = {"glossary": "glossary.json", "style": "style.json",
+                  "address_map": "address_map.json"}
+
+
 def artifact_hashes(project_dir) -> dict[str, Optional[str]]:
     """Content hashes of the three artifacts a recommendation may patch."""
-    return {
-        "glossary": _file_hash(project_dir / "glossary.json"),
-        "style": _file_hash(project_dir / "style.json"),
-        "address_map": _file_hash(project_dir / "address_map.json"),
-    }
+    return {name: _file_hash(project_dir / file) for name, file in ARTIFACT_FILES.items()}
+
+
+def load_artifacts(project_dir) -> dict[str, Optional[dict]]:
+    """The three artifacts as documents, None for one the book does not have."""
+    out: dict[str, Optional[dict]] = {}
+    for name, file in ARTIFACT_FILES.items():
+        try:
+            out[name] = json.loads((project_dir / file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            out[name] = None
+    return out
 
 
 def inputs_hash(corpus: BookCorpus) -> str:

@@ -10,8 +10,9 @@
   (:func:`src.decisions.wave.run_wave`, rooted at this stage's directory). A
   job whose draft exists is skipped, so a re-run resumes.
 - :func:`commit` parses the drafts, validates every patch against the book as
-  it is now (:mod:`src.book_review.schema`), stamps each recommendation with
-  the hash of the artifacts it would edit, and writes ``recommendations.json``
+  it is now (:mod:`src.book_review.schema`), stamps the state of every
+  glossary entry and address pair a patch edits by name
+  (:func:`src.book_review.patches.stamp`), and writes ``recommendations.json``
   plus the dated report. No spend, and nothing in the book changes.
 """
 
@@ -26,7 +27,8 @@ from src.book_review import evidence as ev
 from src.book_review import progress, review_dir
 from src.book_review.corpus import load_book
 from src.book_review.report import write_recommendations, write_signals
-from src.book_review.schema import artifact_of, check_recommendation, reconcile
+from src.book_review.patches import stamp
+from src.book_review.schema import check_recommendation, reconcile
 from src.book_review.signals import run_all
 
 COMMAND = "book_review"
@@ -152,7 +154,7 @@ def commit(project_dir: Path, *, today: Optional[str] = None) -> dict[str, Any]:
     evidence_doc = json.loads((review_dir(project_dir) / "evidence.json").read_text(encoding="utf-8"))
     known = {i["signal_id"] for t in evidence_doc["themes"] for j in t["jobs"] for i in j["items"]}
     known |= {f.id for f in corpus.findings}
-    hashes = ev.artifact_hashes(project_dir)
+    artifacts = ev.load_artifacts(project_dir)
 
     recommendations: list[dict[str, Any]] = []
     no_action: list[dict[str, Any]] = []
@@ -175,8 +177,11 @@ def commit(project_dir: Path, *, today: Optional[str] = None) -> dict[str, Any]:
                 rejected.append({"job": job["id"], "title": (raw or {}).get("title") if isinstance(raw, dict) else None,
                                  "problems": problems})
                 continue
-            touched = sorted({artifact_of(p["type"]) for p in rec["patches"]} - {None})
-            rec["precondition"] = {name: hashes.get(name) for name in touched}
+            try:
+                rec["targets"] = stamp(artifacts, rec["patches"])
+            except ValueError as exc:
+                rejected.append({"job": job["id"], "title": rec["title"], "problems": [str(exc)]})
+                continue
             recommendations.append(rec)
         for item in data.get("no_action") or []:
             if isinstance(item, dict) and item.get("signal_id"):

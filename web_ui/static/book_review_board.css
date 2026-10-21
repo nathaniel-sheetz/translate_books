@@ -534,3 +534,40 @@
         font-size: 15px;
     }
 }
+
+/* --- revisions --------------------------------------------------------- */
+
+.br-revision {
+    border-left: 3px solid var(--br-picked);
+    padding: 4px 0 4px 12px;
+    margin: 0 0 14px;
+}
+
+.br-revision-head {
+    font-weight: 600;
+    font-size: 14px;
+    margin: 0 0 6px;
+}
+
+.br-revise {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 14px;
+}
+
+.br-revise input:disabled + span {
+    color: var(--text-muted);
+}
+
+.br-waiting-note {
+    display: none;
+    color: var(--br-warn);
+    font-size: 14px;
+    margin: 6px 0 0;
+}
+
+.br-card.br-waiting .br-waiting-note {
+    display: block;
+}

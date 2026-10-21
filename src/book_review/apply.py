@@ -1,10 +1,10 @@
 """Apply the recommendations the operator picked, through the normal save paths.
 
-``recommendations.json`` stamps each recommendation with the hash of every
-artifact its patches edit, taken when it was validated. :func:`apply` refuses a
-selection whose artifacts changed since, because a patch validated against one
-glossary may be wrong against another. It checks every selected recommendation
-before writing anything, then applies them in order.
+Before anything is written, every selected recommendation is checked against
+the book as it is now (:func:`stale_reasons`): each patch must still apply, and
+a glossary entry or address pair it edits by name must be as it was when the
+review was committed. A selection with a stale recommendation is refused whole.
+The patches are then applied in order.
 
 What each patch does:
 
@@ -33,20 +33,26 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.book_review import review_dir
-from src.book_review.patches import apply_address, apply_glossary, apply_style
-from src.book_review.evidence import artifact_hashes
+from src.book_review.evidence import ARTIFACT_FILES as _FILES
+from src.book_review.evidence import artifact_hashes, load_artifacts
+from src.book_review.patches import apply_patch, artifact_of, stale_changes
 from src.book_review.synthesize import recommendations_path
 
 WRITER = "book_review"
-_FILES = {"glossary": "glossary.json", "style": "style.json", "address_map": "address_map.json"}
 
 
-def _load(project_dir: Path, name: str) -> Optional[dict[str, Any]]:
-    path = project_dir / _FILES[name]
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+def stale_reasons(rec: dict[str, Any], docs: dict[str, Optional[dict]],
+                  hashes: dict[str, Optional[str]]) -> list[str]:
+    """Why ``rec`` no longer fits the book as it is now; empty when it still does.
+
+    A recommendation committed before per-patch stamps (no ``targets``) carries
+    whole-file hashes instead, and goes stale on any edit to a file it touches.
+    """
+    if "targets" in rec:
+        return stale_changes(docs, rec["patches"], rec["targets"])
+    return [f"{_FILES[name]} changed since the review"
+            for name, stamped in (rec.get("precondition") or {}).items()
+            if stamped != hashes.get(name)]
 
 
 def parse_selection(raw: list[str]) -> dict[str, Optional[set[int]]]:
@@ -105,18 +111,14 @@ def apply(project_dir: Path, selection: list[str], *, yes: bool = False) -> dict
     if not chosen or unknown:
         return {"status": "error", "error": f"unknown recommendation ids: {unknown or selection}"}
 
+    loaded = load_artifacts(project_dir)
     current = artifact_hashes(project_dir)
-    stale = []
-    for rid in chosen:
-        for name, stamped in (by_id[rid].get("precondition") or {}).items():
-            if stamped != current.get(name):
-                stale.append(f"{rid}: {_FILES[name]} changed since the review")
+    stale = [f"{rid}: {why}" for rid in chosen for why in stale_reasons(by_id[rid], loaded, current)]
     if stale:
-        return {"status": "error", "error": "artifacts changed since `commit`; re-run the review",
+        return {"status": "error", "error": "the book changed since the review: " + "; ".join(stale),
                 "stale": stale}
 
-    loaded = {name: _load(project_dir, name) for name in _FILES}
-    working = {name: copy.deepcopy(d) for name, d in loaded.items() if d is not None}
+    working = copy.deepcopy(loaded)
     touched: dict[str, list[str]] = {}
     actions: list[dict[str, Any]] = []
     for rid, numbers in chosen.items():
@@ -125,14 +127,10 @@ def apply(project_dir: Path, selection: list[str], *, yes: bool = False) -> dict
             if numbers is not None and n not in numbers:
                 continue
             kind = patch["type"]
-            family = kind.split(".", 1)[0]
+            name = artifact_of(kind)
             try:
-                if family in ("glossary", "style", "address"):
-                    name = {"glossary": "glossary", "style": "style", "address": "address_map"}[family]
-                    if name not in working:
-                        raise ValueError(f"{_FILES[name]} does not exist")
-                    {"glossary": apply_glossary, "style": apply_style,
-                     "address": apply_address}[family](working[name], patch)
+                if name:
+                    apply_patch(working, patch)
                     touched.setdefault(name, []).append(f"{rid}.{n}")
                     actions.append({"id": f"{rid}.{n}", "type": kind, "status": "staged"})
                 else:
