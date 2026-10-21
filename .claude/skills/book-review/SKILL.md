@@ -123,7 +123,7 @@ object with a `_schema` block.
      chunks translated from now on.
    - `done` rows: dismissals, re-judge flags, house proposals.
    - `offer` rows: `retranslate` carries a preview command. Run it only through
-     `references/retranslate.md`, which has its own gate. `manual` needs a person
+     `.claude/skills/translate-harness/references/retranslate.md`, which has its own gate. `manual` needs a person
      or a code change.
 
    A `stale` error means an artifact changed after `commit`; re-run from step 5.
