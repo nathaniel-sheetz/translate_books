@@ -8301,125 +8301,13 @@ def _adjudicate_editorial(
     project_dir, scopes, emit, *, backend, context,
     cli=None, worker_model=None, effort=None, prompt_cache="auto",
 ):
-    """Pass 2 of the editorial judge, run inline after pass 1 in the same job.
+    """Pass 2 of the editorial judge; see :func:`src.judges.sweep.adjudicate_editorial`."""
+    from src.judges import sweep
 
-    Pass 1's ``issues[]`` are *proposals*: the judge reads the Spanish alone and
-    over-proposes on purpose, and ``metadata.verified`` stays false until this
-    pass has adjudicated them against the English. Leaving that gap open in the
-    GUI would light a dashboard badge from un-adjudicated candidates — and
-    because :func:`web_ui.evaluations.merge_judge_result` replaces a judge's
-    whole result, the obvious repair (re-run the judge later) silently discards
-    whatever adjudication *had* landed. So the two passes are one gesture here.
-
-    No ``force``: pass 1 has just rewritten these results, so ``verified`` is
-    false again and every chunk carrying candidates is naturally pending. A
-    chunk pass 1 found clean is skipped as ``no_candidates`` — a clean chunk,
-    not a gap.
-
-    Never raises. Pass 1's findings are already persisted by the time this runs,
-    and a failure to second-guess them is not a reason to report the whole wave
-    as stopped; the caller folds ``errors`` into the job summary and the Review
-    tab's banner offers the retry. Returns ``(summary, errors)``.
-    """
-    from src.judges import editorial_wave as wave
-
-    errors: list[str] = []
-
-    def summary(rollup=None, *, chunks=0, unverified=0):
-        rollup = rollup or {}
-        return {
-            "chunks": chunks,
-            "confirmed": rollup.get("confirmed", 0),
-            "reclassified": rollup.get("reclassified", 0),
-            "retracted": rollup.get("retracted", 0),
-            "source_used": rollup.get("source_used", 0),
-            "unverified": unverified,
-        }
-
-    try:
-        if backend == "api":
-            emit("phase", phase="adjudicate", message="Adjudicating findings…")
-            # ``confirm`` because the caller already gated on an estimate that
-            # included this pass; a second dollar gate inside a running job has
-            # nobody to ask.
-            out = wave.run_api(
-                project_dir, scopes, context=context, persist=True, confirm=True
-            )
-            if out.get("status") == "error":
-                errors.append(f"adjudication: {out.get('error')}")
-                return summary(), errors
-            results = out.get("results") or []
-            chunks = (out.get("counts") or {}).get("chunks", 0)
-            for record in results:
-                if record.get("status") != "ok":
-                    errors.append(
-                        f"{record.get('chunk_id')}: adjudication "
-                        f"{record.get('status') or 'failed'}"
-                    )
-            landed = sum(1 for r in results if r.get("status") == "ok")
-            return (
-                summary(out.get("rollup"), chunks=chunks,
-                        unverified=max(0, chunks - landed)),
-                errors,
-            )
-
-        emit("phase", phase="adjudicate_prepare", message="Preparing adjudication…")
-        prep = wave.prepare(
-            project_dir, scopes, context=context,
-            cli=cli, worker_model=worker_model, effort=effort, quiet=True,
-        )
-        if prep.get("status") == "error":
-            errors.append(f"adjudication: {prep.get('error')}")
-            return summary(), errors
-        chunks = (prep.get("counts") or {}).get("chunks", 0)
-        if not chunks:
-            # Pass 1 proposed nothing anywhere in scope. That is a clean book,
-            # not a failure, and it costs no wave.
-            return summary(), errors
-
-        emit(
-            "phase", phase="adjudicate",
-            message=f"Adjudicating {chunks} chunk(s)…", total=chunks,
-        )
-        out = wave.fanout(
-            project_dir,
-            cache=prompt_cache,
-            on_job_done=lambda rec: emit(
-                "target_done",
-                target_id=rec.get("id"),
-                index=rec.get("done"),
-                total=rec.get("total"),
-                ok=rec.get("ok"),
-            ),
-        )
-        if out.get("error"):
-            errors.append(f"adjudication: {out['error']}")
-            return summary(chunks=chunks, unverified=chunks), errors
-
-        emit("phase", phase="adjudicate_commit", message="Committing verdicts…")
-        landed = wave.commit(project_dir, persist=True)
-        if landed.get("status") == "error":
-            errors.append(
-                f"adjudication commit failed: {landed.get('error') or 'unknown error'}"
-            )
-            return summary(chunks=chunks, unverified=chunks), errors
-
-        errors += [
-            f"{f.get('chunk_id')}: {f.get('error')}" for f in landed.get("failed") or []
-        ]
-        errors += [
-            f"{m}: adjudication draft missing" for m in landed.get("missing") or []
-        ]
-        committed = landed.get("committed", 0)
-        return (
-            summary(landed.get("rollup"), chunks=chunks,
-                    unverified=max(0, chunks - committed)),
-            errors,
-        )
-    except Exception as exc:  # noqa: BLE001 - pass 1 is already persisted
-        app.logger.exception("Editorial adjudication failed for %s", project_dir)
-        errors.append(f"adjudication: {exc}")
-        return summary(), errors
+    return sweep.adjudicate_editorial(
+        project_dir, scopes, emit, backend=backend, context=context,
+        cli=cli, worker_model=worker_model, effort=effort, prompt_cache=prompt_cache,
+    )
 
 
 def _editorial_pass_two_cost(targets, context, data):
@@ -8709,84 +8597,13 @@ def _run_judges_headless(
     total = len(targets) * len(judge_names)
 
     def body(emit):
-        emit("phase", phase="prepare", message="Preparing prompts…")
-        # Re-prepared inside the job (idempotent, no spend) so the manifest the
-        # wave runs from is this request's, not whatever an estimate left behind.
-        prep = _prepare()
-        entries = len(prep.get("manifest") or [])
-        emit(
-            "phase", phase="fanout",
-            message=f"Running {entries} CLI job(s)…", total=entries,
+        from src.judges import sweep
+
+        return sweep.run_headless_sweep(
+            project_dir, judge_names, scopes, emit,
+            context=context, cli=cli, worker_model=worker_model, effort=effort,
+            prompt_cache=prompt_cache, default_cli=prof.cli, total_hint=total,
         )
-        out = subagent.fanout(
-            project_dir,
-            cache=prompt_cache,
-            on_job_done=lambda rec: emit(
-                "target_done",
-                target_id=rec.get("id"),
-                index=rec.get("done"),
-                total=rec.get("total"),
-                ok=rec.get("ok"),
-            ),
-        )
-        if out.get("error"):
-            # A launcher error (missing binary, failed preflight) means no job
-            # ever ran; report it as the stop it is rather than as 0 of N done.
-            return {"fatal": out["error"], "effective": out.get("effective")}
-
-        cli_name = out.get("cli") or prof.cli
-        emit("phase", phase="commit", message="Committing verdicts…")
-        landed = subagent.commit(
-            project_dir, persist=True, backend=f"headless:{cli_name}"
-        )
-        if landed.get("status") == "error":
-            # An unreadable/absent manifest returns no `counts`, so the summary
-            # below would read `ran: 0, error_count: 0` and the modal would
-            # render "0 of N done" for a commit that never happened. Same shape
-            # as the launcher-error branch above, which the JS shows as "Stopped".
-            return {
-                "fatal": f"commit failed: {landed.get('error') or 'unknown error'}",
-                "effective": out.get("effective"),
-            }
-
-        errors = [f"{f.get('id')}: {f.get('error')}" for f in out.get("failed") or []]
-        errors += [
-            f"{f.get('target_id')}/{f.get('judge')}: {f.get('problem')}"
-            for f in landed.get("failed") or []
-        ]
-        # A draft the wave never wrote is a failure of this run, not an absence
-        # worth staying quiet about: without it, an all-missing commit reports
-        # zero errors and reads as a clean wave that simply judged nothing.
-        missing = landed.get("missing") or []
-        errors += [
-            f"{m.get('target_id')}/{m.get('judge')}: draft missing" for m in missing
-        ]
-        errors += list(landed.get("persist_errors") or [])
-        counts = landed.get("counts") or {}
-
-        adjudication = None
-        if "editorial" in judge_names:
-            adjudication, adj_errors = _adjudicate_editorial(
-                project_dir, scopes, emit, backend="headless", context=context,
-                cli=cli, worker_model=worker_model, effort=effort,
-                prompt_cache=prompt_cache or "auto",
-            )
-            errors += adj_errors
-
-        return {
-            "ran": counts.get("committed", 0),
-            "total": entries or total,
-            "wrote": len(out.get("wrote") or []),
-            "failed": len(out.get("failed") or []),
-            "missing": len(missing),
-            "adjudication": adjudication,
-            "error_count": len(errors),
-            "errors": errors[:5],
-            # The wave's *measured* overhead_ratio, not the projection — the
-            # completion line is the one place the estimate can be checked.
-            "usage": out.get("usage"),
-            "effective": out.get("effective"),
-        }
 
     conflict_response = _lock_conflict(project_dir)
     if conflict_response is not None:

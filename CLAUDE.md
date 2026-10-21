@@ -26,6 +26,7 @@ Key routing rules:
 - Translate a book conversationally, draft style guide/glossary in-chat → invoke translate-harness
 - Run LLM judges, check dialogue compliance, evaluate translation quality → invoke judge-review
 - Triage the coded checkers, filter dictionary/grammar false positives → invoke triage-review
+- Review a book's judge findings for systemic problems, glossary/address-map conflicts, run the post-translation judge sweep → invoke book-review
 - Review reader annotations, resolve word-choice notes, draft footnote glosses → invoke annotation-review
 - Add editorial footnotes to a book, scan chapters for footnote candidates → invoke footnote-pass
 - Redo/translate/clean book images, cover art → invoke image-pass

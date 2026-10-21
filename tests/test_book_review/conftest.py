@@ -78,6 +78,9 @@ class Book:
             "id": chunk_id, "chapter_id": chunk_id.split("_chunk")[0], "position": 0,
             "source_text": source, "translated_text": translation,
             "translated_at": "2026-07-01T00:00:00", "last_llm_log": log,
+            "status": "translated",
+            "metadata": {"char_start": 0, "char_end": max(1, len(source)), "overlap_start": 0,
+                         "overlap_end": 0, "paragraph_count": 1, "word_count": len(source.split())},
         })
         return self
 

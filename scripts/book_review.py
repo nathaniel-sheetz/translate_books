@@ -13,9 +13,16 @@ with the findings behind each.
 Each subcommand prints one JSON object with a ``_schema`` block:
 
     status    coverage, owed chapters, last review   (no spend, no writes)
+    judge     run every judge over the chapters that owe it, then editorial
+              pass 2: --estimate prepares and projects tokens (no spawns),
+              --yes runs the headless wave (subscription)
     signals   run the coded detectors; write signals.json + a report  (no spend)
+    skip      mark the current translations reviewed without reviewing them,
+              so the harness stops routing here until new chunks land
 
     python scripts/book_review.py status  --project pollyanna
+    python scripts/book_review.py judge   --project pollyanna --estimate
+    python scripts/book_review.py judge   --project pollyanna --yes
     python scripts/book_review.py signals --project pollyanna
 
 Nothing here edits the book or deletes a finding.
@@ -37,7 +44,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 
-from src.book_review import review_dir  # noqa: E402
+from src.book_review import judging, progress, review_dir  # noqa: E402
 from src.book_review.corpus import load_book  # noqa: E402
 from src.book_review.report import write_signals  # noqa: E402
 from src.book_review.signals import coverage, run_all  # noqa: E402
@@ -62,6 +69,20 @@ _SIGNALS_SCHEMA = {
     "signals_path": "full detector output (JSON)",
     "report_path": "the markdown report to show the operator",
     "coverage": "same shape as status.coverage",
+    "instructions": "next step",
+}
+
+_JUDGE_SCHEMA = {
+    "status": "'ok' | 'needs_confirm' | 'error'",
+    "plan": "{judges, address_map, owed: {judge: [chapter ids]}, owed_chunks, "
+    "pending_pass2_chunks, nothing_to_do}",
+    "effective": "the profile the wave runs under (cli, worker_model, effort, ...) with provenance",
+    "pass1": "--estimate only: {jobs, prompt_tokens, projected_tokens, output_tokens, "
+    "baseline_tokens, ...} for the judge wave",
+    "adjudication": "--estimate only: editorial pass 2 ceiling {jobs_max, tokens_max, "
+    "baseline_tokens, baseline_source}; pass 2 cannot be measured before pass 1 runs",
+    "summary": "--yes only: {ran, total, wrote, failed, missing, adjudication, error_count, "
+    "errors, usage, effective}",
     "instructions": "next step",
 }
 
@@ -124,11 +145,33 @@ def _cmd_status(args: argparse.Namespace) -> int:
     })
 
 
+def _cmd_judge(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    options = dict(judges=args.judge, cli=args.cli, worker_model=args.worker_model,
+                   effort=args.effort, cache=args.prompt_cache)
+    if args.yes:
+        out = judging.run(project_dir, **options)
+        out["instructions"] = "Run `signals` next to read the new findings."
+    elif args.estimate:
+        out = judging.estimate(project_dir, **options)
+        out["instructions"] = (
+            "Relay plan, pass1 and adjudication as one consent gate and stop. "
+            "On approval run `judge --yes` with the same flags."
+        )
+    else:
+        out = {"status": "needs_confirm", "plan": judging.plan(project_dir, judges=args.judge),
+               "instructions": "Run with --estimate for a token projection, then --yes."}
+    out["project"] = project_dir.name
+    out["_schema"] = _JUDGE_SCHEMA
+    return _print(out)
+
+
 def _cmd_signals(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     corpus = load_book(project_dir)
     result = run_all(corpus)
     paths = write_signals(corpus, result)
+    progress.record_review(project_dir, kind="signals", report_path=paths["report_path"])
     counts: dict[str, int] = {}
     for s in result["signals"]:
         counts[s["detector"]] = counts.get(s["detector"], 0) + 1
@@ -146,6 +189,19 @@ def _cmd_signals(args: argparse.Namespace) -> int:
     })
 
 
+def _cmd_skip(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    recorded = progress.record_review(project_dir, kind="skipped")
+    return _print({
+        "status": "ok",
+        "project": project_dir.name,
+        "recorded": recorded,
+        "instructions": "The router moves on until new chunks are translated. To stop "
+        "it for good: harness.py config-set --key book_review_after_translate --value off "
+        "(and book_review_canary).",
+    })
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="book_review.py",
@@ -156,15 +212,37 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("status", "coverage, owed chapters, last review (no spend, no writes)"),
         ("signals", "run the coded detectors; write signals.json + a report (no spend)"),
+        ("skip", "mark the current translations reviewed without reviewing them"),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    judge = sub.add_parser(
+        "judge", help="run every judge over owed chapters, then editorial pass 2 (subscription)"
+    )
+    judge.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    gate = judge.add_mutually_exclusive_group()
+    gate.add_argument("--estimate", action="store_true",
+                      help="prepare and project tokens; spawns nothing")
+    gate.add_argument("--yes", action="store_true", help="run the headless wave")
+    judge.add_argument("--judge", action="append", choices=judging.SWEEP_JUDGES, default=None,
+                       help="limit to these judges (repeatable; default: all the book supports)")
+    judge.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None, help="headless CLI")
+    judge.add_argument("--worker-model", default=None, help="pin the judge model")
+    judge.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "default"),
+                       default=None, help="default: headless_effort_judges")
+    judge.add_argument("--prompt-cache", dest="prompt_cache", default=None,
+                       choices=["auto", "5m", "1h", "off"], help="Claude prompt-cache TTL")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"status": _cmd_status, "signals": _cmd_signals}[args.command](args)
+    return {
+        "status": _cmd_status,
+        "judge": _cmd_judge,
+        "signals": _cmd_signals,
+        "skip": _cmd_skip,
+    }[args.command](args)
 
 
 if __name__ == "__main__":
