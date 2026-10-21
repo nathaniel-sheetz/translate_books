@@ -209,6 +209,27 @@ def test_english_is_attached_only_where_the_finding_asked(tmp_path):
     assert candidates[1]["_source_available"] is True
 
 
+def test_source_all_attaches_the_english_without_rewriting_the_request(tmp_path):
+    """``source_requested`` must keep measuring what pass 1 asked for."""
+    _alignment(tmp_path)
+    result = _result([_finding(source_check="not_needed")])
+
+    candidates = ev.attach_context(
+        tmp_path,
+        ev.collect_candidates(result, "chapter_01_chunk_000", " ".join(ES)),
+        source="all",
+    )
+
+    assert "The room was bare and hot." in candidates[0]["_english_context"]
+    assert candidates[0]["_source_available"] is True
+    assert candidates[0]["_source_requested"] is False
+
+
+def test_an_unknown_source_mode_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        ev.attach_context(tmp_path, [], source="everything")
+
+
 def test_spanish_context_falls_back_to_the_chunk_when_unaligned(tmp_path):
     """No alignment must not mean no adjudication — the Spanish is still judgeable."""
     text = " ".join(ES)
@@ -323,6 +344,21 @@ def test_candidates_are_preserved_so_the_retract_rate_is_measurable(tmp_path):
     patched = ev.apply_verdicts(_result(findings), candidates, verdicts)
 
     assert len(patched["metadata"]["candidates"]) == 1
+    assert patched["metadata"]["candidates_adjudicated"] == 1
+
+
+def test_pass_one_drops_survive_adjudication_untouched(tmp_path):
+    """``filtered`` is pass 1's record; pass 2 neither reads nor rewrites it."""
+    findings = [_finding()]
+    dropped = [_finding(rule="other", confidence="medium", drop_reason="below_confidence")]
+    result = _result(findings)
+    result["metadata"]["filtered"] = dropped
+    candidates = _candidates(tmp_path, findings)
+    verdicts = {candidates[0]["key"]: {"verdict": "CONFIRM", "reason": "real"}}
+
+    patched = ev.apply_verdicts(result, candidates, verdicts)
+
+    assert patched["metadata"]["filtered"] == dropped
     assert patched["metadata"]["candidates_adjudicated"] == 1
 
 

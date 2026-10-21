@@ -318,7 +318,7 @@ class EditorialJudge(VerdictJudge):
 
     def select_findings(
         self, raw_findings: list[dict[str, Any]], target: JudgeTarget, context: dict[str, Any]
-    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
         """Apply the coded half of the threshold, in order, and report the drops.
 
         Three gates the prompt asks for and code enforces, because a prompt-only
@@ -337,29 +337,52 @@ class EditorialJudge(VerdictJudge):
         The survivors then pass through :func:`_disambiguate_keys`, after
         truncation so that a finding dropped by the budget cannot consume an
         ordinal the survivors need.
+
+        Returns ``(survivors, filtered, counts)``. ``filtered`` is every dropped
+        finding tagged with the gate that dropped it (``drop_reason``:
+        ``nonissue``, ``below_confidence`` or ``over_budget``). The worker's
+        draft used to be the only copy of these, and the next ``prepare`` deletes
+        drafts — so a question like "what did the budget cut?" had no answer.
         """
         minimum = str(context.get("editorial_min_confidence") or DEFAULT_MIN_CONFIDENCE)
         budget = resolve_budget(target, context)
+        filtered: list[dict[str, Any]] = []
 
-        kept = [f for f in raw_findings if not is_nonissue(f)]
+        def _drop(finding: dict[str, Any], reason: str) -> None:
+            filtered.append({**finding, "drop_reason": reason})
+
+        kept = []
+        for finding in raw_findings:
+            if is_nonissue(finding):
+                _drop(finding, "nonissue")
+            else:
+                kept.append(finding)
         dropped_nonissue = len(raw_findings) - len(kept)
 
-        confident = [f for f in kept if _meets_confidence(f, minimum)]
+        confident = []
+        for finding in kept:
+            if _meets_confidence(finding, minimum):
+                confident.append(finding)
+            else:
+                _drop(finding, "below_confidence")
         dropped_confidence = len(kept) - len(confident)
 
         if len(confident) > budget:
             severity_rank = {"error": 0, "warning": 1, "info": 2}
-            confident = sorted(
+            ranked = sorted(
                 confident,
                 key=lambda f: (
                     severity_rank.get(str(f.get("severity", "")).strip().lower(), 3),
                     CONFIDENCE_ORDER.index(normalize_confidence(f.get("confidence"))),
                 ),
-            )[:budget]
+            )
+            confident = ranked[:budget]
+            for finding in ranked[budget:]:
+                _drop(finding, "over_budget")
         dropped_budget = len(kept) - dropped_confidence - len(confident)
         confident = _disambiguate_keys(confident)
 
-        return confident, {
+        return confident, filtered, {
             "dropped_nonissue": dropped_nonissue,
             "dropped_confidence": dropped_confidence,
             "dropped_budget": dropped_budget,
@@ -388,7 +411,7 @@ class EditorialJudge(VerdictJudge):
         data = llm_io.parse_judge_json(raw, self.spec.output_fields)
         raw_findings = [f for f in (data.get("findings") or []) if isinstance(f, dict)]
 
-        findings, drops = self.select_findings(raw_findings, target, context)
+        findings, filtered, drops = self.select_findings(raw_findings, target, context)
         candidates = [self._normalize_finding(f) for f in findings]
         issues = [_finding_to_issue(f) for f in candidates]
         score = compliance_score(candidates)
@@ -422,6 +445,9 @@ class EditorialJudge(VerdictJudge):
                     context.get("editorial_min_confidence") or DEFAULT_MIN_CONFIDENCE
                 ),
                 "candidates": candidates,
+                # What the three gates dropped, in full. Never adjudicated and
+                # never an issue: pass 2 reads ``candidates`` only.
+                "filtered": [self._normalize_finding(f) for f in filtered],
                 "verified": False,
             },
             prompt_version=llm_io.prompt_version(self.spec.template),

@@ -192,7 +192,11 @@ def _judge_is_stale(project_dir: Path, chunk_id: str, payload: dict[str, Any]) -
 
 
 def collect_pending(
-    project_dir: Path, scopes: list[str], *, include_verified: bool = False
+    project_dir: Path,
+    scopes: list[str],
+    *,
+    include_verified: bool = False,
+    source: str = "requested",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Chunks in ``scopes`` carrying editorial candidates, and why others were skipped.
 
@@ -262,6 +266,7 @@ def collect_pending(
         candidates = ev.attach_context(
             project_dir,
             ev.collect_candidates(result, target.id, target.translated_text),
+            source=source,
         )
         if not candidates:
             skipped.append({"chunk_id": target.id, "reason": "no_candidates"})
@@ -384,10 +389,11 @@ def status(
     *,
     include_verified: bool = False,
     drafts: bool = False,
+    source: str = "requested",
 ) -> dict[str, Any]:
     """Read-only: which chunks await adjudication, and optionally the wave's progress."""
     pending, skipped = collect_pending(
-        project_dir, scopes, include_verified=include_verified
+        project_dir, scopes, include_verified=include_verified, source=source
     )
     reasons: dict[str, int] = {}
     for entry in skipped:
@@ -397,6 +403,7 @@ def status(
         "command": "status",
         "project": project_dir.name,
         "scope": _scope_repr(scopes),
+        "source": source,
         "counts": counts(pending),
         "skipped": reasons,
         "warnings": scope_warnings(skipped),
@@ -479,13 +486,16 @@ def run_api(
     cost_limit: float = 0.50,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    source: str = "requested",
 ) -> dict[str, Any]:
     """Metered backend: adjudicate now, one call per chunk, behind a dollar gate."""
     context, error = _context_for(project_dir, context, model, provider)
     if error:
         return {"status": "error", "command": "run", "error": error}
 
-    pending, skipped = collect_pending(project_dir, scopes, include_verified=force)
+    pending, skipped = collect_pending(
+        project_dir, scopes, include_verified=force, source=source
+    )
     totals = counts(pending)
     if not pending:
         return {
@@ -523,6 +533,7 @@ def run_api(
             "",  # context already attached; verify_result re-derives from candidates
             context,
             candidates=entry["candidates"],
+            source=source,
         )
         if info.get("status") == "ok" and persist:
             _persist(project_dir, entry["chunk_id"], patched)
@@ -534,6 +545,7 @@ def run_api(
         "command": "run",
         "project": project_dir.name,
         "backend": "api",
+        "source": source,
         "counts": totals,
         "skipped_count": len(skipped),
         "warnings": scope_warnings(skipped),
@@ -567,6 +579,7 @@ def prepare(
     force: bool = False,
     keep_drafts: bool = False,
     quiet: bool = False,
+    source: str = "requested",
 ) -> dict[str, Any]:
     """Render one prompt file per pending chunk, plus a manifest. Zero spend.
 
@@ -597,7 +610,9 @@ def prepare(
         wave_label=WAVE_LABEL,
     )
 
-    pending, skipped = collect_pending(project_dir, scopes, include_verified=force)
+    pending, skipped = collect_pending(
+        project_dir, scopes, include_verified=force, source=source
+    )
     directory = work_dir(project_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -651,6 +666,9 @@ def prepare(
         "judge": JUDGE_NAME,
         "model": model,
         "provider": provider,
+        # ``commit`` re-attaches context to count what the workers were shown,
+        # so it must use the same attach rule the prompts were rendered with.
+        "source": source,
         # The resolved profile, so a bare ``fanout`` reproduces the wave the
         # operator consented to instead of re-resolving from scratch — and so a
         # wrong pin is visible on disk, not only in a payload that scrolled away.
@@ -687,6 +705,8 @@ def prepare(
             "chunks": totals["chunks"],
             "candidates": totals["candidates"],
             "source_requested": totals["source_requested"],
+            "source": source,
+            "source_attached": totals["source_attached"],
             "cli": prof.cli,
             "worker_model": prof.worker_model,
             "batch_size": DEFAULT_CONCURRENCY,
@@ -916,6 +936,9 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
 
     results, failed, missing = [], [], []
     detail: list[dict[str, Any]] = []
+    # A manifest written before the field existed was rendered under the
+    # requested-only rule, which is what the default reproduces.
+    source = manifest.get("source") or "requested"
 
     for entry in manifest.get("entries") or []:
         chunk_id = entry["chunk_id"]
@@ -946,7 +969,9 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
             targets = []
         translated = targets[0].translated_text if targets else ""
         candidates = ev.attach_context(
-            project_dir, ev.collect_candidates(result, chunk_id, translated)
+            project_dir,
+            ev.collect_candidates(result, chunk_id, translated),
+            source=source,
         )
         try:
             verdicts = ev.parse_verdicts(raw)
@@ -954,7 +979,7 @@ def commit(project_dir: Path, *, persist: bool = False) -> dict[str, Any]:
             failed.append({"chunk_id": chunk_id, "error": str(exc)})
             continue
 
-        patched = ev.apply_verdicts(result, candidates, verdicts)
+        patched = ev.apply_verdicts(result, candidates, verdicts, source_mode=source)
         metadata = patched.get("metadata") or {}
         if persist:
             _persist(project_dir, chunk_id, patched)

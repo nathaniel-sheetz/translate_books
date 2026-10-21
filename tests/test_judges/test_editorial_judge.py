@@ -204,6 +204,47 @@ def test_budget_truncates_by_severity_not_by_order():
     assert [i.rule_id for i in result.issues] == ["b", "c"]
 
 
+def test_every_dropped_finding_is_kept_with_the_gate_that_dropped_it():
+    """The draft is not the only copy: ``filtered`` holds each drop in full."""
+    judge = EditorialJudge()
+    target = _target("palabra " * 400)  # 400 words -> budget 2
+    raw = _response(
+        [
+            _finding(message="This is fine, no change needed.", rule="n"),
+            _finding(confidence="medium", rule="m"),
+            _finding(severity="error", rule="b"),
+            _finding(severity="warning", rule="c"),
+            _finding(severity="info", rule="d", category="bogus"),
+        ]
+    )
+
+    result = judge.parse_response(target, raw, _ctx())
+    filtered = result.metadata["filtered"]
+
+    assert {f["rule"]: f["drop_reason"] for f in filtered} == {
+        "n": "nonissue",
+        "m": "below_confidence",
+        "d": "over_budget",
+    }
+    assert len(filtered) == (
+        result.metadata["filtered_nonissues"]
+        + result.metadata["filtered_low_confidence"]
+        + result.metadata["filtered_over_budget"]
+    )
+    # Normalized like the candidates, and never one of them.
+    assert next(f for f in filtered if f["rule"] == "d")["category"] == "NATURALNESS"
+    assert [c["rule"] for c in result.metadata["candidates"]] == ["b", "c"]
+    assert [i.rule_id for i in result.issues] == ["b", "c"]
+    assert all("drop_reason" not in c for c in result.metadata["candidates"])
+
+
+def test_a_clean_verdict_records_an_empty_filtered_list():
+    judge, target, ctx = EditorialJudge(), _target(), _ctx()
+    result = judge.parse_response(target, _response([_finding()]), ctx)
+
+    assert result.metadata["filtered"] == []
+
+
 @pytest.mark.parametrize(
     "words,expected",
     [(0, 2), (76, 2), (400, 2), (1000, 6), (1246, 7), (2866, 17)],

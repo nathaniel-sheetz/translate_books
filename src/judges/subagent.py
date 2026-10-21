@@ -587,6 +587,9 @@ def prepare(
         # rate those ceilings came from so the persisted verdict can say which
         # setting the book was judged under.
         "editorial_findings_per_1000": context.get("editorial_findings_per_1000"),
+        # Unlike the ceiling, the confidence floor is applied only at `commit`
+        # (it never reaches the prompt), so this is the one copy that binds.
+        "editorial_min_confidence": context.get("editorial_min_confidence"),
         # The resolved profile, so `fanout` inherits it without the operator
         # re-passing --cli (and so a wrong pin is visible on disk, not just in a
         # payload that scrolled away).
@@ -1206,6 +1209,7 @@ def commit(
         "judge_model": doc.get("model"),
         "judge_provider": doc.get("provider"),
         "editorial_findings_per_1000": doc.get("editorial_findings_per_1000"),
+        "editorial_min_confidence": doc.get("editorial_min_confidence"),
     }
 
     committed: list[dict[str, str]] = []

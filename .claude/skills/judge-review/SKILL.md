@@ -492,12 +492,13 @@ manifest from disk, so echoing it into the conversation is pure duplication:
 python scripts/run_judges.py prepare --project understood-betsy --judge dialogue \
     --scope chapter:chapter_05 --scope chapter:chapter_06 --cli cursor \
     [--targets-per-worker 3] [--effort high] [--worker-model grok-4.5] \
-    [--batch-size 5] [--quiet] [--max-findings-per-1000 N]
+    [--batch-size 5] [--quiet] [--max-findings-per-1000 N] [--min-confidence medium]
 ```
 
-`--max-findings-per-1000` is **editorial-only** (it caps findings per 1,000
-translated words; default 6). Do not ask about it and do not raise it yourself —
-pass it only when the user named a number. See
+`--max-findings-per-1000` and `--min-confidence` are **editorial-only** (the
+first caps findings per 1,000 translated words, default 6; the second sets the
+confidence floor, default `high`). Do not ask about either and do not move them
+yourself. Pass them only when the user asks for it. See
 [`references/editorial.md`](references/editorial.md).
 
 **Relay ONE consent block, built from `effective` + `usage_summary`.** They price

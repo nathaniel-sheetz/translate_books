@@ -61,8 +61,10 @@ prompt-only threshold and still runs 45% false positive. Four gates, in order:
    asked for.
 2. **A confidence floor.** The judge returns `high` or `medium` — there is no
    `low`, because a low-confidence finding is not a finding. Stage 1 keeps
-   `high` only; relax it with the `editorial_min_confidence` context key once
-   the accept rate is known.
+   `high` only; relax it per run with `--min-confidence medium` on
+   `run_judges.py run`/`prepare` (the `editorial_min_confidence` context key),
+   which `prepare` records on the manifest because the floor is applied at
+   `commit` and never appears in the prompt.
 3. **The shared non-issue filter.** `scoring.is_nonissue`, for a model that
    narrates its inspection ("this is fine") and tags it with a severity anyway.
 4. **Adjudication.** Pass two, below.
@@ -98,6 +100,12 @@ A candidate that genuinely cannot be settled without the original says so:
 | `not_needed` | establishable from the Spanish alone — grammar, a style-rule or glossary violation, an internal inconsistency, a plain calque |
 | `recommended` | defective as written, but the original might explain the choice |
 | `required` | cannot be asserted without the original; every `FIDELITY_SUSPECT` finding |
+
+Pass 2 attaches the English to `recommended`/`required` candidates only, unless
+it runs with `verify_editorial.py --source all`, which attaches it to every
+candidate for a full bilingual review. The persisted metadata stamps
+`source_mode` beside `source_requested` (still what pass 1 asked for) and
+`source_attached` (what the adjudicator was shown).
 
 ## The five categories
 
@@ -233,6 +241,8 @@ drifted: **163 of 165 located (98.8%)**, median window 7 rows, max 12.
 ```json
 "metadata": {
   "candidates": [ … pass-1 findings, pre-adjudication … ],
+  "filtered": [ … pass-1 findings the gates dropped, each with "drop_reason":
+                "nonissue" | "below_confidence" | "over_budget" … ],
   "retracted": [ {"finding_key": "…", "reason": "…", "used_source": true} ],
   "reclassified_findings": [
     {"finding_key": "…", "rule": "…", "excerpt": "…", "reason": "…",
@@ -262,6 +272,16 @@ nothing, so the list stays as long as the wave actually moved something.
 set. `metadata.candidates` is left exactly as pass one wrote it — the
 pre-adjudication set is the only record of what was proposed, and the retract
 rate is measured against it.
+
+`metadata.filtered` is what pass one proposed and its own gates dropped before
+anything reached `candidates`. Its length equals the sum of the
+`filtered_nonissues` / `filtered_low_confidence` / `filtered_over_budget`
+counts. Pass two never reads it and nothing turns it into an issue. Before it
+existed, the worker's draft was the only copy and the next `prepare` deleted
+it. `scripts/backfill_editorial_filtered.py` recovers older results from the
+drafts still on disk. It writes a draft back only when replaying the gates
+reproduces the stored counts and candidates, and it marks results whose draft
+is gone with `filtered_lost: true`.
 
 Two conservative defaults: a candidate with **no** verdict is kept (an omitted
 key has not retracted anything), and an **unparseable** verdict value is read as

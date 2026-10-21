@@ -2,7 +2,8 @@
 
 The editorial judge reads Spanish alone and proposes candidates. This pass gives
 every surviving candidate a second opinion — CONFIRM, RETRACT or RECLASSIFY —
-and attaches the English original to the ones that asked for it.
+and attaches the English original to the ones that asked for it (or, with
+``source="all"``, to every one).
 
 **Why it adjudicates everything, not only the source-dependent findings.** The
 obvious design is to fire a bilingual call only when a candidate set
@@ -37,6 +38,11 @@ logger = logging.getLogger(__name__)
 VERIFY_TEMPLATE = "judge_editorial_verify.txt"
 
 VERDICTS = ("CONFIRM", "RETRACT", "RECLASSIFY")
+
+#: Which candidates get the English window. ``requested`` (the default) attaches
+#: it where pass 1's ``source_check`` asked; ``all`` attaches it everywhere, for
+#: a deliberate full bilingual review — every candidate block grows by a window.
+SOURCE_MODES = ("requested", "all")
 
 #: Characters of Spanish either side of the excerpt when the alignment cannot
 #: place it. Enough to judge a sentence in its paragraph.
@@ -109,14 +115,24 @@ def collect_candidates(
 
 
 def attach_context(
-    project_dir: Path, candidates: list[dict[str, Any]]
+    project_dir: Path,
+    candidates: list[dict[str, Any]],
+    *,
+    source: str = "requested",
 ) -> list[dict[str, Any]]:
     """Attach Spanish context, and English where the candidate asked for it.
+
+    ``source="all"`` attaches the English to every candidate, asked for or
+    not. ``_source_requested`` still records what the first pass asked, so
+    ``source_requested`` keeps measuring pass 1 while ``source_attached``
+    counts what the adjudicator was actually shown.
 
     Alignment rows are loaded once per (chapter, chunk) rather than per
     candidate — a chunk with four findings would otherwise re-read and re-fold
     the same chapter four times.
     """
+    if source not in SOURCE_MODES:
+        raise ValueError(f"unknown source mode {source!r}; expected one of {SOURCE_MODES}")
     rows_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
     out: list[dict[str, Any]] = []
 
@@ -135,12 +151,13 @@ def attach_context(
             project_dir, chapter_id, excerpt, chunk_id=chunk_id, rows=rows_cache[cache_key]
         )
         wants_source = normalize_source_check(item.get("source_check")) != "not_needed"
+        attach = wants_source or source == "all"
 
         item["_spanish_context"] = (
             window.spanish_text() if window.matched else _spanish_fallback(translated_text, excerpt)
         )
         item["_english_context"] = (
-            window.english_text() if (wants_source and window.matched) else ""
+            window.english_text() if (attach and window.matched) else ""
         )
         item["_source_available"] = bool(item["_english_context"])
         item["_source_requested"] = wants_source
@@ -238,6 +255,8 @@ def apply_verdicts(
     result: dict[str, Any],
     candidates: list[dict[str, Any]],
     verdicts: dict[str, dict[str, Any]],
+    *,
+    source_mode: str = "requested",
 ) -> dict[str, Any]:
     """Fold adjudication verdicts into a persisted editorial ``EvalResult`` dict.
 
@@ -353,6 +372,10 @@ def apply_verdicts(
             "retracted": retracted,
             "retracted_count": len(retracted),
             "source_requested": requested,
+            # Which attach rule produced ``source_attached``: a run with the
+            # English on every candidate must not be read as pass 1 having
+            # asked for it everywhere.
+            "source_mode": source_mode,
             "source_attached": sum(1 for c in candidates if c.get("_source_available")),
             "source_used": source_used,
             "finding_count": len(issues),
@@ -396,6 +419,7 @@ def verify_result(
     *,
     candidates: Optional[list[dict[str, Any]]] = None,
     call: Optional[Any] = None,
+    source: str = "requested",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """API path: adjudicate one chunk's candidates and return the patched result.
 
@@ -413,7 +437,9 @@ def verify_result(
     caller = call or llm_io.call_judge
     if candidates is None:
         candidates = attach_context(
-            project_dir, collect_candidates(result, chunk_id, translated_text)
+            project_dir,
+            collect_candidates(result, chunk_id, translated_text),
+            source=source,
         )
     if not candidates:
         return result, {"chunk_id": chunk_id, "status": "no_candidates", "adjudicated": 0}
@@ -432,7 +458,7 @@ def verify_result(
         logger.error("Editorial verification unparseable on %s: %s", chunk_id, exc)
         return result, {"chunk_id": chunk_id, "status": "parse_error", "error": str(exc)}
 
-    patched = apply_verdicts(result, candidates, verdicts)
+    patched = apply_verdicts(result, candidates, verdicts, source_mode=source)
     meta = patched.get("metadata") or {}
     return patched, {
         "chunk_id": chunk_id,
@@ -448,6 +474,7 @@ def verify_result(
 
 
 __all__ = [
+    "SOURCE_MODES",
     "VERDICTS",
     "VERIFY_TEMPLATE",
     "apply_verdicts",
