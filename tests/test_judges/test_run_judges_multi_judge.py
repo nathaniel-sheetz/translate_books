@@ -519,6 +519,26 @@ def test_the_findings_cap_defaults_to_unset(project, capsys):
         (project / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["editorial_findings_per_1000"] is None
+    assert manifest["editorial_min_confidence"] is None
+
+
+def test_the_min_confidence_flag_reaches_the_manifest(project, capsys):
+    out = _prepare(
+        capsys,
+        project,
+        "--judge",
+        "editorial",
+        "--scope",
+        "book",
+        "--min-confidence",
+        "medium",
+    )
+
+    assert out["rc"] == 0
+    manifest = json.loads(
+        (project / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["editorial_min_confidence"] == "medium"
 
 
 @pytest.mark.parametrize("value", ["0", "-3"])

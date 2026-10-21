@@ -113,6 +113,8 @@ from src.harness.profile import resolve_profile  # noqa: E402
 from src.judges import subagent  # noqa: E402
 from src.judges.context import build_judge_context  # noqa: E402
 from src.judges.editorial_judge import (  # noqa: E402
+    CONFIDENCE_ORDER,
+    DEFAULT_MIN_CONFIDENCE,
     FINDINGS_PER_1000_WORDS,
     MIN_FINDINGS_BUDGET,
 )
@@ -526,6 +528,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "raise it when the judge is visibly truncating real defects on long "
             "chunks, lower it to tighten an untuned book. Stated in the prompt and "
             "enforced in code, on both backends. Ignored by the other judges.",
+        )
+        p.add_argument(
+            "--min-confidence",
+            dest="min_confidence",
+            choices=CONFIDENCE_ORDER,
+            default=None,
+            help=f"Editorial judge only: the lowest confidence a finding may carry "
+            f"and survive (default {DEFAULT_MIN_CONFIDENCE}). 'medium' also keeps the "
+            "findings the judge marked medium, which the default discards; they "
+            "count against the same findings ceiling. Enforced in code, on both "
+            "backends. Ignored by the other judges.",
         )
 
     # profile — read-only "what would this wave run as?" ---------------------
@@ -1111,16 +1124,20 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_findings_cap(args: argparse.Namespace, context: dict) -> str | None:
-    """Put ``--max-findings-per-1000`` on the judge context, or say why not.
+def _apply_editorial_knobs(args: argparse.Namespace, context: dict) -> str | None:
+    """Put ``--max-findings-per-1000`` and ``--min-confidence`` on the judge context.
 
-    The only CLI value that travels in ``context`` rather than as a kwarg: the
-    ceiling is read inside the judge, at prompt-render time and again at
-    selection time, and ``context`` is the one thing both backends hand to it.
-    Returns an error string for a non-positive value — argparse would otherwise
-    accept 0 and the judge would silently fall back to the default, which reads
-    as the flag having been honoured.
+    The only CLI values that travel in ``context`` rather than as kwargs: both
+    are read inside the judge — the ceiling at prompt-render time and again at
+    selection time, the floor at selection time — and ``context`` is the one
+    thing both backends hand to it. Returns an error string for a non-positive
+    ceiling — argparse would otherwise accept 0 and the judge would silently
+    fall back to the default, which reads as the flag having been honoured.
+    The floor needs no such check: argparse ``choices`` already bounds it.
     """
+    confidence = getattr(args, "min_confidence", None)
+    if confidence is not None:
+        context["editorial_min_confidence"] = confidence
     value = getattr(args, "max_findings_per_1000", None)
     if value is None:
         return None
@@ -1161,7 +1178,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if ctx_error:
         _emit({"status": "error", "error": ctx_error, "scope": scope}, _RUN_SCHEMA)
         return 1
-    cap_error = _apply_findings_cap(args, context)
+    cap_error = _apply_editorial_knobs(args, context)
     if cap_error:
         _emit({"status": "error", "error": cap_error, "scope": scope}, _RUN_SCHEMA)
         return 1
@@ -1253,7 +1270,7 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     if ctx_error:
         _emit({"status": "error", "error": ctx_error, "scopes": args.scope}, _PREPARE_SCHEMA)
         return 1
-    cap_error = _apply_findings_cap(args, context)
+    cap_error = _apply_editorial_knobs(args, context)
     if cap_error:
         _emit({"status": "error", "error": cap_error, "scopes": args.scope}, _PREPARE_SCHEMA)
         return 1

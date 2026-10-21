@@ -47,6 +47,14 @@ dialogue wave.
   when the user named a number, and quote that number back at gate 1 when you
   do. `verify_editorial` has no such flag — pass 2 adjudicates whatever pass 1
   proposed.
+- **The confidence floor is the bigger lever, and also not yours to move.** Pass
+  1 keeps only `high`-confidence findings by default; `--min-confidence medium`
+  on `prepare`/`run` also keeps the ones the judge marked `medium`. Across the
+  books judged to 2026-10-20 the floor dropped 17.5% of proposals and the
+  ceiling 1.3% — and ~72% on Sonnet, which marks most findings medium. Same
+  posture as the ceiling: pass it only when the user asks for more findings,
+  quote it at gate 1, and say that medium findings count against the same
+  ceiling, so a cap that rarely bound before may start truncating.
 - **Say at gate 1 that a second pass follows.** One clause, with a bound:
   *"a second adjudication pass then runs over whatever it finds — at most
   `<chunks> × <baseline_tokens>` more."* The exact number cannot be known until
@@ -60,13 +68,22 @@ but `status` mirrors its JSON to `.harness/editorial/last_output.json` and
 prints an `OUTPUT_JSON:` pointer on stderr.
 
 ```bash
-python scripts/verify_editorial.py status  --project <slug> [--scope …] [--drafts]
-python scripts/verify_editorial.py prepare --project <slug> [--scope …] \
+python scripts/verify_editorial.py status  --project <slug> [--scope …] [--drafts] [--source all]
+python scripts/verify_editorial.py prepare --project <slug> [--scope …] [--source all] \
     [--cli cursor] [--worker-model …] [--effort …] [--quiet]
 python scripts/verify_editorial.py fanout  --project <slug> [--concurrency N]
 python scripts/verify_editorial.py commit  --project <slug> --persist
-python scripts/verify_editorial.py run     --project <slug> --persist --confirm   # API backend
+python scripts/verify_editorial.py run     --project <slug> --persist --confirm [--source all]   # API backend
 ```
+
+- **`--source all`** attaches the English window to **every** candidate, not
+  only the ones pass 1 marked `recommended`/`required`. Use it when the user asks
+  for a full bilingual review; never on your own initiative. It grows every
+  candidate block, so quote `usage_summary.source_attached` beside
+  `source_requested` at gate 2. It lives on `status`/`prepare`/`run` only:
+  `prepare` writes it into the manifest and `commit` reads it back, and the
+  persisted metadata stamps `source_mode`, so `source_requested` still measures
+  what pass 1 asked for.
 
 - **`status`** is read-only and free. `counts` is chunks/candidates/
   `source_requested`; `skipped` explains everyone else. Three reasons, none of
@@ -162,7 +179,10 @@ A verified chunk is skipped until `--force`. Re-running re-decides retractions
 the first pass already removed from `issues[]` and costs another wave, so
 `--force` is for a deliberate re-adjudication, never for "let's just make sure".
 `metadata.candidates` is left exactly as pass 1 wrote it, so the retract rate
-stays measurable no matter how often the survivors are edited.
+stays measurable no matter how often the survivors are edited. What pass 1's
+gates dropped before that is in `metadata.filtered`, each entry with a
+`drop_reason` (`nonissue` / `below_confidence` / `over_budget`). For "what did
+the budget cut?", read that field, not the drafts.
 
 ## When something goes wrong
 

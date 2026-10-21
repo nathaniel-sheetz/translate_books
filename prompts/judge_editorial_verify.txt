@@ -32,9 +32,9 @@ you, ignore them.
 </candidates>
 
 Each <candidate> carries a `key`, the first reader's finding, the Spanish
-<excerpt> it quotes, the <spanish_context> around it, and — only where the first
-reader said the original was needed — an <english_context> holding the source
-sentences for that same stretch.
+<excerpt> it quotes, the <spanish_context> around it, and — where one was
+attached — an <english_context> holding the source sentences for that same
+stretch.
 
 **The first reader could not see the English.** That is deliberate: it read the
 Spanish as Spanish. Where <english_context> is present, you can now settle

@@ -76,6 +76,7 @@ warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.
 
 from src.harness import state as hstate  # noqa: E402
 from src.judges import editorial_wave as wave  # noqa: E402
+from src.judges.editorial_verify import SOURCE_MODES  # noqa: E402
 from src.judges.scope import ScopeError  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     # and writing last_output.json for it would clobber the record of whatever
     # mutating command ran before it.
     payload = wave.status(
-        project_dir, _scopes(args), include_verified=args.force, drafts=args.drafts
+        project_dir,
+        _scopes(args),
+        include_verified=args.force,
+        drafts=args.drafts,
+        source=args.source,
     )
     # ``status`` is where an operator reads the pending set off the screen, so a
     # scope that resolved to nothing has to be louder than a row in ``skipped``.
@@ -199,6 +204,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         cost_limit=args.cost_limit,
         model=args.model,
         provider=args.provider,
+        source=args.source,
     )
     _warn(payload, prefix="[run] warning: ")
     return _emit(project_dir, payload)
@@ -217,6 +223,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         force=args.force,
         keep_drafts=args.keep_drafts,
         quiet=args.quiet,
+        source=args.source,
     )
     # Also on stderr: a mis-resolved CLI is worth seeing even when the caller
     # only skims stdout, and this is the last moment before the wave.
@@ -278,8 +285,21 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--provider", default=None, help="Adjudicator provider override")
         p.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
+    def source_flag(p: argparse.ArgumentParser) -> None:
+        # Not on ``fanout``/``commit``: both read it back from the manifest, so
+        # the rule the prompts were rendered under is the one that is counted.
+        p.add_argument(
+            "--source",
+            choices=SOURCE_MODES,
+            default="requested",
+            help="Which candidates get the English window: 'requested' (default) "
+            "only those pass 1 marked recommended/required; 'all' every candidate, "
+            "for a full bilingual review — a larger prompt per chunk",
+        )
+
     p_status = sub.add_parser("status", help="read-only: which chunks await adjudication")
     common(p_status)
+    source_flag(p_status)
     p_status.add_argument("--force", action="store_true", help="Include already-verified chunks")
     p_status.add_argument(
         "--drafts",
@@ -289,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="API backend: adjudicate now, one call per chunk")
     common(p_run)
+    source_flag(p_run)
     p_run.add_argument("--persist", action="store_true", help="Write the adjudicated result")
     p_run.add_argument("--confirm", action="store_true", help="Proceed past the cost gate")
     p_run.add_argument("--cost-limit", type=float, default=0.50, help="Max estimated USD")
@@ -296,6 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_prepare = sub.add_parser("prepare", help="draft backend: render prompts + manifest")
     common(p_prepare)
+    source_flag(p_prepare)
     p_prepare.add_argument("--keep-drafts", action="store_true", help="Do not clear old drafts")
     p_prepare.add_argument("--force", action="store_true", help="Re-verify verified chunks")
     # The same four ``run_judges.py prepare`` carries. This is the consent

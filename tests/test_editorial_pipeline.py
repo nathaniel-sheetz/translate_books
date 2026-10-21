@@ -362,6 +362,104 @@ def test_commit_applies_verdicts_and_persists_through_the_judge_seam(project, ca
     )["eval_runs"]
 
 
+def test_source_all_shows_the_english_on_every_candidate(project, capsys):
+    """Status, prepare and commit agree on the rule; the request is still pass 1's."""
+    result = _persist_pass_one(
+        project,
+        [
+            _candidate(),
+            _candidate(
+                rule="odd-connector",
+                category="FIDELITY_SUSPECT",
+                source_check="required",
+                excerpt="Miró por la ventana y sonrió.",
+            ),
+        ],
+    )
+
+    _run(["status", "--project", str(project), "--source", "all"])
+    status = json.loads(capsys.readouterr().out)
+    assert status["source"] == "all"
+    assert status["counts"]["source_requested"] == 1
+    assert status["counts"]["source_attached"] == 2
+
+    out = _prepare(project, capsys, "--source", "all")
+    assert out["usage_summary"]["source"] == "all"
+    assert out["usage_summary"]["source_attached"] == 2
+    manifest = json.loads(
+        (project / ".harness" / "editorial" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["source"] == "all"
+    # The body holds the candidate blocks; the instructions also name the tag.
+    candidates = (
+        (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.body.txt")
+        .read_text(encoding="utf-8")
+        .split("</candidates>")[0]
+    )
+    assert candidates.count("<english_context>") == 2
+
+    keys = [i.finding_key for i in result.issues]
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        json.dumps(
+            {
+                "verdicts": {
+                    keys[0]: {"verdict": "RETRACT", "reason": "faithful", "used_source": True},
+                    keys[1]: {"verdict": "CONFIRM", "reason": "genuine"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _run(["commit", "--project", str(project), "--persist"]) == 0
+    committed = json.loads(capsys.readouterr().out)
+    persisted = json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["judges"]["editorial"]["metadata"]
+
+    # The not_needed candidate's English was attached, so its use counts.
+    assert committed["rollup"]["source_used"] == 1
+    assert persisted["source_mode"] == "all"
+    assert persisted["source_requested"] == 1
+    assert persisted["source_attached"] == 2
+
+
+def test_commit_refuses_a_manifest_with_an_unknown_source(project, capsys):
+    _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    manifest_path = project / ".harness" / "editorial" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"] = "ALL"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    evaluation = project / "evaluations" / f"{CHUNK_ID}.json"
+    before = evaluation.read_bytes()
+
+    assert _run(["commit", "--project", str(project), "--persist"]) == 1
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["status"] == "error"
+    assert "ALL" in out["error"]
+    assert evaluation.read_bytes() == before
+
+
+def test_the_default_source_mode_is_stamped_too(project, capsys):
+    result = _persist_pass_one(project, [_candidate()])
+    _prepare(project, capsys)
+    key = result.issues[0].finding_key
+    (project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json").write_text(
+        json.dumps({"verdicts": {key: {"verdict": "CONFIRM", "reason": "ok"}}}),
+        encoding="utf-8",
+    )
+
+    assert _run(["commit", "--project", str(project), "--persist"]) == 0
+    capsys.readouterr()
+    persisted = json.loads(
+        (project / "evaluations" / f"{CHUNK_ID}.json").read_text(encoding="utf-8")
+    )["judges"]["editorial"]["metadata"]
+
+    assert persisted["source_mode"] == "requested"
+    assert persisted["source_attached"] == 0
+
+
 def test_commit_names_the_findings_the_verdicts_moved(project, capsys):
     """The rollup counts them; ``verdict_detail`` says which ones.
 
@@ -887,6 +985,32 @@ def test_metrics_report_volume_and_anchoring(project):
     assert report["volume"]["clean_chunk_pct"] == 0.0
     assert report["anchoring"]["anchored"] == 1
     assert report["anchoring"]["anchor_pct"] == 100.0
+
+
+@pytest.mark.parametrize("mode", ["requested", "all"])
+def test_metrics_keep_source_all_out_of_the_requested_rate(project, mode):
+    """English attached to everything answers a different question than
+    English attached because pass 1 asked; one rate must not blend the two."""
+    _persist_pass_one(project, [_candidate()])
+    path = project / "evaluations" / f"{CHUNK_ID}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["judges"]["editorial"]["metadata"].update(
+        verified=True, source_mode=mode, source_requested=1, source_attached=4, source_used=1
+    )
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    adjudication = editorial_metrics.analyse_project(project)["adjudication"]
+
+    assert adjudication["source_requested"] == 1
+    if mode == "all":
+        assert adjudication["source_attached"] == 0
+        assert adjudication["source_used_pct"] is None
+        assert adjudication["source_all_attached"] == 4
+        assert adjudication["source_all_used_pct"] == 25.0
+    else:
+        assert adjudication["source_attached"] == 4
+        assert adjudication["source_used_pct"] == 25.0
+        assert adjudication["source_all_attached"] == 0
 
 
 def test_metrics_count_a_clean_chunk(project):

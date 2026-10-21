@@ -1362,7 +1362,7 @@ def _long_chunk_project(tmp_path, words: int = 1000):
     return tmp_path, cid
 
 
-def _editorial_verdict(n: int) -> str:
+def _editorial_verdict(n: int, confidence: str = "high") -> str:
     return json.dumps(
         {
             "findings": [
@@ -1370,7 +1370,7 @@ def _editorial_verdict(n: int) -> str:
                     "rule": f"defect-{i}",
                     "category": "NATURALNESS",
                     "severity": "warning",
-                    "confidence": "high",
+                    "confidence": confidence,
                     "excerpt": f"palabra {i}",
                     "message": f"Awkward phrasing {i}.",
                     "suggestion": f"mejor {i}",
@@ -1436,6 +1436,30 @@ def test_commit_enforces_the_ceiling_prepare_stated(tmp_path):
     assert meta["findings_budget"] == 6
     assert meta["filtered_over_budget"] == 0
     assert len(out["results"][0]["issues"]) == 6
+
+
+@pytest.mark.parametrize(
+    "floor,kept,filtered", [(None, 0, 3), ("high", 0, 3), ("medium", 3, 0)]
+)
+def test_commit_applies_the_confidence_floor_prepare_recorded(
+    tmp_path, floor, kept, filtered
+):
+    """The floor never reaches the prompt, so the manifest is its only carrier."""
+    project, cid = _long_chunk_project(tmp_path)
+    context = {"editorial_min_confidence": floor} if floor else None
+    subagent.prepare(project, ["editorial"], f"chunk:{cid}", context=context)
+    manifest = json.loads(
+        (tmp_path / ".harness" / "judges" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["editorial_min_confidence"] == floor
+    _write_draft(tmp_path, cid, "editorial", _editorial_verdict(3, confidence="medium"))
+
+    out = subagent.commit(project)
+
+    meta = out["results"][0]["metadata"]
+    assert len(out["results"][0]["issues"]) == kept
+    assert meta["filtered_low_confidence"] == filtered
+    assert meta["min_confidence"] == (floor or "high")
 
 
 def test_commit_without_a_recorded_ceiling_falls_back_to_the_floor(tmp_path):
