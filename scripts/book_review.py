@@ -17,6 +17,12 @@ Each subcommand prints one JSON object with a ``_schema`` block:
               pass 2: --estimate prepares and projects tokens (no spawns),
               --yes runs the headless wave (subscription)
     signals   run the coded detectors; write signals.json + a report  (no spend)
+    prepare   detectors + budgeted evidence + one synthesis job per theme  (no spend)
+    fanout    run the synthesis jobs as one headless wave             (subscription)
+    commit    validate the proposals; write recommendations.json + the report (no spend)
+    run       prepare -> fanout -> commit in one call (needs --yes)    (subscription)
+    apply     apply picked recommendations: --select R-1a2b3c[,R-4d5e6f.2]; a dry run
+              with diffs unless --yes                                  (no spend)
     skip      mark the current translations reviewed without reviewing them,
               so the harness stops routing here until new chunks land
 
@@ -45,6 +51,8 @@ for _stream in (sys.stdout, sys.stderr):
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 
 from src.book_review import judging, progress, review_dir  # noqa: E402
+from src.book_review import synthesize  # noqa: E402
+from src.book_review.apply import apply as apply_selection  # noqa: E402
 from src.book_review.corpus import load_book  # noqa: E402
 from src.book_review.report import write_signals  # noqa: E402
 from src.book_review.signals import coverage, run_all  # noqa: E402
@@ -189,6 +197,91 @@ def _cmd_signals(args: argparse.Namespace) -> int:
     })
 
 
+_PREPARE_SCHEMA = {
+    "status": "'ok' | 'error'",
+    "jobs": "synthesis jobs rendered (one per theme, split when a theme exceeds the job cap)",
+    "by_theme": "jobs per theme (glossary, address_style, rules, dismissals)",
+    "input_tokens": "estimated input tokens across all jobs, preamble included",
+    "omitted": "signals shown in less detail to fit the budget: [{signal_id, from, to, reason}]",
+    "effective": "the profile the wave would run under, with provenance",
+    "instructions": "next step",
+}
+
+_COMMIT_SCHEMA = {
+    "status": "'ok' | 'partial' (some drafts unparseable) | 'error'",
+    "recommendations": "validated recommendations written",
+    "by_priority": "{1: fix before translating more, 2: before publishing, 3: worth doing}",
+    "no_action": "signals the model judged need no change",
+    "rejected": "proposals with no valid patch (see recommendations.json rejected[])",
+    "failed": "jobs whose draft could not be parsed: re-run fanout for them",
+    "missing": "jobs with no draft",
+    "report_path": "the markdown report to show the operator",
+    "instructions": "next step",
+}
+
+
+def _profile_kwargs(args: argparse.Namespace) -> dict:
+    return {k: getattr(args, k) for k in ("cli", "worker_model", "effort") if getattr(args, k, None)}
+
+
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    out = synthesize.prepare(_resolve_project(args.project), **_profile_kwargs(args))
+    out["instructions"] = ("Quote jobs, input_tokens and effective as one consent gate and stop; "
+                           "on approval run `fanout`, then `commit`.")
+    out["_schema"] = _PREPARE_SCHEMA
+    return _print(out)
+
+
+def _cmd_fanout(args: argparse.Namespace) -> int:
+    kwargs = _profile_kwargs(args)
+    kwargs.pop("worker_model", None)
+    if args.concurrency:
+        kwargs["concurrency"] = args.concurrency
+    return _print(synthesize.fanout(_resolve_project(args.project), **kwargs))
+
+
+def _cmd_commit(args: argparse.Namespace) -> int:
+    out = synthesize.commit(_resolve_project(args.project))
+    out["instructions"] = ("Show the report grouped by priority; let the user pick ids, then "
+                           "`apply --select <ids>` (dry run) before `--yes`.")
+    out["_schema"] = _COMMIT_SCHEMA
+    return _print(out)
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    if not args.yes:
+        return _print({"status": "error", "error": "`run` spends subscription tokens: pass --yes "
+                       "after the user approved `prepare`'s gate."})
+    project_dir = _resolve_project(args.project)
+    prep = synthesize.prepare(project_dir, **_profile_kwargs(args))
+    if prep.get("status") == "error" or not prep.get("jobs"):
+        return _print(prep)
+    fan = synthesize.fanout(project_dir)
+    if fan.get("error"):
+        return _print({"status": "error", "error": fan["error"], "fanout": fan})
+    out = synthesize.commit(project_dir)
+    out["fanout"] = {"counts": fan.get("counts"), "failed": fan.get("failed"), "usage": fan.get("usage")}
+    out["_schema"] = _COMMIT_SCHEMA
+    return _print(out)
+
+
+_APPLY_SCHEMA = {
+    "status": "'dry_run' | 'ok' | 'error'",
+    "diffs": "{artifact: unified diff} of every artifact the selection edits",
+    "actions": "one row per patch and follow-up: {id, type, status: staged | saved | done | "
+    "offer, ...}; 'offer' rows (retranslate, manual) are never executed here",
+    "saved": "--yes only: artifacts written (each via its save path, history-logged)",
+    "stale": "on error: recommendations whose artifacts changed since commit",
+    "instructions": "next step",
+}
+
+
+def _cmd_apply(args: argparse.Namespace) -> int:
+    out = apply_selection(_resolve_project(args.project), args.select, yes=args.yes)
+    out["_schema"] = _APPLY_SCHEMA
+    return _print(out)
+
+
 def _cmd_skip(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     recorded = progress.record_review(project_dir, kind="skipped")
@@ -216,6 +309,31 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    for name, help_text in (
+        ("prepare", "detectors + evidence + synthesis jobs (no spend)"),
+        ("fanout", "run the synthesis jobs (subscription)"),
+        ("commit", "validate proposals; write recommendations + report (no spend)"),
+        ("run", "prepare -> fanout -> commit (subscription; needs --yes)"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+        if name in ("prepare", "fanout", "run"):
+            p.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None, help="headless CLI")
+            p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "default"),
+                           default=None, help="default: headless_effort_book_review")
+        if name in ("prepare", "run"):
+            p.add_argument("--worker-model", default=None, help="pin the synthesis model")
+        if name == "fanout":
+            p.add_argument("--concurrency", type=int, default=None, help="parallel CLI processes")
+        if name == "run":
+            p.add_argument("--yes", action="store_true", help="confirm the subscription spend")
+
+    apply_p = sub.add_parser("apply", help="apply picked recommendations (dry run unless --yes)")
+    apply_p.add_argument("--project", required=True, help="Project id (under projects/) or path")
+    apply_p.add_argument("--select", action="append", required=True,
+                         help="recommendation ids, comma-separated; R-xxxxxx.N picks one patch")
+    apply_p.add_argument("--yes", action="store_true", help="write the changes")
+
     judge = sub.add_parser(
         "judge", help="run every judge over owed chapters, then editorial pass 2 (subscription)"
     )
@@ -241,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
         "status": _cmd_status,
         "judge": _cmd_judge,
         "signals": _cmd_signals,
+        "prepare": _cmd_prepare,
+        "fanout": _cmd_fanout,
+        "commit": _cmd_commit,
+        "run": _cmd_run,
+        "apply": _cmd_apply,
         "skip": _cmd_skip,
     }[args.command](args)
 

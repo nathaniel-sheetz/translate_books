@@ -145,6 +145,11 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # book, folded into a few rule questions. Same detection-and-sort shape as
     # the scan; unmeasured, re-measure and move the row.
     "decisions_consolidate": "medium",
+    # The book review's synthesis: one theme of a book's judge-finding patterns,
+    # read against the style guide and address map, answered with upstream fixes.
+    # Judgment over evidence rather than detection, so high, not the medium the
+    # detection waves above use. Unmeasured; re-measure and move the row.
+    "book_review": "high",
 }
 
 

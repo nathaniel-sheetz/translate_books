@@ -57,6 +57,12 @@ object with a `_schema` block.
 | `judge --estimate` | none (clears judge drafts) | prepares the sweep and projects its tokens; spawns nothing |
 | `judge --yes` | subscription | dialogue, address (when the book has a map) and editorial over owed chapters, then editorial pass 2 |
 | `signals` | none | coded detectors over every finding; writes `.harness/book_review/signals.json` and `reports/book_review_signals_<date>.md` |
+| `prepare` | none | detectors, budgeted evidence, and one synthesis job per theme under `.harness/book_review/synthesis/` |
+| `fanout` | subscription | runs the synthesis jobs as one headless wave (resumes: skips jobs with a draft) |
+| `commit` | none | validates every proposed patch; writes `.harness/book_review/recommendations.json` and `reports/book_review_<date>.md` |
+| `run --yes` | subscription | `prepare` → `fanout` → `commit` in one call, after the user approved `prepare`'s gate |
+| `apply --select R-xxxxxx[,R-yyyyyy.2]` | none | dry run: the diff of every artifact the selection edits |
+| `apply --select … --yes` | none | writes the changes through the normal save paths (history-logged) |
 | `skip` | none | marks the current translations reviewed so the harness router moves on |
 
 ## Flow
@@ -90,13 +96,29 @@ object with a `_schema` block.
    - **dismissals** (`false_positive_clusters`): `glossary_stale` or
      `judge_miscalibrated`.
 
-5. **Propose fixes; change nothing yet.** For each pattern, say which artifact
-   to change and how. Examples: rekey `porte cochere` to `porte-cochere`; make the
-   style guide's FORMS OF ADDRESS agree with the map; add a house rule. Make the
-   edits the user approves through the normal paths: the glossary and style-guide
-   beats of translate-harness, or the address-map reference. An artifact change
-   reaches only chunks translated afterwards; offer `references/retranslate.md`
-   for chapters that must pick it up.
+5. **Synthesis.** Run `prepare` (free). Relay one consent block: `jobs`,
+   `by_theme`, `input_tokens`, `effective`, and `omitted` (signals shown in less
+   detail to fit the budget). **END your turn.** On approval, run `fanout`, then
+   `commit`. Re-run `fanout` for any `failed` job before committing. If the user
+   only wants the coded report, stop after step 4.
+
+6. **Present the recommendations.** Read `report_path`. Group them by priority:
+   1 is fix before translating more, 2 is before publishing, 3 is worth doing.
+   For each, give the id, the title, the one-line patch list and the confidence.
+   Flag `conflicts_with` pairs: the user picks one of the two. Let the user pick
+   with AskUserQuestion (multiSelect, up to four per question; group the rest by
+   theme). `R-xxxxxx.N` picks one patch of a recommendation.
+
+7. **`apply --select <ids>`** (dry run). Show the `diffs`. **STOP for approval**,
+   then `apply --select <ids> --yes`. Relay `actions`:
+   - `saved` rows: edits to the glossary, style guide or address map. They reach
+     chunks translated from now on.
+   - `done` rows: dismissals, re-judge flags, house proposals.
+   - `offer` rows: `retranslate` carries a preview command. Run it only through
+     `references/retranslate.md`, which has its own gate. `manual` needs a person
+     or a code change.
+
+   A `stale` error means an artifact changed after `commit`; re-run from step 5.
 
 ## Notes
 

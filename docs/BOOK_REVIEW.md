@@ -23,7 +23,12 @@ whole set, and reports these patterns with the evidence behind each.
 |---|---|
 | `src/book_review/corpus.py` | Loads chunks, judge findings (kept, retracted by pass 2, filtered by pass 1), human marks, glossary, style guide, address map and artifact history, once and read-only |
 | `src/book_review/signals.py` | The detectors |
-| `src/book_review/report.py` | The markdown report |
+| `src/book_review/report.py` | The markdown reports (coded signals; recommendations) |
+| `src/book_review/evidence.py` | Tiered, budgeted evidence for the synthesis model |
+| `src/book_review/synthesize.py` | The synthesis wave: prepare, fanout, commit |
+| `src/book_review/schema.py` | Validation of proposed patches against the book as it is |
+| `src/book_review/apply.py` | Applying picked recommendations through the normal save paths |
+| `prompts/book_review_synthesize.txt` | The synthesis prompt |
 | `src/book_review/judging.py` | The judge sweep: every judge over owed chapters, then editorial pass 2 |
 | `src/book_review/progress.py` | When the harness router sends a book here |
 | `src/judges/sweep.py` | The headless judge wave, shared with the dashboard's "Run judges" job |
@@ -104,3 +109,57 @@ The judge sweep (`book_review.py judge`) prepares one manifest with per-judge sc
 (`{judge: [chapter:<id>, ...]}`), fans it out headless, commits, and then runs
 editorial pass 2 over every chunk still awaiting it. It refuses while another wave
 holds the book's lock, or when the CLI preflight fails.
+
+## Synthesis
+
+`prepare` builds the evidence (`.harness/book_review/evidence.json`) and renders one
+job per theme: `glossary`, `address_style`, `rules`, `dismissals`. A theme over the
+job cap is split. The preamble is shared and cacheable: the instructions, the full
+style guide, and the address map's content, global rules and pairs.
+
+Each signal gets one of three tiers:
+- **A (full):** every finding, up to 12. Each carries its message, the Spanish
+  excerpt and suggestion, the English paragraph it translates (found by paragraph
+  position, since the translation prompt keeps paragraph breaks), the mark, and
+  when it was judged and translated. The item also carries the artifacts the
+  signal names: the full glossary entry including its unshipped `context`, the
+  style-guide lines around the clause, the address pair, and the relevant
+  history rows.
+- **B (compact):** three full exemplars, the rest as id and message.
+- **C (count):** counts and two one-line samples.
+
+Budget: about 40k input tokens per job, 200k per book. Past either, the
+lowest-scoring signals drop a tier. Each demotion is recorded in `omitted` and
+shown in the report.
+
+The model returns `recommendations[]` with typed patches (see the prompt for the
+table) and `no_action[]`. `commit` validates each patch (`schema.check_patch`):
+- a glossary key must exist, and any key it introduces must occur in the source,
+  so a fix cannot add another dead key;
+- a `before` text must be in the artifact verbatim, exactly once;
+- an address pair must exist (a swapped `a`/`b` is normalized);
+- dismissals and follow-ups must cite findings and chapters that exist;
+- unknown evidence ids are dropped.
+
+A recommendation with no valid patch is rejected and listed in the report.
+Recommendations that touch the same target are cross-marked `conflicts_with`.
+Each one is stamped with the content hash of every artifact it edits.
+
+## Apply
+
+`apply --select` is a dry run that returns unified diffs. With `--yes` it first
+checks every selected recommendation's hashes against the artifacts now. If any
+changed, nothing is written. Otherwise it saves through `save_glossary`,
+`save_style_guide` and `save_address_map` (`writer="book_review"`, reason = the
+recommendation ids), so each change is in `decisions_history.jsonl`. Other
+patches:
+
+| Patch | What `--yes` does |
+|---|---|
+| `judge.dismiss` | appends keyed `_feedback.jsonl` marks |
+| `rejudge` | flags the chapters' evaluations stale |
+| `house.rule_proposal` | records a house proposal (adoption stays separate) |
+| `retranslate` | returns a preview command and runs nothing |
+| `manual` | returned to the operator, nothing run |
+
+Every apply is appended to `.harness/book_review/applied.jsonl`.

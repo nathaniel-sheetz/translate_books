@@ -259,9 +259,9 @@ makes it idempotent.
 `always_include_dialogue`, `always_include_image_instructions`, `headless_extra_flags`,
 `headless_prompt_cache`, `triage_headless_cli`, `triage_worker_model`,
 `triage_after_coded`, `image_model`, `book_review_canary`,
-`book_review_after_translate`, and the eight `headless_effort_*` keys (`translate`,
+`book_review_after_translate`, and the nine `headless_effort_*` keys (`translate`,
 `judges`, `annotations`, `footnotes`, `footnote_scan`, `triage`, `decisions_scan`,
-`decisions_consolidate`).
+`decisions_consolidate`, `book_review`).
 
 The three `triage_*` keys belong to the coded-checker triage pass rather than to a
 harness stage. `triage_headless_cli` and `triage_worker_model` pin the CLI family

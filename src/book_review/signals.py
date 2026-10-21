@@ -538,7 +538,10 @@ def address_style_conflicts(corpus: BookCorpus) -> list[Signal]:
         if a_form == e_form:
             continue
         speaker, addressee = key
-        all_ids = address_ids[key] + editorial_ids[key]
+        # Interleaved, so evidence capped at the first dozen shows both sides.
+        a_ids, e_ids = address_ids[key], editorial_ids[key]
+        all_ids = [i for pair in zip(a_ids, e_ids) for i in pair]
+        all_ids += a_ids[len(e_ids):] + e_ids[len(a_ids):]
         signals.append(Signal(
             id=f"D3:judges:{speaker}→{addressee}",
             detector="address_style_conflicts",
