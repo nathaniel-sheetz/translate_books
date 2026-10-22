@@ -46,7 +46,8 @@ def test_present_map_empty_content_falls_back_to_global_rules(tmp_path: Path):
     )
     ctx, err = run_judges._build_judge_context(tmp_path, ["address"], None, None)
     assert err is None
-    assert ctx["address_map"] == "tú in family."
+    assert ctx["address_map"].startswith("GLOBAL RULES")
+    assert ctx["address_map"].endswith("tú in family.")
 
 
 def test_empty_map_errors_for_address_judge(tmp_path: Path):

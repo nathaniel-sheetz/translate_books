@@ -703,9 +703,11 @@ class AddressPair(BaseModel):
 class AddressMap(BaseModel):
     """Per-book forms-of-address expectations for the ``address`` judge.
 
-    ``content`` is the human-readable prose the judge actually reads (it must
-    state the asymmetric/contextual rules plainly); ``pairs`` / ``global_rules``
-    are the structured mirror for future UI / deterministic use.
+    ``content`` is the human-readable overview (it should state the
+    asymmetric/contextual rules plainly). The judge reads it together with
+    ``global_rules`` and every pair, as ``render_address_map`` in
+    ``src/judges/address_judge.py`` renders them, so a pair need not be
+    restated in the prose to reach the judge.
 
     ``style_guide_summary`` is a different audience from ``content``: it is the
     condensed version folded into the style guide, and therefore read by a

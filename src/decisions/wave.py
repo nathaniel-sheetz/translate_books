@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.decisions import decisions_dir
 
@@ -21,7 +21,7 @@ DEFAULT_CONCURRENCY = 5
 FANOUT_SCHEMA = {
     "wrote": "job ids whose drafts were written this wave",
     "failed": "list of {id, error} — re-run fanout for these",
-    "skipped": "job ids that already had a non-empty draft",
+    "skipped": "job ids not re-run because their draft is already done",
     "counts": "{wrote, failed, skipped, todo}",
     "effective": "what the wave ran as",
     "usage": "what the wave consumed; per-job rows go to the wave's usage log",
@@ -53,11 +53,16 @@ def load_manifest(path: Path, *, missing: str) -> tuple[Optional[dict[str, Any]]
     return doc, None
 
 
-def inside(project_dir: Path, raw: str) -> Path:
-    """``raw`` resolved, refusing anything outside ``.harness/decisions/``."""
+def inside(project_dir: Path, raw: str, *, root: Optional[Path] = None) -> Path:
+    """``raw`` resolved, refusing anything outside ``root``.
+
+    ``root`` defaults to ``.harness/decisions/``; another stage that reuses
+    :func:`run_wave` (the book review) passes its own working directory.
+    """
     path = Path(raw).resolve()
-    if not path.is_relative_to(decisions_dir(project_dir).resolve()):
-        raise ValueError(f"path escapes the decisions dir: {raw}")
+    base = Path(root) if root is not None else decisions_dir(project_dir)
+    if not path.is_relative_to(base.resolve()):
+        raise ValueError(f"path escapes {base.name}/: {raw}")
     return path
 
 
@@ -79,10 +84,16 @@ def run_wave(
     cli_bin: Optional[str] = None,
     effort: Optional[str] = None,
     runner=None,
+    root: Optional[Path] = None,
+    draft_done: Optional[Callable[[Path], bool]] = None,
 ) -> dict[str, Any]:
     """Run one headless wave over ``manifest``'s jobs as wave type ``command``.
 
     ``runner`` is a test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
+    ``root`` is the directory every manifest path must stay inside (default:
+    ``.harness/decisions/``). ``draft_done`` replaces :func:`has_draft` when a
+    non-empty file is not enough — book-review synthesis passes one that
+    requires the draft to parse.
     """
     from src.harness import state as hstate
     from src.harness.headless import run_headless_wave
@@ -124,20 +135,21 @@ def run_wave(
         jobs = [j for j in jobs if j["id"] in set(job_ids)]
 
     try:
-        preamble = inside(project_dir, manifest.get("preamble_path") or "")
+        preamble = inside(project_dir, manifest.get("preamble_path") or "", root=root)
     except ValueError as exc:
         return fanout_error(str(exc))
 
     ready: list[dict[str, Any]] = []
     skipped: list[str] = []
     pre_failed: list[dict[str, str]] = []
+    is_done = draft_done or has_draft
     for job in jobs:
         try:
-            draft = inside(project_dir, job.get("draft_path") or "")
-            if has_draft(draft):
+            draft = inside(project_dir, job.get("draft_path") or "", root=root)
+            if is_done(draft):
                 skipped.append(job["id"])
                 continue
-            body = inside(project_dir, job.get("body_path") or "").read_text(encoding="utf-8")
+            body = inside(project_dir, job.get("body_path") or "", root=root).read_text(encoding="utf-8")
         except (OSError, ValueError) as exc:
             pre_failed.append({"id": job["id"], "error": f"{type(exc).__name__}: {exc}"[:500]})
             continue

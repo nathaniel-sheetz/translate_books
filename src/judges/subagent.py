@@ -215,7 +215,7 @@ _PREPARE_SCHEMA = {
 _FANOUT_SCHEMA = {
     "wrote": "list of entry ids whose drafts were written this wave",
     "failed": "list of {id, error} — re-run fanout for these",
-    "skipped": "list of entry ids that already had a non-empty draft",
+    "skipped": "list of entry ids whose draft commit can already parse",
     "worker_model": "model tier used for the headless CLI",
     "concurrency": "max parallel headless CLI processes per wave",
     "cwd": "neutral empty cwd used for the workers",
@@ -306,7 +306,7 @@ def prepare(
     worker_model: Optional[str] = None,
     batch_size: Optional[int] = None,
     targets_per_worker: int = 1,
-    keep_drafts: bool = False,
+    keep_drafts: bool | str = False,
     cli: Optional[str] = None,
     effort: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -347,6 +347,9 @@ def prepare(
     By default stale drafts from a prior run are cleared so ``commit`` never reads
     an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
     during a recovery re-prepare (re-prepare is otherwise destructive).
+    ``keep_drafts="if_unchanged"`` keeps a draft only when the prompt it answered
+    is byte-identical to the one rendered now, so a sweep cut off part-way can
+    re-prepare and resume without keeping a verdict on prose that has since moved.
 
     ``cli`` (``claude`` | ``cursor``), ``worker_model`` and ``effort`` are the
     per-run overrides; anything left unset is resolved by
@@ -462,15 +465,21 @@ def prepare(
     judge_instances = {name: get_judge(name) for name in judge_names}
 
     def _write_prompt(prompt: str, prompt_path: Path, draft_path: Path) -> None:
-        nonlocal total_prompt_tokens
+        nonlocal total_prompt_tokens, resumed_drafts
         total_prompt_tokens += approx_tokens(prompt)
+        keep = bool(keep_drafts)
+        if keep_drafts == "if_unchanged":
+            keep = _same_text(prompt_path, prompt)
         prompt_path.write_text(prompt, encoding="utf-8")
-        if not keep_drafts:
+        if not keep:
             draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
+        elif draft_path.exists():
+            resumed_drafts += 1
 
     entries: list[dict[str, Any]] = []
     total_words = 0
     total_prompt_tokens = 0  # what a worker actually receives, solo or grouped
+    resumed_drafts = 0  # drafts kept by keep_drafts, i.e. jobs `fanout` will skip
     total_pairs = 0  # (target, judge) pairs — the batch-invariant unit of work
     batch_seq = 0
     # Per-judge shared preamble established by the first solo entry that splits.
@@ -623,6 +632,7 @@ def prepare(
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
+        "resumed_drafts": resumed_drafts,
         "effective": prof.to_payload(),
         "usage_summary": {
             "pairs": total_pairs,
@@ -664,6 +674,14 @@ def prepare(
     }
 
 
+def _same_text(path: Path, text: str) -> bool:
+    """Whether ``path`` exists and holds exactly ``text``."""
+    try:
+        return path.read_text(encoding="utf-8") == text
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _entry_fanout_id(entry: dict[str, Any]) -> str | None:
     """Stable id for a manifest entry: solo ``target_id`` or grouped ``batch_id``."""
     if entry.get("batch_id"):
@@ -679,6 +697,31 @@ def _read_draft_text(path: Path) -> str | None:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
+
+def _draft_commit_can_parse(entry: dict[str, Any], text: str) -> bool:
+    """True when ``commit`` can parse this draft, so fanout must not spend it again.
+
+    A worker that exits 0 with non-JSON leaves a non-empty file. Skipping every
+    non-empty file made the next ``fanout`` report the same parse error.
+    """
+    try:
+        if _is_batch_entry(entry):
+            _parse_batch_verdicts(text)
+            return True
+        judge_name = entry.get("judge")
+        members = _entry_members(entry)
+        if not judge_name or not members:
+            return False
+        judge = get_judge(str(judge_name))
+        parse_judge_json(text, judge.spec.output_fields)
+        return True
+    except JudgeParseError:
+        return False
+    except Exception:
+        # An unknown judge, or a check that is not the JSON parse. Leave the
+        # file for commit rather than re-spending it.
+        return True
 
 
 def usage_log_path(project_dir: Path) -> Path:
@@ -703,9 +746,10 @@ def fanout(
 ) -> dict[str, Any]:
     """Run one headless CLI wave for judge-prepare manifest entries.
 
-    Opt-in alternative to Task-tool workers. For each selected entry that lacks a
-    non-empty draft, invoke the selected headless CLI (``claude``, ``cursor`` or
-    ``codex``) from a neutral cwd, writing its answer to ``draft_path``.
+    Opt-in alternative to Task-tool workers. For each selected entry whose draft
+    ``commit`` cannot parse, invoke the selected headless CLI (``claude``,
+    ``cursor`` or ``codex``) from a neutral cwd, writing its answer to
+    ``draft_path``. A non-empty file that is not JSON is run again.
 
     Claude profile: when ``preamble_path`` + ``body_path`` are present, the body
     is the user prompt and the preamble is passed via ``--system-prompt-file``.
@@ -887,7 +931,7 @@ def fanout(
             continue
         draft_path = Path(entry["draft_path"])
         existing = _read_draft_text(draft_path) if draft_path.exists() else None
-        if existing is not None and existing.strip():
+        if existing is not None and existing.strip() and _draft_commit_can_parse(entry, existing):
             skipped.append(eid)
             continue
         prompt_path = Path(entry["prompt_path"])

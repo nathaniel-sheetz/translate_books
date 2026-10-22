@@ -161,6 +161,7 @@ needed. **Redoing chapters that already have translations is NOT a re-run of the
 | Translate (workers) | `config.backend in {subagent, headless}` **or backend unset** (run 4B-backend three-way gate first) | `references/translate-workers.md` |
 | Handle footnotes | `footnotes.json` exists and `footnotes_decision` not `none`/`drop` | `references/footnotes.md` |
 | Build the EPUB / refresh `chapters/*.txt` | `stage: fully-translated` with no `.epub`, **or `status.combine_stale` non-empty** | `references/epub.md` |
+| Review the book's judge findings for systemic problems (judge sweep + coded detectors) | `status.book_review.due` set (canary after the first wave; new translations on a finished book) | `references/book-review.md` |
 | Review a translated wave | translated chapters exist | `references/reviews.md` |
 | Redo / re-translate chapters that **already** have translations | user says redo / re-translate / start over **and** `status` shows `partial`/`fully-translated` | `references/retranslate.md` |
 | Add a stage/backend/processor/judge | — | `references/EXTENDING.md` |
@@ -171,9 +172,8 @@ Prefer `suggested_reference` from `status` when present; fall back to this table
 
 - No `TranslationBackend` Protocol. Backends share `build_translation_prompt` +
   `apply_translation`. Workers path = `translate-prepare` / `translate-commit` (+ optional
-  `translate-fanout`); footnotes carry the chosen backend forward. Still deferred: the
-  **judge** headless backend and enlarging the translation preamble for Opus/Haiku's
-  4096-token cache minimum.
+  `translate-fanout`); footnotes carry the chosen backend forward. Still deferred:
+  enlarging the translation preamble for Opus/Haiku's 4096-token cache minimum.
 - No long-book resume beyond the pipeline's existing chunk-level idempotency
   (`stage_translate` skips chunks that already have a translation).
 - Verse/poetry *rendering* is not unified behind a registry — see

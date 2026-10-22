@@ -4733,6 +4733,12 @@ _CONFIG_SET_KEYS = {
     "triage_headless_cli": frozenset(state.CLI_VALUES),
     "triage_worker_model": FREE_TEXT,
     "triage_after_coded": frozenset({"on", "off"}),
+    # Whether the router sends the book to the book review (judge sweep + coded
+    # detectors) once after its first translate wave, and again before
+    # footnotes/EPUB when new translations have landed. Both default `on` when
+    # unset; see src/book_review/progress.py.
+    "book_review_after_translate": frozenset({"on", "off"}),
+    "book_review_canary": frozenset({"on", "off"}),
     # The Codex model `image_pass.py generate` runs a job on when neither the
     # job nor `--model` names one; several comma-separated give each candidate
     # of a job a different one. Read by `src/image_pass/jobs.py`.
@@ -4980,13 +4986,19 @@ def _suggested_reference(
     if combine_stale:
         return "references/epub.md"
 
+    from src.book_review import progress as review_progress
+
     if stage in ("untranslated", "partial"):
+        if stage == "partial" and review_progress.due(project_dir, cfg, stage):
+            return "references/book-review.md"
         if backend == "api":
             return "references/translate-api.md"
         # workers path, or backend not yet chosen (choice lives in translate-workers)
         return "references/translate-workers.md"
 
     if stage == "fully-translated":
+        if review_progress.due(project_dir, cfg, stage):
+            return "references/book-review.md"
         if (
             has_footnotes
             and footnotes_decision not in ("drop", "none")
@@ -5200,10 +5212,18 @@ def status(project: str) -> dict:
         "combine_stale": combine_stale,
         "chapters": chapters_out,
         "next": nxt,
+        "book_review": _book_review_summary(project_dir, cfg, stage),
         "suggested_reference": _suggested_reference(
             project_dir, cfg, artifacts, stage, epubs, combine_stale
         ),
     }
+
+
+def _book_review_summary(project_dir: Path, cfg: dict, stage: str) -> dict:
+    """``status``'s ``book_review`` block: whether a review is due, and the last one."""
+    from src.book_review import progress as review_progress
+
+    return review_progress.summary(project_dir, cfg, stage)
 
 
 # ── run log (qualitative beats the CLI can't see) ───────────────────────────
@@ -5811,6 +5831,12 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         ),
         "chapters": "list of {chapter_id, chunks, translated, complete}",
         "next": "suggested next command",
+        "book_review": (
+            "{due, after_translate, canary, last_review}: `due` is why the router sends the "
+            "book to references/book-review.md now (canary after the first translate wave, or "
+            "new translations since the last review), or null; `after_translate`/`canary` are "
+            "the on/off config keys; `last_review` is .harness/book_review/state.json"
+        ),
         "suggested_reference": "translate-harness references/*.md path the skill should Read next",
     },
     "config-set": {

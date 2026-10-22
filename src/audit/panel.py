@@ -277,8 +277,10 @@ def load_book(book_dir: Optional[Path]) -> dict[str, Any]:
     book["style_rules"] = load_style_rules(book_dir)
     book["style_rules_own"] = has_book_rules(book_dir)
     try:
+        from src.judges.address_judge import render_address_map
+
         amap = load_address_map(book_dir / "address_map.json")
-        book["address_map"] = (amap.content or "").strip() or (amap.global_rules or "").strip()
+        book["address_map"] = render_address_map(amap)
     except Exception:  # noqa: BLE001 - same
         pass
     try:

@@ -234,5 +234,5 @@ def test_unparseable_twice_returns_error_issue(monkeypatch):
 def test_name_and_version():
     judge = AddressComplianceJudge()
     assert judge.name == "address"
-    assert judge.version == "1.1.0"
+    assert judge.version == "1.2.0"
     assert judge.batch_template == "judge_address_batch.txt"

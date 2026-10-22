@@ -368,6 +368,15 @@
                         </svg>
                         <span>{{ t.imgboard_link }}</span>
                     </a>
+                    {#- The fixes a book review proposed, to pick from and approve. -#}
+                    <a class="card-menu-item" href="/book-review/{{ project_id }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M9 11l3 3 8-8"/>
+                            <path d="M20 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                        </svg>
+                        <span>{{ t.bookreview_link }}</span>
+                    </a>
                     <a class="card-menu-item" href="/project/{{ project_id }}">
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

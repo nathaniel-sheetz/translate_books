@@ -81,6 +81,7 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
     # The decisions scan reads whole English chapters, so its baseline is its own.
     "decisions_scan": (".harness", "decisions", "scan.usage.jsonl"),
     "decisions_consolidate": (".harness", "decisions", "consolidate.usage.jsonl"),
+    "book_review": (".harness", "book_review", "usage.jsonl"),
 }
 
 # How the resolved effort actually reaches the model.

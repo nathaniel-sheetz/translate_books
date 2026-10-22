@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.79.0.0] - 2026-10-21
+
+### Added
+- **Book review: read a book's judge findings together and name what is systemic.** A single finding says one sentence is wrong. Read across a whole book, the findings point to upstream causes. `scripts/book_review.py` loads every dialogue, address and editorial finding a book has (kept, retracted and filtered), joins each to its human mark and to the prompt the chunk was actually translated with, and runs coded detectors:
+  - `dead_glossary_keys`: entries whose key never matches the source as written, so they never reached the translator.
+  - `glossary_sense`: entries applied where the source uses the word in another sense.
+  - `address_style_conflicts`: the style guide and the address map disagree, or the map contradicts itself.
+  - `rule_drift`: findings judged against dialogue rules, judge prompts or artifacts that changed after the chunks were translated.
+  - `recurring_rules`: one rule across many chapters, labelled resisted, disputed or unreviewed.
+  - `opposite_directions`: a word pushed one way in some chapters and back in others.
+  - `false_positive_clusters`: dismissals bunched on one judge and theme.
+  `signals` writes a dated report. Design and joins are in `docs/BOOK_REVIEW.md`.
+- **The judge sweep runs after translation.** `book_review.py judge` (plan, `--estimate`, `--yes`) runs every judge the book supports over the chapters that owe it as one headless wave, then editorial pass 2 over every chunk still awaiting it, under the book's lock. The dashboard's "Run judges" job body moved to `src/judges/sweep.py` so both paths run the same wave; its behaviour is unchanged.
+- **Synthesized recommendations.** `prepare`, `fanout` and `commit` turn the signals into recommendations with concrete patches, one headless job per theme (glossary, address/style, rules, drift, dismissals). `commit` validates every patch against the book as it is, replays each recommendation's patches in order, stamps what each one edits and marks conflicting pairs.
+- **A review page to pick fixes, `/book-review/<slug>`.** It lists every recommendation with its rationale, each change in full and the evidence behind it. Picks show live dry-run diffs. A note on a card can ask for a revision (`book_review.py revise`). The user approves on the page, and `apply --from-board --yes` writes only an approved selection.
+- **Applying writes through the normal save paths.** Each change is logged in `decisions_history.jsonl` with writer `book_review`. Dismissals become `_feedback.jsonl` marks, re-judges flag chapters stale, and house proposals are recorded. Re-translations are only previewed.
+- **Harness routing.** `harness.py status` reports a `book_review` block. The router sends a book to the review once after its first translate wave, and again before footnotes/EPUB when new chunks landed since the last review. Turn either route off with `config-set book_review_canary off` or `book_review_after_translate off`.
+- **New `book-review` skill.**
+
+### Changed
+- `decisions.wave.run_wave` takes a `root`, so another stage can run a headless wave over its own working directory.
+
+### Fixed
+- **A glossary split can no longer write a duplicate key.** `glossary.split_sense` rejects a new key that already belongs to another entry, and a key repeated inside the split. The key being replaced may be reused. Two recommendations that introduce the same new key are marked as a conflict.
+- **Applying one change of a recommendation no longer closes the rest.** A selection of `R-id.2` blocks that change only. The other changes stay pickable.
+- **A recommendation that shares an id with an earlier one is listed in `rejected`.** Commit keeps the first.
+- **A draft that does not parse is run again.** Judge fanout and the synthesis fanout both used to skip any non-empty file, so a worker that wrote non-JSON failed the same way on every retry.
+- **`judge --estimate` holds the book's lock while it rewrites the manifest.** If the lock is busy, `estimate` and `run` return that as a JSON error instead of a traceback.
+
 ## [0.78.2.0] - 2026-10-20
 
 ### Added

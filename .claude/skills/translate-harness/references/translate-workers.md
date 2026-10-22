@@ -59,6 +59,8 @@ it is instantly readable, then translate the rest with the same spawn settings. 
 a sample in the reader and catch glossary/voice problems before the whole book is spent. They may
 accept it, give a different range, or choose **all chapters in one go**. END your turn and wait.
 Record the choice as `<set>` (a `--chapters` spec like `1-6`, or "all" = omit `--chapters`).
+The batch doubles as the **book-review canary** (4B-e2): systemic problems it surfaces are fixed
+before the rest of the book is translated.
 
 **4B-0b. STOP — spawn-mode gate (ask once, then save).** *Immediately after* the batch is chosen and
 **before any translation**, ask via AskUserQuestion how workers should be spawned.
@@ -422,6 +424,13 @@ guesses the shape (it is **not** a top-level `chunks`/`items`/`samples` list). T
 `result["chapters"][0]["chunks"][0]["translated_text"]`, and its English is the sibling `["source_text"]`.
 Committed translations also live in `projects/<slug>/chunks/*.json`. `--max-chunks` caps the sample; add
 `--no-source` for translation-only.
+
+**4B-e2. Book review.** Re-run `status`. When `book_review.due` is set (the canary after the first
+batch, or new translations on a finished book), `suggested_reference` is
+`references/book-review.md`: load it before 4B-f. It runs every judge over the new chapters and reports
+systemic problems that are cheaper to fix now, such as a glossary entry that never reached the translator
+or a style guide that contradicts the address map. If the user declines, `book_review.py skip` records
+that and the router moves on.
 
 **4B-f. Translate the rest (if a subset was done).** If you only did a review batch, prompt the user to
 translate the **remaining** chapters now, noting the **same spawn mode/window as before** will be used

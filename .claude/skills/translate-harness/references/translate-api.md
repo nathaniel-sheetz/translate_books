@@ -47,5 +47,10 @@ If you landed here with `backend` unset, do **not** persist `api` yourself — R
    `position` is relative to the chunk: `tail` on a
    non-final chunk is a chunk-seam drop; `full` means the whole chunk was unclaimed.
 
+5. **Then re-run `status`.** When `book_review.due` is set, load `references/book-review.md`
+   before going on: it runs every judge over the new chapters and reports systemic problems
+   (a glossary entry that never reached the translator, a style guide that contradicts the
+   address map) before footnotes and the EPUB.
+
 **If footnotes were imported, do `references/footnotes.md` before `references/epub.md`** to translate + embed them (the API
 `translate` run auto-chains through combine/epub/align, but not the footnote *body* translation).
