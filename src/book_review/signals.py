@@ -864,6 +864,10 @@ def rule_drift(corpus: BookCorpus, *, current_dialogue: Optional[str] = None) ->
     if stamps:
         for artifact, doc, field_name in (
             ("style guide", corpus.style_meta, "updated_at"),
+            # TODO: created_at means "written", so a map edited after translation
+            # (apply stamps updated_at) raises no drift signal. updated_at would
+            # also flag every later save, including ones that did not change a
+            # rule the translator saw.
             ("address map", corpus.address_map or {}, "created_at"),
         ):
             when = str((doc or {}).get(field_name) or "")[:19]

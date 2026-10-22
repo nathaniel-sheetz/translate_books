@@ -10,8 +10,8 @@ Three entry points, mirroring the consent gate every subscription wave uses:
 
 - :func:`plan` -- what a sweep would cover. Free, writes nothing.
 - :func:`estimate` -- ``prepare`` plus a zero-spawn token projection. Free in
-  tokens, but ``prepare`` clears the judge drafts directory, so it refuses
-  while another wave holds the book.
+  tokens. ``prepare`` keeps a draft whose prompt still matches and clears the
+  rest, so it refuses while another wave holds the book.
 - :func:`run` -- the sweep, under the book's lock.
 """
 
@@ -191,25 +191,35 @@ def estimate(
         return {**out, "status": "error", "error": blocked}
 
     pass1: dict[str, Any] = {"jobs": 0}
+    per_judge: dict[str, int] = {}
     if p["owed"]:
-        context, err = _context(project_dir, list(p["owed"]))
-        if err:
-            return {**out, "status": "error", "error": err}
-        prep = subagent.prepare(
-            project_dir, list(p["owed"]), scopes_for(p["owed"]), context=context,
-            cli=cli, worker_model=worker_model, effort=effort, keep_drafts=RESUME,
-        )
-        fan = subagent.fanout(project_dir, estimate=True, cache=cache)
-        if fan.get("error"):
-            return {**out, "status": "error", "error": fan["error"]}
-        est = fan.get("estimate") or {}
-        pass1 = {k: est.get(k) for k in (
-            "jobs", "prompt_tokens", "projected_tokens", "output_tokens", "output_source",
-            "baseline_tokens", "baseline_source",
-        )}
-        pass1["resumed_drafts"] = prep.get("resumed_drafts", 0)
-        out["warnings"] = fan.get("warnings") or []
-        out["effective"] = fan.get("effective") or out["effective"]
+        from src.harness import locks
+
+        # prepare rewrites the manifest and deletes drafts whose prompt changed.
+        # The gate above is not atomic with that write; the lock is.
+        try:
+            with locks.project_lock(project_dir, kind=LOCK_KIND):
+                context, err = _context(project_dir, list(p["owed"]))
+                if err:
+                    return {**out, "status": "error", "error": err}
+                prep = subagent.prepare(
+                    project_dir, list(p["owed"]), scopes_for(p["owed"]), context=context,
+                    cli=cli, worker_model=worker_model, effort=effort, keep_drafts=RESUME,
+                )
+                fan = subagent.fanout(project_dir, estimate=True, cache=cache)
+                if fan.get("error"):
+                    return {**out, "status": "error", "error": fan["error"]}
+                est = fan.get("estimate") or {}
+                pass1 = {k: est.get(k) for k in (
+                    "jobs", "prompt_tokens", "projected_tokens", "output_tokens", "output_source",
+                    "baseline_tokens", "baseline_source",
+                )}
+                pass1["resumed_drafts"] = prep.get("resumed_drafts", 0)
+                out["warnings"] = fan.get("warnings") or []
+                out["effective"] = fan.get("effective") or out["effective"]
+                per_judge = _todo_per_judge(project_dir)
+        except locks.LockBusy as exc:
+            return {**out, "status": "error", "error": str(exc)}
 
     adjudication = None
     if "editorial" in p["judges"]:
@@ -222,7 +232,7 @@ def estimate(
     wall = _project_wall(
         project_dir, prof, pass1_jobs=int(pass1.get("jobs") or 0),
         pass2_jobs=(adjudication or {}).get("jobs_max", 0), width=out["concurrency"],
-        per_judge=_todo_per_judge(project_dir) if p["owed"] else {},
+        per_judge=per_judge,
     )
     if wall is None:
         out.setdefault("warnings", []).append(
@@ -269,33 +279,36 @@ def run(
     if blocked:
         return {"status": "error", "error": blocked, "plan": p}
 
-    with locks.project_lock(project_dir, kind=LOCK_KIND):
-        names = list(p["owed"])
-        summary: dict[str, Any] = {"ran": 0, "error_count": 0, "errors": []}
-        if names:
-            context, err = _context(project_dir, names)
-            if err:
-                return {"status": "error", "error": err, "plan": p}
-            summary = sweep.run_headless_sweep(
-                project_dir, names, scopes_for(p["owed"]), emit,
-                context=context, cli=cli, worker_model=worker_model, effort=effort,
-                prompt_cache=cache, default_cli=prof.cli,
-                adjudicate_scopes=["book"], concurrency=width, keep_drafts=RESUME,
-            )
-        # The sweep adjudicates only when editorial is among the judges it ran; pass 2
-        # can still be owed (and was quoted) when editorial itself is current.
-        if "editorial" not in names and p["pending_pass2_chunks"] and not summary.get("fatal"):
-            context, err = _context(project_dir, ["editorial"])
-            if err:
-                return {"status": "error", "error": err, "plan": p}
-            adjudication, errors = sweep.adjudicate_editorial(
-                project_dir, ["book"], emit, backend="headless", context=context,
-                cli=cli, worker_model=worker_model, effort=effort,
-                prompt_cache=cache or "auto", concurrency=width, keep_drafts=RESUME,
-            )
-            summary = {**summary, "adjudication": adjudication,
-                       "error_count": (summary.get("error_count") or 0) + len(errors),
-                       "errors": ((summary.get("errors") or []) + errors)[:5]}
-    status = "error" if summary.get("fatal") else "ok"
-    return {"status": status, "plan": p, "summary": summary,
-            **({"error": summary["fatal"]} if summary.get("fatal") else {})}
+    try:
+        with locks.project_lock(project_dir, kind=LOCK_KIND):
+            names = list(p["owed"])
+            summary: dict[str, Any] = {"ran": 0, "error_count": 0, "errors": []}
+            if names:
+                context, err = _context(project_dir, names)
+                if err:
+                    return {"status": "error", "error": err, "plan": p}
+                summary = sweep.run_headless_sweep(
+                    project_dir, names, scopes_for(p["owed"]), emit,
+                    context=context, cli=cli, worker_model=worker_model, effort=effort,
+                    prompt_cache=cache, default_cli=prof.cli,
+                    adjudicate_scopes=["book"], concurrency=width, keep_drafts=RESUME,
+                )
+            # The sweep adjudicates only when editorial is among the judges it ran; pass 2
+            # can still be owed (and was quoted) when editorial itself is current.
+            if "editorial" not in names and p["pending_pass2_chunks"] and not summary.get("fatal"):
+                context, err = _context(project_dir, ["editorial"])
+                if err:
+                    return {"status": "error", "error": err, "plan": p}
+                adjudication, errors = sweep.adjudicate_editorial(
+                    project_dir, ["book"], emit, backend="headless", context=context,
+                    cli=cli, worker_model=worker_model, effort=effort,
+                    prompt_cache=cache or "auto", concurrency=width, keep_drafts=RESUME,
+                )
+                summary = {**summary, "adjudication": adjudication,
+                           "error_count": (summary.get("error_count") or 0) + len(errors),
+                           "errors": ((summary.get("errors") or []) + errors)[:5]}
+            status = "error" if summary.get("fatal") else "ok"
+            return {"status": status, "plan": p, "summary": summary,
+                    **({"error": summary["fatal"]} if summary.get("fatal") else {})}
+    except locks.LockBusy as exc:
+        return {"status": "error", "error": str(exc), "plan": p}

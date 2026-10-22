@@ -215,7 +215,7 @@ _PREPARE_SCHEMA = {
 _FANOUT_SCHEMA = {
     "wrote": "list of entry ids whose drafts were written this wave",
     "failed": "list of {id, error} — re-run fanout for these",
-    "skipped": "list of entry ids that already had a non-empty draft",
+    "skipped": "list of entry ids whose draft commit can already parse",
     "worker_model": "model tier used for the headless CLI",
     "concurrency": "max parallel headless CLI processes per wave",
     "cwd": "neutral empty cwd used for the workers",
@@ -699,6 +699,31 @@ def _read_draft_text(path: Path) -> str | None:
         return None
 
 
+def _draft_commit_can_parse(entry: dict[str, Any], text: str) -> bool:
+    """True when ``commit`` can parse this draft, so fanout must not spend it again.
+
+    A worker that exits 0 with non-JSON leaves a non-empty file. Skipping every
+    non-empty file made the next ``fanout`` report the same parse error.
+    """
+    try:
+        if _is_batch_entry(entry):
+            _parse_batch_verdicts(text)
+            return True
+        judge_name = entry.get("judge")
+        members = _entry_members(entry)
+        if not judge_name or not members:
+            return False
+        judge = get_judge(str(judge_name))
+        parse_judge_json(text, judge.spec.output_fields)
+        return True
+    except JudgeParseError:
+        return False
+    except Exception:
+        # An unknown judge, or a check that is not the JSON parse. Leave the
+        # file for commit rather than re-spending it.
+        return True
+
+
 def usage_log_path(project_dir: Path) -> Path:
     """Where per-job headless telemetry accumulates for this project's judges."""
     return _judges_dir(Path(project_dir)) / "usage.jsonl"
@@ -721,9 +746,10 @@ def fanout(
 ) -> dict[str, Any]:
     """Run one headless CLI wave for judge-prepare manifest entries.
 
-    Opt-in alternative to Task-tool workers. For each selected entry that lacks a
-    non-empty draft, invoke the selected headless CLI (``claude``, ``cursor`` or
-    ``codex``) from a neutral cwd, writing its answer to ``draft_path``.
+    Opt-in alternative to Task-tool workers. For each selected entry whose draft
+    ``commit`` cannot parse, invoke the selected headless CLI (``claude``,
+    ``cursor`` or ``codex``) from a neutral cwd, writing its answer to
+    ``draft_path``. A non-empty file that is not JSON is run again.
 
     Claude profile: when ``preamble_path`` + ``body_path`` are present, the body
     is the user prompt and the preamble is passed via ``--system-prompt-file``.
@@ -905,7 +931,7 @@ def fanout(
             continue
         draft_path = Path(entry["draft_path"])
         existing = _read_draft_text(draft_path) if draft_path.exists() else None
-        if existing is not None and existing.strip():
+        if existing is not None and existing.strip() and _draft_commit_can_parse(entry, existing):
             skipped.append(eid)
             continue
         prompt_path = Path(entry["prompt_path"])

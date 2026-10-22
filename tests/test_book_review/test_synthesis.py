@@ -132,9 +132,48 @@ def test_recommendation_drops_unknown_evidence_and_rejects_patchless(book):
     assert rec is None
 
 
+def test_split_sense_rejects_a_colliding_key_and_may_reuse_its_own(book):
+    from src.book_review.patches import apply_glossary
+
+    book.glossary([term("paragraph", "el párrafo"), term("under", "bajo")])
+    reuse, why = check(book, {"type": "glossary.split_sense", "english": "paragraph", "entries": [
+        {"english": "paragraph", "spanish": "el párrafo"},
+        {"english": "stopped", "spanish": "se detuvo"},
+    ]})
+    assert reuse is not None, why
+    clash, why = check(book, {"type": "glossary.split_sense", "english": "paragraph", "entries": [
+        {"english": "stopped", "spanish": "se detuvo"},
+        {"english": "under", "spanish": "debajo"},
+    ]})
+    assert clash is None and "already has" in why
+    repeat, why = check(book, {"type": "glossary.split_sense", "english": "paragraph", "entries": [
+        {"english": "stopped", "spanish": "a"},
+        {"english": "Stopped", "spanish": "b"},
+    ]})
+    assert repeat is None and "repeats" in why
+    doc = {"terms": [term("paragraph", "el párrafo"), term("under", "bajo")]}
+    with pytest.raises(ValueError, match="already has"):
+        apply_glossary(doc, {"type": "glossary.split_sense", "english": "paragraph", "entries": [
+            {"english": "stopped", "spanish": "se detuvo"},
+            {"english": "under", "spanish": "debajo"},
+        ]})
+    assert [t["english"] for t in doc["terms"]] == ["paragraph", "under"]
+
+
 def test_reconcile_marks_two_recommendations_on_one_key():
     recs = [{"id": "R-1", "patches": [{"type": "glossary.edit", "english": "X", "spanish": "a"}]},
             {"id": "R-2", "patches": [{"type": "glossary.remove", "english": "x"}]}]
+    schema.reconcile(recs)
+    assert recs[0]["conflicts_with"] == ["R-2"] and recs[1]["conflicts_with"] == ["R-1"]
+
+
+def test_reconcile_marks_two_recommendations_that_introduce_the_same_key():
+    recs = [
+        {"id": "R-1", "patches": [
+            {"type": "glossary.rekey", "english": "old", "new_english": "fresh"}]},
+        {"id": "R-2", "patches": [
+            {"type": "glossary.add", "english": "Fresh", "spanish": "nuevo"}]},
+    ]
     schema.reconcile(recs)
     assert recs[0]["conflicts_with"] == ["R-2"] and recs[1]["conflicts_with"] == ["R-1"]
 
@@ -153,6 +192,35 @@ def test_prepare_writes_jobs_inside_the_stage_dir(book):
         assert root in __import__("pathlib").Path(job["draft_path"]).resolve().parents
     preamble = open(manifest["preamble_path"], encoding="utf-8").read()
     assert "The owl keeps a familiar tú with Bambi." in preamble
+
+
+def test_fanout_reruns_a_draft_commit_cannot_parse(book):
+    synthesize.prepare(book.dir, cli="claude")
+    write_drafts(book.dir, draft_payload())
+    manifest = json.loads(synthesize._manifest_path(book.dir).read_text(encoding="utf-8"))
+    job = next(j for j in manifest["jobs"] if j["theme"] == "glossary")
+    open(job["draft_path"], "w", encoding="utf-8").write("not json")
+
+    def runner(cmd, *, input_text, cwd, **kwargs):
+        return 0, json.dumps({"recommendations": []}), ""
+
+    out = synthesize.fanout(book.dir, runner=runner, concurrency=1)
+    assert job["id"] in out["wrote"] and job["id"] not in out["skipped"]
+    assert json.loads(open(job["draft_path"], encoding="utf-8").read()) == {"recommendations": []}
+
+
+def test_commit_keeps_the_first_when_two_recommendations_share_an_id(book):
+    synthesize.prepare(book.dir, cli="claude")
+    payload = draft_payload()
+    first = payload["recommendations"][0]
+    write_drafts(book.dir, {"recommendations": [first, {**first, "rationale": "the later one"}],
+                            "no_action": []})
+    out = synthesize.commit(book.dir)
+    doc = json.loads(synthesize.recommendations_path(book.dir).read_text(encoding="utf-8"))
+    assert out["recommendations"] == 1
+    assert doc["recommendations"][0]["rationale"].startswith("The key")
+    assert doc["rejected"][0]["problems"] == [
+        f"same id as an earlier recommendation ({doc['recommendations'][0]['id']}); kept the first"]
 
 
 def test_fanout_runs_the_jobs_with_a_fake_runner(book):

@@ -115,12 +115,22 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
             out.update(changes)
         elif kind == "glossary.split_sense":
             entries = []
+            seen: set[str] = set()
             for e in patch.get("entries") or []:
                 if not isinstance(e, dict) or not _str(e.get("english")) or not _str(e.get("spanish")):
                     return None, "split_sense entries need english and spanish"
-                if not _occurs_in_source(corpus, _str(e["english"])):
-                    return None, f"split key {e['english']!r} never occurs in the source"
-                entries.append({"english": _str(e["english"]), "spanish": _str(e["spanish"]),
+                english = _str(e["english"])
+                folded = english.lower()
+                if folded in seen:
+                    return None, f"split repeats {english!r}"
+                seen.add(folded)
+                # The key being replaced is removed first, so the split may reuse it.
+                existing = _glossary_key(corpus, english)
+                if existing and existing.lower() != key.lower():
+                    return None, f"glossary already has {english!r}"
+                if not _occurs_in_source(corpus, english):
+                    return None, f"split key {english!r} never occurs in the source"
+                entries.append({"english": english, "spanish": _str(e["spanish"]),
                                 "context": _str(e.get("context")) or None})
             if len(entries) < 2:
                 return None, "split_sense needs at least two entries"
@@ -312,7 +322,16 @@ def _targets(patch: dict[str, Any]) -> list[str]:
     """What a patch changes, as keys two recommendations would collide on."""
     kind = patch["type"]
     if kind.startswith("glossary."):
-        return [f"glossary:{patch['english'].lower()}"]
+        # The key a patch introduces collides too: two recommendations that
+        # both add it would each pass a check against the pre-apply book.
+        keys = [patch.get("english"), patch.get("new_english")]
+        keys += [e.get("english") for e in patch.get("entries") or []]
+        seen: list[str] = []
+        for raw in keys:
+            folded = str(raw or "").strip().lower()
+            if folded and folded not in seen:
+                seen.append(folded)
+        return [f"glossary:{k}" for k in seen]
     if kind == "style.replace_text":
         return [f"style:{patch['before'][:60]}"]
     if kind == "address.set_direction":

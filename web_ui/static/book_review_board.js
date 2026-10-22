@@ -59,6 +59,10 @@
 
     /* --- picks <-> apply's --select tokens -------------------------------- */
 
+    function patchApplied(rec, n) {
+        return (rec.applied_patches || []).some(function (x) { return x === n; });
+    }
+
     function readSelection(selection) {
         picked = {};
         (selection || []).forEach(function (token) {
@@ -68,9 +72,12 @@
             if (!rec) return;
             picked[id] = picked[id] || {};
             if (dot < 0) {
-                rec.patches.forEach(function (p) { picked[id][p.n] = true; });
+                rec.patches.forEach(function (p) {
+                    if (!patchApplied(rec, p.n)) picked[id][p.n] = true;
+                });
             } else {
-                picked[id][parseInt(token.slice(dot + 1), 10)] = true;
+                var n = parseInt(token.slice(dot + 1), 10);
+                if (!patchApplied(rec, n)) picked[id][n] = true;
             }
         });
     }
@@ -115,6 +122,9 @@
     }
 
     function save() {
+        // TODO: overlapping saves apply whichever response arrives last, so
+        // Approve can post an older selection than the checkboxes show.
+        // Ignore a response that is not the latest request.
         saveTimer = null;
         inFlight++;
         var body = JSON.stringify({
@@ -283,7 +293,9 @@
 
     function setPicked(rec, on) {
         picked[rec.id] = {};
-        if (on) rec.patches.forEach(function (p) { picked[rec.id][p.n] = true; });
+        if (on) rec.patches.forEach(function (p) {
+            if (!patchApplied(rec, p.n)) picked[rec.id][p.n] = true;
+        });
     }
 
     function unpickConflicts(rec, card) {
@@ -317,8 +329,9 @@
         main.disabled = blocked;
         main.indeterminate = on && count < rec.patches.length;
         card.querySelectorAll('.br-patch-pick input').forEach(function (box) {
-            box.checked = !!(picked[id] && picked[id][box.dataset.n]);
-            box.disabled = blocked;
+            var n = parseInt(box.dataset.n, 10);
+            box.checked = !!(picked[id] && picked[id][n]);
+            box.disabled = blocked || patchApplied(rec, n);
         });
         var ask = card.querySelector('.br-revise input');
         if (ask) {

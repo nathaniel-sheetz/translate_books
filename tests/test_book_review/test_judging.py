@@ -167,3 +167,28 @@ def test_estimate_reports_the_default_width_and_its_source(tmp_path, monkeypatch
     assert out["concurrency"] == 10 and out["concurrency_source"] == "default"
     out = judging.estimate(tmp_path, concurrency=4)
     assert out["concurrency"] == 4 and out["concurrency_source"] == "--concurrency"
+
+
+def test_estimate_and_run_return_json_when_the_lock_is_busy(tmp_path, monkeypatch):
+    from src.harness import locks
+
+    plan = {"judges": ["dialogue"], "address_map": False,
+            "owed": {"dialogue": ["chapter_01"]}, "owed_chunks": {"dialogue": 1},
+            "pending_pass2_chunks": 0, "nothing_to_do": False}
+    monkeypatch.setattr(judging, "plan", lambda project_dir, judges=None: plan)
+    monkeypatch.setattr(judging, "_profile", lambda *a: type(
+        "P", (), {"to_payload": lambda self: {}, "cli": "claude", "worker_model": "x"})())
+    monkeypatch.setattr(judging, "_gate", lambda *a: None)
+
+    class Busy:
+        def __enter__(self):
+            raise locks.LockBusy(tmp_path / ".lock", {"kind": "book-review-judges", "pid": 9})
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(locks, "project_lock", lambda *a, **k: Busy())
+    estimated = judging.estimate(tmp_path)
+    assert estimated["status"] == "error" and "book-review-judges" in estimated["error"]
+    ran = judging.run(tmp_path)
+    assert ran["status"] == "error" and "book-review-judges" in ran["error"] and ran["plan"] == plan

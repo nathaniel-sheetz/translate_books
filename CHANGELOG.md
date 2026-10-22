@@ -24,6 +24,13 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - `decisions.wave.run_wave` takes a `root`, so another stage can run a headless wave over its own working directory.
 
+### Fixed
+- **A glossary split can no longer write a duplicate key.** `glossary.split_sense` rejects a new key that already belongs to another entry, and a key repeated inside the split. The key being replaced may be reused. Two recommendations that introduce the same new key are marked as a conflict.
+- **Applying one change of a recommendation no longer closes the rest.** A selection of `R-id.2` blocks that change only. The other changes stay pickable.
+- **A recommendation that shares an id with an earlier one is listed in `rejected`.** Commit keeps the first.
+- **A draft that does not parse is run again.** Judge fanout and the synthesis fanout both used to skip any non-empty file, so a worker that wrote non-JSON failed the same way on every retry.
+- **`judge --estimate` holds the book's lock while it rewrites the manifest.** If the lock is busy, `estimate` and `run` return that as a JSON error instead of a traceback.
+
 ## [0.78.2.0] - 2026-10-20
 
 ### Added

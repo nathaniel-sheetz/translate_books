@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.decisions import decisions_dir
 
@@ -21,7 +21,7 @@ DEFAULT_CONCURRENCY = 5
 FANOUT_SCHEMA = {
     "wrote": "job ids whose drafts were written this wave",
     "failed": "list of {id, error} — re-run fanout for these",
-    "skipped": "job ids that already had a non-empty draft",
+    "skipped": "job ids not re-run because their draft is already done",
     "counts": "{wrote, failed, skipped, todo}",
     "effective": "what the wave ran as",
     "usage": "what the wave consumed; per-job rows go to the wave's usage log",
@@ -85,12 +85,15 @@ def run_wave(
     effort: Optional[str] = None,
     runner=None,
     root: Optional[Path] = None,
+    draft_done: Optional[Callable[[Path], bool]] = None,
 ) -> dict[str, Any]:
     """Run one headless wave over ``manifest``'s jobs as wave type ``command``.
 
     ``runner`` is a test seam: ``(cmd, *, input_text, cwd) -> (rc, stdout, stderr)``.
     ``root`` is the directory every manifest path must stay inside (default:
-    ``.harness/decisions/``).
+    ``.harness/decisions/``). ``draft_done`` replaces :func:`has_draft` when a
+    non-empty file is not enough — book-review synthesis passes one that
+    requires the draft to parse.
     """
     from src.harness import state as hstate
     from src.harness.headless import run_headless_wave
@@ -139,10 +142,11 @@ def run_wave(
     ready: list[dict[str, Any]] = []
     skipped: list[str] = []
     pre_failed: list[dict[str, str]] = []
+    is_done = draft_done or has_draft
     for job in jobs:
         try:
             draft = inside(project_dir, job.get("draft_path") or "", root=root)
-            if has_draft(draft):
+            if is_done(draft):
                 skipped.append(job["id"])
                 continue
             body = inside(project_dir, job.get("body_path") or "", root=root).read_text(encoding="utf-8")

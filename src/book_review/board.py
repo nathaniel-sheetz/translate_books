@@ -87,9 +87,13 @@ def fingerprint(project_dir: Path, doc: dict[str, Any]) -> str:
     return digest.hexdigest()[:16]
 
 
-def applied_ids(project_dir: Path) -> dict[str, str]:
-    """Recommendation id -> when it was applied, from ``applied.jsonl``."""
-    out: dict[str, str] = {}
+def applied_record(project_dir: Path) -> dict[str, tuple[str, Optional[set[int]]]]:
+    """Recommendation id -> ``(when, patch numbers)`` from ``applied.jsonl``.
+
+    Patch numbers is ``None`` when a selection applied the whole recommendation
+    (``R-id``, not ``R-id.2``). A later whole-recommendation apply stays ``None``.
+    """
+    out: dict[str, tuple[str, Optional[set[int]]]] = {}
     try:
         lines = (review_dir(project_dir) / "applied.jsonl").read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -99,9 +103,32 @@ def applied_ids(project_dir: Path) -> dict[str, str]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        for rid in parse_selection(row.get("selection") or []):
-            out[rid] = row.get("ts") or ""
+        when = row.get("ts") or ""
+        for rid, numbers in parse_selection(row.get("selection") or []).items():
+            previous = out.get(rid)
+            if numbers is None or (previous is not None and previous[1] is None):
+                out[rid] = (when, None)
+            elif previous is None:
+                out[rid] = (when, set(numbers))
+            else:
+                out[rid] = (when, previous[1] | set(numbers))
     return out
+
+
+def applied_closed(patch_count: int, numbers: Optional[set[int]]) -> bool:
+    """True when every patch of a recommendation has been applied."""
+    if numbers is None:
+        return True
+    return patch_count > 0 and set(range(1, patch_count + 1)) <= numbers
+
+
+def applied_ids(project_dir: Path) -> dict[str, str]:
+    """Recommendation id -> when any of it was applied.
+
+    A partial apply (``R-id.2``) is recorded here too. Callers that must block
+    only the patches that ran use :func:`applied_record`.
+    """
+    return {rid: when for rid, (when, _numbers) in applied_record(project_dir).items()}
 
 
 def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str],
@@ -113,7 +140,7 @@ def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str]
     except ValueError:
         return [f"not a selection: {selection}"]
     problems = []
-    done = applied_ids(project_dir)
+    done = applied_record(project_dir)
     docs, current = load_artifacts(project_dir), artifact_hashes(project_dir)
     waiting = set(load(project_dir)["revise"] if revise is None else revise)
     for rid, numbers in chosen.items():
@@ -122,11 +149,22 @@ def check_selection(project_dir: Path, doc: dict[str, Any], selection: list[str]
             problems.append(f"{rid}: no such recommendation")
             continue
         stale = stale_reasons(rec, docs, current)
-        if rid in done:
-            problems.append(f"{rid}: already applied")
-        elif rid in waiting:
+        record = done.get(rid)
+        blocked = False
+        if record is not None:
+            _when, applied = record
+            if applied is None:
+                problems.append(f"{rid}: already applied")
+                blocked = True
+            else:
+                asked = set(range(1, len(rec["patches"]) + 1)) if numbers is None else numbers
+                overlap = sorted(asked & applied)
+                if overlap:
+                    problems.append(f"{rid}: changes {overlap} already applied")
+                    blocked = True
+        if not blocked and rid in waiting:
             problems.append(f"{rid}: waiting for a revision from your note")
-        elif stale:
+        elif not blocked and stale:
             problems.append(f"{rid}: {'; '.join(stale)}")
         bad = sorted(n for n in numbers or () if not 1 <= n <= len(rec["patches"]))
         if bad:
@@ -269,6 +307,23 @@ def _evidence_view(eid: str, signals: dict[str, Any], findings: dict[str, Any], 
     return {"kind": "unknown", "id": eid}
 
 
+def _applied_view(rec: dict[str, Any], done: dict[str, tuple[str, Optional[set[int]]]]) -> tuple[Optional[str], list[int]]:
+    """``(applied_at or None, patch numbers already applied)``.
+
+    ``applied_at`` is set only once every patch has run, so a partial apply
+    leaves the remaining patches pickable.
+    """
+    record = done.get(rec["id"])
+    if record is None:
+        return None, []
+    when, numbers = record
+    count = len(rec.get("patches") or [])
+    patches = list(range(1, count + 1)) if numbers is None else sorted(numbers)
+    if applied_closed(count, numbers):
+        return when, patches
+    return None, patches
+
+
 def build(project_dir: Path) -> dict[str, Any]:
     """Everything the page draws, rebuilt from disk on every request."""
     from src.book_review.corpus import load_book
@@ -285,7 +340,7 @@ def build(project_dir: Path) -> dict[str, Any]:
     signals_doc = _read_json(review_dir(project_dir) / "signals.json") or {}
     signals = {s["id"]: s for s in signals_doc.get("signals") or []}
     docs, current = load_artifacts(project_dir), artifact_hashes(project_dir)
-    done = applied_ids(project_dir)
+    done = applied_record(project_dir)
 
     recs = []
     for rec in doc.get("recommendations") or []:
@@ -296,12 +351,14 @@ def build(project_dir: Path) -> dict[str, Any]:
                         "original": [_patch_view(n, p, corpus, findings)
                                      for n, p in enumerate(original.get("patches") or [], 1)],
                         "original_rationale": original.get("rationale")}
+        applied_at, applied_patches = _applied_view(rec, done)
         recs.append({
             **{k: rec.get(k) for k in ("id", "theme", "title", "rationale", "confidence",
                                        "priority", "problems")},
             "conflicts_with": rec.get("conflicts_with") or [],
-            "applied_at": done.get(rec["id"]),
-            "stale": [] if rec["id"] in done else stale_reasons(rec, docs, current),
+            "applied_at": applied_at,
+            "applied_patches": applied_patches,
+            "stale": [] if applied_at else stale_reasons(rec, docs, current),
             "revision": revision,
             "revise_requested": rec["id"] in board["revise"],
             "patches": [_patch_view(n, p, corpus, findings)
@@ -356,11 +413,15 @@ def summary(project_dir: Path) -> dict[str, Any]:
     board = load(project_dir)
     selection, problem = approved_selection(project_dir)
     recs = (doc or {}).get("recommendations") or []
-    done = applied_ids(project_dir)
+    done = applied_record(project_dir)
+    applied = sorted(
+        r["id"] for r in recs
+        if done.get(r["id"]) and applied_closed(len(r.get("patches") or []), done[r["id"]][1])
+    )
     return {
         "recommendations": len(recs),
-        "applied": sorted(done),
-        "open": [r["id"] for r in recs if r["id"] not in done],
+        "applied": applied,
+        "open": [r["id"] for r in recs if r["id"] not in applied],
         "selection": board["selection"],
         "notes": board["notes"],
         "revise": {rid: board["notes"].get(rid, "") for rid in board["revise"]},

@@ -14,7 +14,7 @@ import pytest
 from src.book_review import board, synthesize
 from src.book_review.apply import apply
 from tests.test_book_review.conftest import term
-from tests.test_book_review.test_synthesis import book, draft_payload, write_drafts  # noqa: F401
+from tests.test_book_review.test_synthesis import book, committed, draft_payload, write_drafts  # noqa: F401
 
 
 @pytest.fixture
@@ -165,6 +165,29 @@ def test_the_page_and_its_api(client, reviewed):
     assert approved["approved"]["selection"] == [reviewed.rid]
     withdrawn = client.post("/api/project/book/book-review/approve", json={"withdraw": True}).get_json()
     assert withdrawn["approved"] is None
+
+
+def test_a_partial_apply_leaves_the_other_patches_open(book):
+    rid = committed(book, follow_ups=[], patches=[
+        {"type": "glossary.rekey", "english": "porte cochere", "new_english": "porte-cochere"},
+        {"type": "style.append", "text": "PORCH\nSay cochera."},
+    ])
+    assert apply(book.dir, [f"{rid}.2"], yes=True)["status"] == "ok"
+    state = board.build(book.dir)
+    card = next(r for r in state["recommendations"] if r["id"] == rid)
+    assert card["applied_at"] is None and card["applied_patches"] == [2]
+    assert board.summary(book.dir)["open"] == [rid]
+
+    whole = apply(book.dir, [rid], yes=True)
+    assert whole["status"] == "error" and "already applied" in whole["error"]
+    again = apply(book.dir, [f"{rid}.2"], yes=True)
+    assert again["status"] == "error" and "already applied" in again["error"]
+    keys = [t["english"] for t in json.loads((book.dir / "glossary.json").read_text(encoding="utf-8"))["terms"]]
+    assert keys == ["porte cochere"]
+
+    rest = apply(book.dir, [f"{rid}.1"], yes=True)
+    assert rest["status"] == "ok"
+    assert board.summary(book.dir)["applied"] == [rid]
 
 
 def test_every_string_has_its_spanish_twin():

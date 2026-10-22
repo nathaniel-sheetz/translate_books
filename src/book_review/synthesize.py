@@ -8,7 +8,8 @@
   ``.harness/book_review/synthesis/``. No spend.
 - :func:`fanout` runs the jobs as one headless wave
   (:func:`src.decisions.wave.run_wave`, rooted at this stage's directory). A
-  job whose draft exists is skipped, so a re-run resumes.
+  job whose draft parses is skipped; a draft ``commit`` cannot parse is run
+  again, so a re-run resumes.
 - :func:`commit` parses the drafts, validates every patch against the book as
   it is now (:mod:`src.book_review.schema`), stamps the state of every
   glossary entry and address pair a patch edits by name
@@ -129,6 +130,23 @@ def prepare(
     }
 
 
+def _parsed_draft(path: Path) -> bool:
+    """True when ``commit`` can parse this draft. A non-empty non-JSON file is not done."""
+    from src.judges.llm_io import JudgeParseError, parse_judge_json
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not text.strip():
+        return False
+    try:
+        parse_judge_json(text, ["recommendations"])
+    except JudgeParseError:
+        return False
+    return True
+
+
 def fanout(project_dir: Path, **kwargs: Any) -> dict[str, Any]:
     from src.decisions.wave import fanout_error, load_manifest, run_wave
 
@@ -139,7 +157,7 @@ def fanout(project_dir: Path, **kwargs: Any) -> dict[str, Any]:
     if err:
         return fanout_error(err)
     return run_wave(project_dir, manifest, command=COMMAND,
-                    root=synthesis_dir(project_dir), **kwargs)
+                    root=synthesis_dir(project_dir), draft_done=_parsed_draft, **kwargs)
 
 
 def commit(project_dir: Path, *, today: Optional[str] = None) -> dict[str, Any]:
@@ -190,10 +208,17 @@ def commit(project_dir: Path, *, today: Optional[str] = None) -> dict[str, Any]:
                 no_action.append({"signal_id": str(item["signal_id"]),
                                   "reason": str(item.get("reason") or "")})
 
-    # One id per title within a book; a duplicate title across jobs is merged away.
+    # One id per title within a book. A later proposal with the same id is
+    # rejected rather than dropped, so the operator can see it.
     seen: dict[str, dict[str, Any]] = {}
     for rec in recommendations:
-        seen.setdefault(rec["id"], rec)
+        if rec["id"] in seen:
+            rejected.append({
+                "title": rec["title"],
+                "problems": [f"same id as an earlier recommendation ({rec['id']}); kept the first"],
+            })
+            continue
+        seen[rec["id"]] = rec
     recommendations = sorted(seen.values(), key=lambda r: (r["priority"], r["theme"], r["title"]))
     reconcile(recommendations)
 

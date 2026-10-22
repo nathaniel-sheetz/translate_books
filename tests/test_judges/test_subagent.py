@@ -779,6 +779,20 @@ def test_fanout_writes_drafts_via_runner_seam(tmp_path):
     assert out2["counts"]["wrote"] == 0
 
 
+def test_fanout_reruns_a_draft_that_does_not_parse(tmp_path):
+    project, cid = _project_with_chunk(tmp_path)
+    prep = subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    entry = prep["manifest"][0]
+    Path(entry["draft_path"]).write_text("not json", encoding="utf-8")
+
+    def fake_runner(cmd, *, input_text, cwd):
+        return 0, _GOOD_VERDICT, ""
+
+    out = subagent.fanout(project, runner=fake_runner)
+    assert out["counts"]["wrote"] == 1 and out["counts"]["skipped"] == 0
+    assert json.loads(Path(entry["draft_path"]).read_text(encoding="utf-8"))["compliant"] is False
+
+
 def test_fanout_commit_lands_headless_draft(tmp_path):
     """commit parses a draft written by fanout the same as a Task worker draft."""
     project, cid = _project_with_chunk(tmp_path)

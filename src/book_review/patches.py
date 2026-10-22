@@ -48,6 +48,15 @@ def apply_glossary(doc: dict, patch: dict) -> None:
             if field in patch:
                 entry[field] = patch[field]
     elif kind == "glossary.split_sense":
+        seen: set[str] = set()
+        for e in patch["entries"]:
+            folded = str(e["english"]).lower()
+            if folded in seen:
+                raise ValueError(f"split repeats {e['english']!r}")
+            seen.add(folded)
+            other = find_entry(terms, e["english"])
+            if other is not None and other is not entry:
+                raise ValueError(f"glossary already has {e['english']!r}")
         at = terms.index(entry)
         terms.pop(at)
         for offset, e in enumerate(patch["entries"]):
@@ -92,6 +101,10 @@ def apply_address(doc: dict, patch: dict) -> None:
             segment = {"form": patch["form"], "when": "default"}
             if patch.get("notes"):
                 segment["notes"] = patch["notes"]
+            # TODO: this replaces the direction's whole rule list with one
+            # default segment, so a since/until/after_event rule on that
+            # direction is dropped. Keep the other segments and replace only
+            # the default form.
             pair.setdefault("directions", {})[patch["direction"]] = [segment]
             return
     raise ValueError(f"address pair {patch['a']}/{patch['b']} is gone")
