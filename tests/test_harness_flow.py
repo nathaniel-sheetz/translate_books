@@ -1534,6 +1534,28 @@ def test_glossary_commit_surfaces_convention_reviews(project: Path):
     assert (project / "glossary.json").exists()
 
 
+def test_style_rule_set_list_remove_with_a_chapter_window(project: Path):
+    out = flow.style_rule_set(str(project), rule_id="late-register", rule="Speak as adults now.",
+                              since="chapter_02")
+    assert out["rule"]["to_translator"] and out["rule"]["window"] == "chapter_02 onward"
+    assert out["warnings"]  # no chunks yet, so it reaches none
+    flow.style_rule_set(str(project), rule_id="plain", rule="Plain.")
+
+    listed = flow.style_rule_list(str(project))
+    assert [r["id"] for r in listed["rules"]] == ["late-register", "plain"]
+    assert [c["id"] for c in listed["chapters"]] == ["chapter_01", "chapter_02"]
+    assert not listed["rules"][1]["to_translator"]  # no window, no triggers: judge-only
+
+    with pytest.raises(ValueError, match="not a chapter of this book"):
+        flow.style_rule_set(str(project), rule_id="x", rule="X.", since="chapter_13")
+    with pytest.raises(ValueError, match="after until"):
+        flow.style_rule_set(str(project), rule_id="x", rule="X.", since="chapter_02",
+                            until="chapter_01")
+
+    assert flow.style_rule_remove(str(project), rule_id="late-register")["removed"]
+    assert [r["id"] for r in flow.style_rule_list(str(project))["rules"]] == ["plain"]
+
+
 def test_glossary_commit_flags_keys_the_source_never_uses(project: Path):
     """A key no chunk would ship is a REVIEW line; an alias the source uses clears it."""
     (project / "source.txt").write_text(

@@ -244,16 +244,7 @@ def set_book_override(
 
     Keeps the sidecar's other entries and its top-level shape as they were.
     """
-    path = Path(project_dir) / STYLE_RULES_FILENAME
-    doc: Any = {"rules": []}
-    if path.exists():
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise ValueError(f"{path} is unreadable ({exc}); fix it before overriding a rule") from exc
-    rules = doc.get("rules") if isinstance(doc, dict) else doc
-    if not isinstance(rules, list):
-        raise ValueError(f"{path}: expected a 'rules' list")
+    path, doc, rules = _sidecar_doc(project_dir)
     present = [r for r in rules if isinstance(r, dict) and r.get("off") and r.get("id") == rule_id]
     if off and present:
         return False
@@ -266,10 +257,61 @@ def set_book_override(
         rules.append(entry)
     else:
         rules[:] = [r for r in rules if r not in present]
-    if isinstance(doc, list):
+    _write_sidecar_doc(path, doc, rules)
+    return True
+
+
+def save_book_rule(project_dir: Path, rule: dict[str, Any]) -> bool:
+    """Add or replace (by ``id``) one of the book's own sidecar rules.
+
+    Returns whether it replaced one. An ``off`` override with the same id is a
+    different entry and is left alone. Keeps the sidecar's other entries and
+    top-level shape as they were.
+    """
+    rule_id = str(rule.get("id") or "").strip()
+    if not rule_id:
+        raise ValueError("a book rule needs an id")
+    path, doc, rules = _sidecar_doc(project_dir)
+    at = next((i for i, r in enumerate(rules)
+               if isinstance(r, dict) and not r.get("off") and r.get("id") == rule_id), None)
+    if at is None:
+        rules.append(rule)
+    else:
+        rules[at] = rule
+    _write_sidecar_doc(path, doc, rules)
+    return at is not None
+
+
+def remove_book_rule(project_dir: Path, rule_id: str) -> bool:
+    """Drop one of the book's own sidecar rules. Returns whether it was there."""
+    path, doc, rules = _sidecar_doc(project_dir)
+    kept = [r for r in rules if not (isinstance(r, dict) and not r.get("off") and r.get("id") == rule_id)]
+    if len(kept) == len(rules):
+        return False
+    _write_sidecar_doc(path, doc, kept)
+    return True
+
+
+def _sidecar_doc(project_dir: Path) -> tuple[Path, Any, list]:
+    path = Path(project_dir) / STYLE_RULES_FILENAME
+    doc: Any = {"rules": []}
+    if path.exists():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError(f"{path} is unreadable ({exc}); fix it before changing its rules") from exc
+    rules = doc.get("rules") if isinstance(doc, dict) else doc
+    if not isinstance(rules, list):
+        raise ValueError(f"{path}: expected a 'rules' list")
+    return path, doc, rules
+
+
+def _write_sidecar_doc(path: Path, doc: Any, rules: list) -> None:
+    if isinstance(doc, dict):
+        doc["rules"] = rules
+    else:
         doc = {"rules": rules}
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return True
 
 
 def house_rules_for_book(project_dir: Optional[Path]) -> list[dict[str, Any]]:

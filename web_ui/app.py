@@ -1012,6 +1012,51 @@ def setupsave_glossary(project_id):
                         "unmatched": _unmatched_glossary_keys(project_dir, glossary)})
 
 
+@app.route("/api/setup/<project_id>/style-rules", methods=["GET"])
+def setup_list_style_rules(project_id):
+    """The book's own rules (style_rules.json) and its chapters, for the scoped-notes list."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    from src.harness import flow
+
+    return jsonify(flow.style_rule_list(str(_resolve_project_dir(project_id))))
+
+
+@app.route("/api/setup/<project_id>/style-rules", methods=["POST"])
+def setup_save_style_rule(project_id):
+    """Add or replace one book rule; a chapter window or triggers send it to the translator."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    from src.harness import flow
+
+    data = request.get_json() or {}
+    triggers = data.get("triggers") or []
+    if isinstance(triggers, str):
+        triggers = [t.strip() for t in triggers.split(",")]
+    try:
+        out = flow.style_rule_set(
+            str(_resolve_project_dir(project_id)),
+            rule_id=str(data.get("id") or ""), rule=str(data.get("rule") or ""),
+            note=data.get("note") or None, since=data.get("since") or None,
+            until=data.get("until") or None, triggers=[t for t in triggers if t],
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(out)
+
+
+@app.route("/api/setup/<project_id>/style-rules/<rule_id>", methods=["DELETE"])
+def setup_remove_style_rule(project_id, rule_id):
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    from src.harness import flow
+
+    try:
+        return jsonify(flow.style_rule_remove(str(_resolve_project_dir(project_id)), rule_id=rule_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 def _unmatched_glossary_keys(project_dir: Path, glossary) -> list[str]:
     """Keys no chunk of the source would ship, for the save status line."""
     from src.house import read_source

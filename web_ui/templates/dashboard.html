@@ -337,6 +337,31 @@
                 <div id="address-map-view"></div>
             </div>
 
+            <!-- The book's own rules (style_rules.json). One with a chapter window
+                 or triggers reaches the translator only in the chunks it covers,
+                 after the glossary, so the cached style guide never changes. -->
+            <div class="scoped-rules-section" style="margin-top:20px;">
+                <h3 style="margin:0 0 4px 0; font-size:14px;">Chapter-scoped Notes</h3>
+                <p class="section-hint" style="margin:0 0 8px 0;">An instruction for part of the book only. The translator gets it only in the chapters you pick (or where a trigger word appears); every rule here is also shown to the judges. Leave both chapters empty and no triggers for a judge-only rule.</p>
+                <div id="scoped-rules-view"></div>
+                <div class="scoped-rule-form" style="display:grid; grid-template-columns:max-content 1fr; gap:6px 8px; align-items:center; margin-top:8px; max-width:720px;">
+                    <label for="scoped-rule-id">Id</label>
+                    <input type="text" id="scoped-rule-id" placeholder="grown-register">
+                    <label for="scoped-rule-text">Rule</label>
+                    <input type="text" id="scoped-rule-text" placeholder="Bambi now speaks as a grown stag: no diminutives.">
+                    <label for="scoped-rule-since">From</label>
+                    <select id="scoped-rule-since"></select>
+                    <label for="scoped-rule-until">Through</label>
+                    <select id="scoped-rule-until"></select>
+                    <label for="scoped-rule-triggers">Triggers</label>
+                    <input type="text" id="scoped-rule-triggers" placeholder="optional, comma-separated English words">
+                </div>
+                <div class="btn-row" style="margin-top:8px;">
+                    <button class="btn-save" id="btn-save-scoped-rule">Add / replace</button>
+                    <span class="status-msg" id="scoped-rule-status"></span>
+                </div>
+            </div>
+
             <div id="style-guide-wizard">
                 <!-- LLM model selector (shared across style guide steps) -->
                 <div class="llm-selector-row" style="margin-bottom:16px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">

@@ -99,6 +99,19 @@ def chapter_labels(project_dir: Optional[Path]) -> dict[str, str]:
     return labels
 
 
+def book_chapter_ids(project_dir: Path) -> list[str]:
+    """Every chapter id of the book, front and back matter included, in order."""
+    path = Path(project_dir) / "project.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8")).get("chapter_manifest") or []
+        ids = [str(e["id"]) for e in manifest if isinstance(e, dict) and e.get("id")]
+    except (OSError, json.JSONDecodeError, AttributeError, KeyError):
+        ids = []
+    if not ids:
+        ids = [p.stem for p in (Path(project_dir) / "chapters").glob("chapter_*.txt")]
+    return sorted(dict.fromkeys(ids), key=chapter_key)
+
+
 def window_text(since: Optional[str], until: Optional[str], labels: dict[str, str]) -> str:
     """"chapter_13 (Chapter 12) onward", "through chapter_03", "chapter_05 to chapter_09"."""
 

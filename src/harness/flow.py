@@ -454,6 +454,91 @@ def setup(
     }
 
 
+# ── chapter-scoped book rules ──────────────────────────────────────────────
+
+def style_rule_list(project: str) -> dict:
+    """The book's own rules (style_rules.json), with what each reaches."""
+    from src.house.scope import book_chapter_ids, chapter_labels
+    from src.judges.context import load_book_rules
+
+    project_dir = state.resolve_project_dir(project)
+    labels = chapter_labels(project_dir)
+    return {
+        "rules": [_describe_book_rule(project_dir, r, labels) for r in load_book_rules(project_dir)],
+        "chapters": [{"id": c, "label": labels.get(c, "")} for c in book_chapter_ids(project_dir)],
+    }
+
+
+def style_rule_set(project: str, *, rule_id: str, rule: str, note: str | None = None,
+                   since: str | None = None, until: str | None = None,
+                   triggers: list[str] | None = None) -> dict:
+    """Add or replace a book rule. A window or triggers sends it to the translator.
+
+    ``since`` / ``until`` are chapter ids (``chapter_13``), the split's file ids,
+    which is not the book's numbering when it has front matter: ``style-rule
+    list`` prints both.
+    """
+    from src.house.scope import book_chapter_ids, chapter_labels, window_problems
+    from src.judges.context import save_book_rule
+
+    project_dir = state.resolve_project_dir(project)
+    entry: dict = {"id": rule_id.strip(), "rule": rule.strip()}
+    if note and note.strip():
+        entry["note"] = note.strip()
+    if since:
+        entry["since"] = since.strip()
+    if until:
+        entry["until"] = until.strip()
+    if triggers:
+        entry["triggers"] = [t for t in (s.strip() for s in triggers) if t]
+    if not entry["id"] or not entry["rule"]:
+        raise ValueError("a rule needs an id and its text")
+    problems = window_problems([entry], book_chapter_ids(project_dir))
+    if problems:
+        raise ValueError("; ".join(problems))
+    replaced = save_book_rule(project_dir, entry)
+    described = _describe_book_rule(project_dir, entry, chapter_labels(project_dir))
+    warnings = []
+    if described["to_translator"] and described["chunks"] == 0:
+        warnings.append(f"rule {entry['id']!r} reaches no chunk yet (no chunks, or none in its window "
+                        "and triggers)")
+    return {"rule": described, "replaced": replaced, "warnings": warnings}
+
+
+def style_rule_remove(project: str, *, rule_id: str) -> dict:
+    from src.judges.context import remove_book_rule
+
+    project_dir = state.resolve_project_dir(project)
+    return {"removed": remove_book_rule(project_dir, rule_id), "id": rule_id}
+
+
+def _describe_book_rule(project_dir: Path, rule: dict, labels: dict) -> dict:
+    """The rule, its window in the book's labels, and how many chunks it reaches."""
+    from src.house.match import any_trigger
+    from src.house.scope import has_window, rule_in_scope, rule_window, window_text
+    from src.judges.context import rule_triggers
+    from src.utils.file_io import load_chunk
+
+    to_translator = has_window(rule) or bool(rule_triggers(rule))
+    reached = 0
+    if to_translator:
+        for path in sorted((project_dir / "chunks").glob("*.json")):
+            try:
+                chunk = load_chunk(path)
+            except Exception:  # noqa: BLE001 - a broken chunk just is not counted
+                continue
+            if rule_in_scope(rule, chunk.chapter_id) and (
+                not rule_triggers(rule) or any_trigger(rule_triggers(rule), chunk.source_text)
+            ):
+                reached += 1
+    return {
+        **rule,
+        "window": window_text(*rule_window(rule), labels),
+        "to_translator": to_translator,
+        "chunks": reached if to_translator else None,
+    }
+
+
 # ── book groups and precedent ──────────────────────────────────────────────
 
 def group_list(project: str | None = None) -> dict:
