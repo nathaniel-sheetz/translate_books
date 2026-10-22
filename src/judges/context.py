@@ -536,8 +536,8 @@ def build_judge_context(
     Loads the per-project inputs judges read from disk so the API, subagent and
     dashboard paths render byte-identical prompts:
       * ``style_json_path`` — for judges that use the style guide.
-      * ``address_map`` — the ``content`` prose of ``address_map.json`` for the
-        forms-of-address judge.
+      * ``address_map`` — ``address_map.json`` rendered for the forms-of-address
+        judge: prose ``content``, ``global_rules`` and one line per pair direction.
       * ``style_guide`` / ``style_rules`` / ``glossary`` /
         ``calibration_examples`` / ``coded_findings`` — for the editorial judge.
         Loaded only when it is in ``judge_names``: the glossary and the coded
@@ -564,10 +564,12 @@ def build_judge_context(
         try:
             from src.utils.file_io import load_address_map
 
+            from src.judges.address_judge import render_address_map
+
             amap = load_address_map(map_path)
-            # v1 the judge reads the prose ``content``; fall back to global_rules
-            # if a committed map left content empty.
-            prose = (amap.content or "").strip() or (amap.global_rules or "").strip()
+            # Prose, global rules and every pair: the prose alone is a summary
+            # and need not name the pairs the judge has to check against.
+            prose = render_address_map(amap)
             if prose:
                 context["address_map"] = prose
                 address_map_loaded = True

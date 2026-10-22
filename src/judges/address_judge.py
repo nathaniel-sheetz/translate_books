@@ -22,7 +22,7 @@ from src.judges import llm_io
 from src.judges.base import JudgeSpec, JudgeTarget, VerdictJudge
 from src.judges.llm_io import JudgeParseError
 from src.judges.scoring import compliance_score, finding_to_issue, is_nonissue
-from src.models import EvalResult, Issue, IssueLevel
+from src.models import AddressMap, AddressRule, EvalResult, Issue, IssueLevel
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,60 @@ _NO_MAP_PLACEHOLDER = (
     "(no address map was provided — you cannot check explicit pair expectations; "
     "flag only unambiguous global-rule violations, if any, else return compliant.)"
 )
+
+
+_PAIRS_HEADER = (
+    "PAIRS (each direction is independent and overrides the global rules, "
+    "including at first meeting and over adult-to-child tú; within a direction "
+    "the first rule whose condition and chapter window fit the scene wins, else "
+    "the default rule):"
+)
+
+
+def _render_rule(rule: AddressRule) -> str:
+    """One rule as ``form [condition, window] — notes``."""
+    cond = ["default" if rule.when == "default" else rule.when]
+    if rule.since:
+        cond.append(f"from {rule.since}")
+    if rule.until:
+        cond.append(f"through {rule.until}")
+    if rule.after_event:
+        cond.append(f"after: {rule.after_event}")
+    text = f"{rule.form} [{', '.join(cond)}]"
+    if rule.notes:
+        text += f" — {rule.notes.strip()}"
+    return text
+
+
+def render_address_map(amap: AddressMap) -> str:
+    """The text of ``address_map.json`` a judge reads: prose, global rules, pairs.
+
+    ``content`` alone is a summary and need not name every pair, so the judge
+    also gets the global rules and one line per pair direction. Without them a
+    pair such as a servant's usted to a child is invisible and the judge falls
+    back to the summary's adult-to-child tú.
+    """
+    parts: list[str] = []
+    content = (amap.content or "").strip()
+    if content:
+        parts.append(content)
+    global_rules = (amap.global_rules or "").strip()
+    if global_rules:
+        parts.append(
+            "GLOBAL RULES (use only when no pair below names both the speaker "
+            "and the addressee):\n" + global_rules
+        )
+    lines: list[str] = []
+    for pair in amap.pairs:
+        rel = f" ({pair.relationship.strip()})" if pair.relationship else ""
+        for key, speaker, addressee in (("a_to_b", pair.a, pair.b), ("b_to_a", pair.b, pair.a)):
+            rules = pair.directions.get(key) or []
+            if rules:
+                rendered = "; ".join(_render_rule(r) for r in rules)
+                lines.append(f"- {speaker} → {addressee}{rel}: {rendered}")
+    if lines:
+        parts.append(_PAIRS_HEADER + "\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _load_default_rubric() -> str:
@@ -56,7 +110,7 @@ class AddressComplianceJudge(VerdictJudge):
 
     spec = JudgeSpec(
         name="address",
-        version="1.1.0",
+        version="1.2.0",
         kind="verdict",
         template="judge_address.txt",
         required_inputs=("source", "translation", "address_map", "address_rubric"),
@@ -76,8 +130,9 @@ class AddressComplianceJudge(VerdictJudge):
         Context keys consumed (all optional):
             ``address_rubric`` (str): methodology override; defaults to
                 ``prompts/address_forms.txt``.
-            ``address_map`` (str): the book's expectations prose (the ``content``
-                field of ``address_map.json``); a placeholder is used if absent.
+            ``address_map`` (str): the book's map as :func:`render_address_map`
+                renders it (prose, global rules, pairs); a placeholder is used
+                if absent.
         """
         rubric: Optional[str] = context.get("address_rubric")
         if not rubric:
