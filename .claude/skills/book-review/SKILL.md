@@ -77,7 +77,8 @@ object with a `_schema` block.
 
 2. **`judge --estimate`.** Relay one consent block: the judges and owed chapters
    (`plan`), pass 1 jobs and tokens (`pass1`), the pass 2 ceiling
-   (`adjudication`), and `effective` (CLI, model, effort). If it returns an error
+   (`adjudication`), `effective` (CLI, model, effort) and `concurrency` (parallel
+   processes for both passes, 5 unless the user asked for `--concurrency N`). If it returns an error
    (another wave holds the lock, the CLI is not logged in), relay it and stop.
    **END your turn.**
 

@@ -32,7 +32,7 @@ Each subcommand prints one JSON object with a ``_schema`` block:
 
     python scripts/book_review.py status  --project pollyanna
     python scripts/book_review.py judge   --project pollyanna --estimate
-    python scripts/book_review.py judge   --project pollyanna --yes
+    python scripts/book_review.py judge   --project pollyanna --yes --concurrency 10
     python scripts/book_review.py signals --project pollyanna
 
 Only `apply --yes` edits the book (glossary, style guide, address map); nothing
@@ -94,6 +94,8 @@ _JUDGE_SCHEMA = {
     "plan": "{judges, address_map, owed: {judge: [chapter ids]}, owed_chunks, "
     "pending_pass2_chunks, nothing_to_do}",
     "effective": "the profile the wave runs under (cli, worker_model, effort, ...) with provenance",
+    "concurrency": "--estimate only: parallel CLI processes both passes will run (--concurrency, "
+    "default 5)",
     "pass1": "--estimate only: {jobs, prompt_tokens, projected_tokens, output_tokens, "
     "baseline_tokens, ...} for the judge wave",
     "adjudication": "--estimate only: editorial pass 2 ceiling {jobs_max, tokens_max, "
@@ -189,7 +191,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 def _cmd_judge(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     options = dict(judges=args.judge, cli=args.cli, worker_model=args.worker_model,
-                   effort=args.effort, cache=args.prompt_cache)
+                   effort=args.effort, cache=args.prompt_cache, concurrency=args.concurrency)
     if args.yes:
         out = judging.run(project_dir, **options)
         out["instructions"] = "Run `signals` next to read the new findings."
@@ -289,7 +291,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     prep = synthesize.prepare(project_dir, **_profile_kwargs(args))
     if prep.get("status") == "error" or not prep.get("jobs"):
         return _print(prep)
-    fan = synthesize.fanout(project_dir)
+    fan = synthesize.fanout(project_dir, **({"concurrency": args.concurrency}
+                                            if args.concurrency else {}))
     if fan.get("error"):
         return _print({"status": "error", "error": fan["error"], "fanout": fan})
     out = synthesize.commit(project_dir)
@@ -460,7 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
                            default=None, help="default: headless_effort_book_review")
         if name in ("prepare", "run"):
             p.add_argument("--worker-model", default=None, help="pin the synthesis model")
-        if name == "fanout":
+        if name in ("fanout", "run"):
             p.add_argument("--concurrency", type=int, default=None, help="parallel CLI processes")
         if name == "run":
             p.add_argument("--yes", action="store_true", help="confirm the subscription spend")
@@ -501,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
                        default=None, help="default: headless_effort_judges")
     judge.add_argument("--prompt-cache", dest="prompt_cache", default=None,
                        choices=["auto", "5m", "1h", "off"], help="Claude prompt-cache TTL")
+    judge.add_argument("--concurrency", type=int, default=None,
+                       help="parallel CLI processes for both passes (default 5)")
     return parser
 
 

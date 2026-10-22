@@ -24,6 +24,8 @@ from typing import Any, Callable, Optional
 #: Judge order inside one wave. Address only runs when the book has a map.
 SWEEP_JUDGES: tuple[str, ...] = ("dialogue", "address", "editorial")
 LOCK_KIND = "book-review-judges"
+#: Wave width when none is passed: what both judge manifests default to.
+DEFAULT_CONCURRENCY = 5
 
 
 def _chunks_per_chapter(project_dir: Path) -> dict[str, int]:
@@ -95,9 +97,15 @@ def _context(project_dir: Path, names: list[str]):
     return build_judge_context(project_dir, names, None, None)
 
 
+def _bad_concurrency(concurrency: Optional[int]) -> Optional[str]:
+    if concurrency is not None and concurrency < 1:
+        return f"concurrency must be at least 1, got {concurrency}"
+    return None
+
+
 def estimate(
     project_dir: Path, *, judges: Optional[list[str]] = None, cli=None, worker_model=None,
-    effort=None, cache: Optional[str] = None,
+    effort=None, cache: Optional[str] = None, concurrency: Optional[int] = None,
 ) -> dict[str, Any]:
     """Prepare the sweep and project its tokens. Spawns nothing."""
     from src.judges import editorial_wave as wave
@@ -106,7 +114,11 @@ def estimate(
     project_dir = Path(project_dir)
     p = plan(project_dir, judges=judges)
     prof = _profile(project_dir, cli, worker_model, effort)
-    out: dict[str, Any] = {"plan": p, "effective": prof.to_payload()}
+    out: dict[str, Any] = {"plan": p, "effective": prof.to_payload(),
+                           "concurrency": concurrency or DEFAULT_CONCURRENCY}
+    bad = _bad_concurrency(concurrency)
+    if bad:
+        return {**out, "status": "error", "error": bad}
     if p["nothing_to_do"]:
         return {**out, "status": "ok", "jobs": 0}
     blocked = _gate(project_dir, prof)
@@ -157,11 +169,19 @@ def _stderr_emit(event: str, **fields: Any) -> None:
 def run(
     project_dir: Path, *, judges: Optional[list[str]] = None, cli=None, worker_model=None,
     effort=None, cache: Optional[str] = None, emit: Callable[..., None] = _stderr_emit,
+    concurrency: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Run the sweep under the book's lock. Spends subscription tokens."""
+    """Run the sweep under the book's lock. Spends subscription tokens.
+
+    ``concurrency`` is the width of both waves (pass 1 and editorial pass 2);
+    ``None`` keeps :data:`DEFAULT_CONCURRENCY`.
+    """
     from src.harness import locks
     from src.judges import sweep
 
+    bad = _bad_concurrency(concurrency)
+    if bad:
+        return {"status": "error", "error": bad}
     project_dir = Path(project_dir)
     p = plan(project_dir, judges=judges)
     prof = _profile(project_dir, cli, worker_model, effort)
@@ -183,7 +203,7 @@ def run(
                 project_dir, names, scopes_for(p["owed"]), emit,
                 context=context, cli=cli, worker_model=worker_model, effort=effort,
                 prompt_cache=cache, default_cli=prof.cli,
-                adjudicate_scopes=["book"],
+                adjudicate_scopes=["book"], concurrency=concurrency,
             )
         # The sweep adjudicates only when editorial is among the judges it ran; pass 2
         # can still be owed (and was quoted) when editorial itself is current.
@@ -194,7 +214,7 @@ def run(
             adjudication, errors = sweep.adjudicate_editorial(
                 project_dir, ["book"], emit, backend="headless", context=context,
                 cli=cli, worker_model=worker_model, effort=effort,
-                prompt_cache=cache or "auto",
+                prompt_cache=cache or "auto", concurrency=concurrency,
             )
             summary = {**summary, "adjudication": adjudication,
                        "error_count": (summary.get("error_count") or 0) + len(errors),

@@ -22,7 +22,7 @@ Emit = Callable[..., None]
 
 def adjudicate_editorial(
     project_dir, scopes, emit, *, backend, context,
-    cli=None, worker_model=None, effort=None, prompt_cache="auto",
+    cli=None, worker_model=None, effort=None, prompt_cache="auto", concurrency=None,
 ):
     """Pass 2 of the editorial judge, run inline after pass 1 in the same job.
 
@@ -43,6 +43,9 @@ def adjudicate_editorial(
     and a failure to second-guess them is not a reason to report the whole wave
     as stopped; the caller folds ``errors`` into the job summary and the Review
     tab's banner offers the retry. Returns ``(summary, errors)``.
+
+    ``concurrency`` widens the headless wave; ``None`` keeps the manifest's
+    ``batch_size``. The API backend ignores it.
     """
     from src.judges import editorial_wave as wave
 
@@ -107,6 +110,7 @@ def adjudicate_editorial(
         out = wave.fanout(
             project_dir,
             cache=prompt_cache,
+            concurrency=concurrency,
             on_job_done=lambda rec: emit(
                 "target_done",
                 target_id=rec.get("id"),
@@ -159,13 +163,15 @@ def run_headless_sweep(
     default_cli: Optional[str] = None,
     total_hint: int = 0,
     adjudicate_scopes: Any = None,
+    concurrency: Optional[int] = None,
 ) -> dict[str, Any]:
     """``prepare`` -> ``fanout`` -> ``commit(persist)`` -> editorial pass 2.
 
     ``scopes`` is anything :func:`src.judges.subagent.prepare` accepts,
     including a ``{judge: [scope, ...]}`` mapping. Pass 2 runs over
     ``adjudicate_scopes`` (default: ``scopes``) whenever ``editorial`` is in
-    ``judge_names``.
+    ``judge_names``. ``concurrency`` is the width of both waves; ``None`` keeps
+    each manifest's ``batch_size``.
 
     Returns the job summary: ``ran``, ``total``, ``wrote``, ``failed``,
     ``missing``, ``adjudication``, ``error_count``, ``errors``, ``usage``,
@@ -189,6 +195,7 @@ def run_headless_sweep(
     out = subagent.fanout(
         project_dir,
         cache=prompt_cache,
+        concurrency=concurrency,
         on_job_done=lambda rec: emit(
             "target_done",
             target_id=rec.get("id"),
@@ -238,7 +245,7 @@ def run_headless_sweep(
             project_dir, adjudicate_scopes if adjudicate_scopes is not None else scopes,
             emit, backend="headless", context=context,
             cli=cli, worker_model=worker_model, effort=effort,
-            prompt_cache=prompt_cache or "auto",
+            prompt_cache=prompt_cache or "auto", concurrency=concurrency,
         )
         errors += adj_errors
 
