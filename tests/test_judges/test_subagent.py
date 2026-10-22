@@ -199,6 +199,25 @@ def test_prepare_keep_drafts_preserves_existing(tmp_path):
     assert draft.read_text(encoding="utf-8") == _GOOD_VERDICT
 
 
+def test_prepare_if_unchanged_resumes_only_drafts_whose_prompt_holds(tmp_path):
+    """A sweep cut off part-way re-prepares without losing what landed, and
+    without keeping a verdict on prose that has since changed."""
+    project, cid = _project_with_chunk(tmp_path)
+    subagent.prepare(project, ["dialogue"], f"chunk:{cid}")
+    draft = tmp_path / ".harness" / "judges" / f"{cid}.dialogue.draft.json"
+    draft.write_text(_GOOD_VERDICT, encoding="utf-8")
+
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}", keep_drafts="if_unchanged")
+    assert draft.read_text(encoding="utf-8") == _GOOD_VERDICT
+    assert out["resumed_drafts"] == 1
+
+    save_chunk(_chunk(cid, "chapter_01", 0, translated="—Adiós."),
+               tmp_path / "chunks" / f"{cid}.json")
+    out = subagent.prepare(project, ["dialogue"], f"chunk:{cid}", keep_drafts="if_unchanged")
+    assert not draft.exists()
+    assert out["resumed_drafts"] == 0
+
+
 # ---------------------------------------------------------------------------
 # commit
 # ---------------------------------------------------------------------------

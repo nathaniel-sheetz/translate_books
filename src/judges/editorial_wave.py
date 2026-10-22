@@ -40,6 +40,7 @@ from src.harness.usage import (
 from src.judges import editorial_verify as ev
 from src.judges import llm_io
 from src.judges.context import build_judge_context
+from src.judges.subagent import _same_text
 from src.judges.scope import ScopeError, build_targets
 
 logger = logging.getLogger(__name__)
@@ -577,7 +578,7 @@ def prepare(
     worker_model: Optional[str] = None,
     effort: Optional[str] = None,
     force: bool = False,
-    keep_drafts: bool = False,
+    keep_drafts: bool | str = False,
     quiet: bool = False,
     source: str = "requested",
 ) -> dict[str, Any]:
@@ -589,7 +590,9 @@ def prepare(
     approved at all, on no number: ``prepare`` returned paths and candidate
     counts and nothing about what answering them costs.
 
-    Destructive: it clears the drafts it re-renders unless ``keep_drafts``.
+    Destructive: it clears the drafts it re-renders unless ``keep_drafts``;
+    ``keep_drafts="if_unchanged"`` keeps only a draft whose prompt is
+    byte-identical to the one rendered now (a resume after a cut-off wave).
     """
     from src.harness import state as hstate
     from src.harness.profile import resolve_profile
@@ -618,6 +621,7 @@ def prepare(
 
     entries = []
     prompt_tokens = 0
+    resumed_drafts = 0
     api_cost = 0.0
     preamble_path = directory / "preamble.txt"
     wrote_preamble = False
@@ -629,6 +633,9 @@ def prepare(
         body_path = directory / f"{chunk_id}.verify.body.txt"
         draft_path = directory / f"{chunk_id}.verify.draft.json"
 
+        keep = bool(keep_drafts)
+        if keep_drafts == "if_unchanged":
+            keep = _same_text(prompt_path, prefix + suffix)
         prompt_path.write_text(prefix + suffix, encoding="utf-8")
         # What a worker actually receives, and what the same call would cost
         # metered. Both come off the parts already in hand: ``prefix + suffix``
@@ -646,8 +653,10 @@ def prepare(
                 preamble_path.write_text(prefix, encoding="utf-8")
                 wrote_preamble = True
             body_path.write_text(suffix, encoding="utf-8")
-        if not keep_drafts and draft_path.exists():
+        if not keep and draft_path.exists():
             draft_path.unlink()
+        elif keep and draft_path.exists():
+            resumed_drafts += 1
 
         entries.append(
             {
@@ -698,6 +707,7 @@ def prepare(
         "command": "prepare",
         "project": project_dir.name,
         "counts": totals,
+        "resumed_drafts": resumed_drafts,
         "skipped_count": len(skipped),
         "manifest": str(directory / "manifest.json"),
         "effective": effective,

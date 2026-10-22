@@ -23,6 +23,7 @@ Emit = Callable[..., None]
 def adjudicate_editorial(
     project_dir, scopes, emit, *, backend, context,
     cli=None, worker_model=None, effort=None, prompt_cache="auto", concurrency=None,
+    keep_drafts=False,
 ):
     """Pass 2 of the editorial judge, run inline after pass 1 in the same job.
 
@@ -45,7 +46,8 @@ def adjudicate_editorial(
     tab's banner offers the retry. Returns ``(summary, errors)``.
 
     ``concurrency`` widens the headless wave; ``None`` keeps the manifest's
-    ``batch_size``. The API backend ignores it.
+    ``batch_size``. ``keep_drafts`` is handed to ``prepare`` (``"if_unchanged"``
+    resumes a cut-off wave). The API backend ignores both.
     """
     from src.judges import editorial_wave as wave
 
@@ -93,6 +95,7 @@ def adjudicate_editorial(
         prep = wave.prepare(
             project_dir, scopes, context=context,
             cli=cli, worker_model=worker_model, effort=effort, quiet=True,
+            keep_drafts=keep_drafts,
         )
         if prep.get("status") == "error":
             errors.append(f"adjudication: {prep.get('error')}")
@@ -103,9 +106,13 @@ def adjudicate_editorial(
             # not a failure, and it costs no wave.
             return summary(), errors
 
+        resumed = prep.get("resumed_drafts") or 0
         emit(
             "phase", phase="adjudicate",
-            message=f"Adjudicating {chunks} chunk(s)…", total=chunks,
+            message=f"Adjudicating {chunks} chunk(s)"
+            + (f", {resumed} already drafted" if resumed else "")
+            + (f", {concurrency} at a time" if concurrency else "") + "…",
+            total=chunks,
         )
         out = wave.fanout(
             project_dir,
@@ -164,6 +171,7 @@ def run_headless_sweep(
     total_hint: int = 0,
     adjudicate_scopes: Any = None,
     concurrency: Optional[int] = None,
+    keep_drafts: Any = False,
 ) -> dict[str, Any]:
     """``prepare`` -> ``fanout`` -> ``commit(persist)`` -> editorial pass 2.
 
@@ -171,7 +179,8 @@ def run_headless_sweep(
     including a ``{judge: [scope, ...]}`` mapping. Pass 2 runs over
     ``adjudicate_scopes`` (default: ``scopes``) whenever ``editorial`` is in
     ``judge_names``. ``concurrency`` is the width of both waves; ``None`` keeps
-    each manifest's ``batch_size``.
+    each manifest's ``batch_size``. ``keep_drafts`` reaches both ``prepare``
+    calls; ``"if_unchanged"`` lets a re-run resume a sweep that was cut off.
 
     Returns the job summary: ``ran``, ``total``, ``wrote``, ``failed``,
     ``missing``, ``adjudication``, ``error_count``, ``errors``, ``usage``,
@@ -185,12 +194,16 @@ def run_headless_sweep(
     # wave runs from is this request's, not whatever an estimate left behind.
     prep = subagent.prepare(
         project_dir, judge_names, scopes, context=context,
-        cli=cli, worker_model=worker_model, effort=effort,
+        cli=cli, worker_model=worker_model, effort=effort, keep_drafts=keep_drafts,
     )
     entries = len(prep.get("manifest") or [])
+    resumed = prep.get("resumed_drafts") or 0
     emit(
         "phase", phase="fanout",
-        message=f"Running {entries} CLI job(s)…", total=entries,
+        message=f"Running {entries - resumed} CLI job(s)"
+        + (f" ({resumed} resumed from drafts)" if resumed else "")
+        + (f", {concurrency} at a time" if concurrency else "") + "…",
+        total=entries,
     )
     out = subagent.fanout(
         project_dir,
@@ -246,6 +259,7 @@ def run_headless_sweep(
             emit, backend="headless", context=context,
             cli=cli, worker_model=worker_model, effort=effort,
             prompt_cache=prompt_cache or "auto", concurrency=concurrency,
+            keep_drafts=keep_drafts,
         )
         errors += adj_errors
 
@@ -253,6 +267,7 @@ def run_headless_sweep(
         "ran": counts.get("committed", 0),
         "total": entries or total_hint,
         "wrote": len(out.get("wrote") or []),
+        "resumed": resumed,
         "failed": len(out.get("failed") or []),
         "missing": len(missing),
         "adjudication": adjudication,

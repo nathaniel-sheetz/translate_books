@@ -1236,3 +1236,20 @@ def test_commit_lands_the_other_drafts_when_one_chunk_has_vanished(project, caps
     assert out["committed"] == 2
     assert out["failed"] == []
     assert sorted(r["chunk_id"] for r in out["results"]) == sorted([CHUNK_ID, second])
+
+
+def test_prepare_if_unchanged_keeps_a_draft_only_while_its_prompt_holds(project):
+    """A cut-off pass 2 resumes; a draft answering an older prompt is cleared."""
+    from src.judges import editorial_wave
+
+    _persist_pass_one(project, [_candidate()])
+    editorial_wave.prepare(project, ["book"], quiet=True)
+    draft = project / ".harness" / "editorial" / f"{CHUNK_ID}.verify.draft.json"
+    draft.write_text("{}", encoding="utf-8")
+
+    out = editorial_wave.prepare(project, ["book"], quiet=True, keep_drafts="if_unchanged")
+    assert draft.exists() and out["resumed_drafts"] == 1
+
+    _persist_pass_one(project, [_candidate(message="A different proposal.")])
+    out = editorial_wave.prepare(project, ["book"], quiet=True, keep_drafts="if_unchanged")
+    assert not draft.exists() and out["resumed_drafts"] == 0

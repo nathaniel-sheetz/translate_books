@@ -715,3 +715,22 @@ def test_resolve_headless_argv_mistyped_config_falls_through():
     )
     assert level == "high" and src == "default:translate"
     assert argv == ["--effort", "high"]
+
+
+def test_wall_stats_narrows_to_the_model_once_it_has_enough_rows(tmp_path: Path):
+    log = tmp_path / "usage.jsonl"
+    assert usage.wall_stats(log, cli="cursor") is None
+    for wall in (100.0, 120.0, 140.0):
+        usage.append_usage(log, {"rc": 0, "cli": "cursor", "model": "fast", "wall_s": wall})
+    for wall in (400.0, 450.0, 500.0, 550.0, 900.0):
+        usage.append_usage(log, {"rc": 0, "cli": "cursor", "model": "slow", "wall_s": wall})
+    usage.append_usage(log, {"rc": 1, "cli": "cursor", "model": "slow", "wall_s": 5000.0})
+    usage.append_usage(log, {"rc": 0, "cli": "claude", "model": "slow", "wall_s": 10.0})
+
+    slow = usage.wall_stats(log, cli="cursor", model="slow")
+    assert slow["median_s"] == 500.0 and slow["p90_s"] == 900.0 and slow["n"] == 5
+    assert "cursor/slow" in slow["source"]
+
+    # Three rows is too few to trust: widen to the CLI and say so.
+    fast = usage.wall_stats(log, cli="cursor", model="fast")
+    assert fast["n"] == 8 and "only 3 logged fast jobs" in fast["source"]

@@ -95,12 +95,17 @@ _JUDGE_SCHEMA = {
     "pending_pass2_chunks, nothing_to_do}",
     "effective": "the profile the wave runs under (cli, worker_model, effort, ...) with provenance",
     "concurrency": "--estimate only: parallel CLI processes both passes will run (--concurrency, "
-    "default 5)",
+    "default 10)",
+    "concurrency_source": "--estimate only: '--concurrency' or 'default'",
+    "wall": "--estimate only: {pass1_s, pass2_max_s, total_s, per_judge_s, median_job_s, "
+    "p90_job_s, source, background_cap_s, fits_background_cap} projected from logged job "
+    "walls at this width; null when no job of this CLI has been logged",
     "pass1": "--estimate only: {jobs, prompt_tokens, projected_tokens, output_tokens, "
-    "baseline_tokens, ...} for the judge wave",
+    "baseline_tokens, resumed_drafts, ...} for the judge wave; jobs excludes drafts kept "
+    "from a cut-off sweep",
     "adjudication": "--estimate only: editorial pass 2 ceiling {jobs_max, tokens_max, "
     "baseline_tokens, baseline_source}; pass 2 cannot be measured before pass 1 runs",
-    "summary": "--yes only: {ran, total, wrote, failed, missing, adjudication, error_count, "
+    "summary": "--yes only: {ran, total, wrote, resumed, failed, missing, adjudication, error_count, "
     "errors, usage, effective}",
     "instructions": "next step",
 }
@@ -505,7 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
     judge.add_argument("--prompt-cache", dest="prompt_cache", default=None,
                        choices=["auto", "5m", "1h", "off"], help="Claude prompt-cache TTL")
     judge.add_argument("--concurrency", type=int, default=None,
-                       help="parallel CLI processes for both passes (default 5)")
+                       help="parallel CLI processes for both passes (default 10)")
     return parser
 
 

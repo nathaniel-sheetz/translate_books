@@ -779,3 +779,42 @@ def median_wall_s(
     if not walls:
         return None
     return float(statistics.median(walls))
+
+
+#: Fewer rows than this for one model, and :func:`wall_stats` widens to the CLI.
+_WALL_MIN_MODEL_ROWS = 5
+
+
+def wall_stats(
+    path: Path | str | None, *, cli: str | None = None, model: str | None = None
+) -> dict[str, Any] | None:
+    """Median and p90 ``wall_s`` of recent successful jobs, or ``None``.
+
+    Narrows to ``model`` when it has at least :data:`_WALL_MIN_MODEL_ROWS` rows,
+    since one CLI can host models an order of magnitude apart (grok-4.7 judge
+    jobs ran ~8 min where Claude's ran ~3); otherwise falls back to the CLI
+    family and says so in ``source``.
+    """
+    wanted = (cli or "").strip().lower() or None
+    rows = [
+        r for r in read_recent(path)
+        if r.get("rc") == 0 and isinstance(r.get("wall_s"), (int, float))
+        and (wanted is None or str(r.get("cli") or "").strip().lower() == wanted)
+    ]
+    scope = wanted or "all CLIs"
+    if model:
+        same = [r for r in rows if r.get("model") == model]
+        if len(same) >= _WALL_MIN_MODEL_ROWS:
+            rows, scope = same, f"{scope}/{model}"
+        else:
+            scope = f"{scope} (only {len(same)} logged {model} jobs)"
+    if not rows:
+        return None
+    walls = sorted(float(r["wall_s"]) for r in rows)
+    p90 = walls[min(len(walls) - 1, int(round(0.9 * (len(walls) - 1))))]
+    return {
+        "median_s": float(statistics.median(walls)),
+        "p90_s": p90,
+        "n": len(walls),
+        "source": f"{len(walls)} logged jobs, {scope}",
+    }

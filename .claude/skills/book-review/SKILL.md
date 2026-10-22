@@ -55,8 +55,8 @@ object with a `_schema` block.
 |---|---|---|
 | `status` | none, writes nothing | findings per judge, owed chapters per judge, last report |
 | `judge` | none | the plan only: owed chapters per judge, chunks awaiting pass 2 |
-| `judge --estimate` | none (clears judge drafts) | prepares the sweep and projects its tokens; spawns nothing |
-| `judge --yes` | subscription | dialogue, address (when the book has a map) and editorial over owed chapters, then editorial pass 2 |
+| `judge --estimate` | none (keeps drafts whose prompt is unchanged, clears the rest) | prepares the sweep and projects its tokens and wall time at the chosen width; spawns nothing |
+| `judge --yes [--concurrency N]` | subscription | dialogue, address (when the book has a map) and editorial over owed chapters, then editorial pass 2, 10 at a time by default; a re-run after a cut-off resumes from the drafts already written |
 | `signals` | none | coded detectors over every finding; writes `.harness/book_review/signals.json` and `reports/book_review_signals_<date>.md` |
 | `prepare` | none | detectors, budgeted evidence, and one synthesis job per theme under `.harness/book_review/synthesis/` |
 | `fanout` | subscription | runs the synthesis jobs as one headless wave (resumes: skips jobs with a draft) |
@@ -77,14 +77,31 @@ object with a `_schema` block.
 
 2. **`judge --estimate`.** Relay one consent block: the judges and owed chapters
    (`plan`), pass 1 jobs and tokens (`pass1`), the pass 2 ceiling
-   (`adjudication`), `effective` (CLI, model, effort) and `concurrency` (parallel
-   processes for both passes, 5 unless the user asked for `--concurrency N`). If it returns an error
-   (another wave holds the lock, the CLI is not logged in), relay it and stop.
+   (`adjudication`) and `effective` (CLI, model, effort). Give the width and the
+   length on a line of their own, so the user sees both before anything starts:
+   **"`concurrency` at a time (`concurrency_source`) · projected ~Xh Ym"**, from
+   `wall.total_s`, with pass 1 and the pass 2 ceiling beside it. If `wall` is null,
+   say the length is unknown. If `pass1.resumed_drafts` is above 0, say that many
+   jobs are already drafted and will not re-run.
+   - **`wall.fits_background_cap` false:** the sweep will not finish inside one
+     background command (`background_cap_s`, 2 h). Say so at the gate and offer
+     one of two options. The first is a split: one `judge --yes --judge <name>`
+     call per judge, sized from `wall.per_judge_s`, with editorial last. The second
+     is a wider `--concurrency` (re-run `--estimate` with it to re-quote).
+   - If `--estimate` returns an error (another wave holds the lock, the CLI is not
+     logged in), relay it and stop.
+
    **END your turn.**
 
-3. **On approval, `judge --yes`** with the same flags. Progress goes to stderr. Report
-   `summary` (ran, failed, missing, adjudication, errors). A `fatal` means nothing
-   was committed: relay it and stop.
+3. **On approval, `judge --yes`** with the same flags, including `--concurrency` if
+   the user changed it. Send stderr to a file, never `$null`. Progress goes there,
+   and the first line names the job count and width. Report `summary` (ran, resumed,
+   failed, missing, adjudication, errors). A `fatal` means nothing was committed:
+   relay it and stop.
+   - **If the sweep is cut off** (background limit, a kill, a crash), run the same
+     `judge --estimate` again, then the same `judge --yes`. Drafts whose prompt
+     has not changed are kept, so only the missing jobs run (`resumed` says how
+     many were kept). Do not reach for `run_judges.py` / `verify_editorial.py`.
 
 4. **`signals`.** Relay `headline` verbatim, worst first, and give the
    `report_path`. Read the report before summarizing it; it carries the findings

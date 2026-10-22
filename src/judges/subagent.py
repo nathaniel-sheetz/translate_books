@@ -306,7 +306,7 @@ def prepare(
     worker_model: Optional[str] = None,
     batch_size: Optional[int] = None,
     targets_per_worker: int = 1,
-    keep_drafts: bool = False,
+    keep_drafts: bool | str = False,
     cli: Optional[str] = None,
     effort: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -347,6 +347,9 @@ def prepare(
     By default stale drafts from a prior run are cleared so ``commit`` never reads
     an orphan; pass ``keep_drafts=True`` to preserve already-written worker output
     during a recovery re-prepare (re-prepare is otherwise destructive).
+    ``keep_drafts="if_unchanged"`` keeps a draft only when the prompt it answered
+    is byte-identical to the one rendered now, so a sweep cut off part-way can
+    re-prepare and resume without keeping a verdict on prose that has since moved.
 
     ``cli`` (``claude`` | ``cursor``), ``worker_model`` and ``effort`` are the
     per-run overrides; anything left unset is resolved by
@@ -462,15 +465,21 @@ def prepare(
     judge_instances = {name: get_judge(name) for name in judge_names}
 
     def _write_prompt(prompt: str, prompt_path: Path, draft_path: Path) -> None:
-        nonlocal total_prompt_tokens
+        nonlocal total_prompt_tokens, resumed_drafts
         total_prompt_tokens += approx_tokens(prompt)
+        keep = bool(keep_drafts)
+        if keep_drafts == "if_unchanged":
+            keep = _same_text(prompt_path, prompt)
         prompt_path.write_text(prompt, encoding="utf-8")
-        if not keep_drafts:
+        if not keep:
             draft_path.unlink(missing_ok=True)  # clear any stale draft from a prior prepare
+        elif draft_path.exists():
+            resumed_drafts += 1
 
     entries: list[dict[str, Any]] = []
     total_words = 0
     total_prompt_tokens = 0  # what a worker actually receives, solo or grouped
+    resumed_drafts = 0  # drafts kept by keep_drafts, i.e. jobs `fanout` will skip
     total_pairs = 0  # (target, judge) pairs — the batch-invariant unit of work
     batch_seq = 0
     # Per-judge shared preamble established by the first solo entry that splits.
@@ -623,6 +632,7 @@ def prepare(
         "judges": judge_names,
         "worker_model": worker_model,
         "batch_size": batch_size,
+        "resumed_drafts": resumed_drafts,
         "effective": prof.to_payload(),
         "usage_summary": {
             "pairs": total_pairs,
@@ -662,6 +672,14 @@ def prepare(
         "warnings": prepare_warnings,
         "_schema": _PREPARE_SCHEMA,
     }
+
+
+def _same_text(path: Path, text: str) -> bool:
+    """Whether ``path`` exists and holds exactly ``text``."""
+    try:
+        return path.read_text(encoding="utf-8") == text
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def _entry_fanout_id(entry: dict[str, Any]) -> str | None:
