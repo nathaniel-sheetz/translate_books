@@ -951,6 +951,8 @@ def setup_load_glossary(project_id):
             "type": t.type.value if hasattr(t.type, "value") else t.type,
             "context": t.context or "",
             "alternatives": t.alternatives or [],
+            "note": t.note or "",
+            "aliases": t.aliases or [],
         }
         for t in g.terms
     ]})
@@ -986,7 +988,8 @@ def setupsave_glossary(project_id):
         glossary = proposals_to_glossary(terms)
         save_glossary(glossary, glossary_path, writer="web_ui:glossary replace",
                       reason=_change_reason(data))
-        return jsonify({"ok": True, "total": len(terms), "mode": "replace"})
+        return jsonify({"ok": True, "total": len(terms), "mode": "replace",
+                        "unmatched": _unmatched_glossary_keys(project_dir, glossary)})
 
     # Merge with existing if present
     if glossary_path.exists():
@@ -999,12 +1002,23 @@ def setupsave_glossary(project_id):
         existing.updated_at = datetime.now()
         save_glossary(existing, glossary_path, writer="web_ui:glossary merge",
                       reason=_change_reason(data))
-        return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
+        return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms),
+                        "unmatched": _unmatched_glossary_keys(project_dir, existing)})
     else:
         glossary = proposals_to_glossary(terms)
         save_glossary(glossary, glossary_path, writer="web_ui:glossary merge",
                       reason=_change_reason(data))
-        return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
+        return jsonify({"ok": True, "total": len(terms), "new": len(terms),
+                        "unmatched": _unmatched_glossary_keys(project_dir, glossary)})
+
+
+def _unmatched_glossary_keys(project_dir: Path, glossary) -> list[str]:
+    """Keys no chunk of the source would ship, for the save status line."""
+    from src.house import read_source
+    from src.utils.file_io import unmatched_glossary_terms
+
+    source = read_source(project_dir)
+    return unmatched_glossary_terms(glossary, source) if source else []
 
 
 # ============================================================================
@@ -1529,6 +1543,8 @@ def _glossary_term_row(term) -> dict:
         "type": str(term_type or ""),
         "context": term.context or "",
         "alternatives": list(term.alternatives or []),
+        "note": term.note or "",
+        "aliases": list(term.aliases or []),
     }
 
 

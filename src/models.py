@@ -317,14 +317,25 @@ class GlossaryTerm(BaseModel):
             spanish="magia",
             type=GlossaryTermType.CONCEPT,
             context="Use 'magia' not 'hechicería' in this book",
-            alternatives=["hechicería"]
+            alternatives=["hechicería"],
+            note="Sorcery in general, not a stage trick",
         )
     """
     english: str = Field(min_length=1, description="English term")
     spanish: str = Field(min_length=1, description="Spanish translation")
     type: GlossaryTermType = GlossaryTermType.OTHER
-    context: Optional[str] = Field(default=None, description="Usage notes")
+    context: Optional[str] = Field(
+        default=None, description="Why this choice, for the human and the judges; never sent to the translator"
+    )
     alternatives: list[str] = Field(default_factory=list, description="Other valid translations")
+    note: Optional[str] = Field(
+        default=None,
+        description="Short instruction the translator reads with the entry: the sense meant, or what it is not",
+    )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Other English forms the source uses for this entry; any of them ships it",
+    )
 
 
 class Glossary(BaseModel):

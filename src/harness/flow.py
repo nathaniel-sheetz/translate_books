@@ -1380,10 +1380,12 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
         }),
         "instructions": (
             "Read prompt_path, draft proposals as a JSON array of "
-            "{english, translation, type, context, alternatives} to draft_path (tracking any "
-            "uncertain renderings to surface at the approval gate), then run `glossary commit`. "
+            "{english, translation, type, context, alternatives} (plus note / aliases where "
+            "needed) to draft_path (tracking any uncertain renderings to surface at the approval "
+            "gate), then run `glossary commit`. "
             "Note the alternatives conventions in the prompt: places and bare personal names "
-            "take none; a title + name leads with the narration form including the article."
+            "take none; a title + name leads with the narration form including the article. "
+            "`note` reaches the translator, `context` does not."
             + _SECTIONS_HINT
         ),
     }
@@ -1419,6 +1421,10 @@ def glossary_commit(project: str, *, draft: str | None = None,
     save_glossary(glossary, out, writer="harness:glossary commit", reason=reason)
     validate_glossary_file(out)  # belt-and-suspenders
 
+    # An entry whose key the source never uses never reaches the translator,
+    # while the judges still hold the translation to it.
+    warnings.extend(_unmatched_key_warnings(project_dir, glossary))
+
     # The address map is drafted before the glossary and carries English cast
     # names; now that the target-language forms are approved, flag the drift.
     warnings.extend(_stale_cast_warnings(project_dir, glossary=glossary))
@@ -1445,10 +1451,30 @@ def glossary_commit(project: str, *, draft: str | None = None,
         "house_check": write_report(project_dir),
         "warnings": warnings,
         "terms": [
-            {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context}
+            {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context,
+             "note": t.note, "aliases": t.aliases}
             for t in glossary.terms
         ],
     }
+
+
+def _unmatched_key_warnings(project_dir: Path, glossary) -> list[str]:
+    """One ``REVIEW:`` line naming the keys no chunk of the source would ship."""
+    from src.house import read_source
+    from src.utils.file_io import unmatched_glossary_terms
+
+    source = read_source(project_dir)
+    if not source:
+        return []
+    unmatched = unmatched_glossary_terms(glossary, source)
+    if not unmatched:
+        return []
+    return [
+        "REVIEW: these glossary keys occur nowhere in the source, so they never reach the "
+        "translator (the judges still enforce them): "
+        + ", ".join(repr(k) for k in unmatched)
+        + ". Add the form the source uses to `aliases`, or rename the key."
+    ]
 
 
 # ── address-map beat (forms-of-address expectations for the address judge) ──

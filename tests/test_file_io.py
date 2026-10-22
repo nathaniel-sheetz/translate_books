@@ -133,6 +133,37 @@ class TestFilterGlossaryForChunk:
         filtered = filter_glossary_for_chunk(sample_glossary, text)
         assert any(t.english == "estate" for t in filtered.terms)
 
+    # Keys that never reached the translator before the matcher folded them
+    # (TODOS: "Ship every glossary entry the chunk needs").
+    @pytest.mark.parametrize("key, text", [
+        ("stalk (mushroom)", "the stalk of the mushroom"),
+        ("the old stag / the old Prince", "then the old Prince spoke"),
+        ("the old stag / the old Prince", "then the old stag spoke"),
+        ("porte cochere", "under the porte-cochere it stood"),
+        ("Bell Wether", "the Bell-Wether rang"),
+        ("'Lias", "and ’Lias ran home"),
+        ("party", "two parties met"),
+        ("old man", "the old\nman nodded"),
+    ])
+    def test_key_shapes_that_used_to_miss(self, key, text):
+        glossary = Glossary(terms=[GlossaryTerm(english=key, spanish="algo")])
+        assert [t.english for t in filter_glossary_for_chunk(glossary, text).terms] == [key]
+
+    def test_alias_ships_the_entry(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="prairie dog", spanish="perrito de la pradera", aliases=["dog town"]),
+        ])
+        assert filter_glossary_for_chunk(glossary, "they rode past the dog town").terms
+        assert not filter_glossary_for_chunk(glossary, "they rode past the town").terms
+
+    def test_homonym_siblings_both_ship(self):
+        glossary = Glossary(terms=[
+            GlossaryTerm(english="stem (mushroom)", spanish="pie"),
+            GlossaryTerm(english="stem (plant)", spanish="tallo"),
+        ])
+        filtered = filter_glossary_for_chunk(glossary, "a thin green stem")
+        assert [t.english for t in filtered.terms] == ["stem (mushroom)", "stem (plant)"]
+
 
 class TestFormatGlossaryForPrompt:
     def test_groups_by_type(self, sample_glossary):
@@ -145,6 +176,17 @@ class TestFormatGlossaryForPrompt:
         glossary = Glossary(terms=[])
         result = format_glossary_for_prompt(glossary)
         assert "No glossary" in result
+
+    def test_prints_note_and_full_key_never_context(self):
+        glossary = Glossary(terms=[GlossaryTerm(
+            english="scales (flower)", spanish="escamas", alternatives=["brácteas"],
+            note="the bracts of a flower, not a weighing instrument",
+            context="Fabre returns to these in chapter 9",
+        )])
+        result = format_glossary_for_prompt(glossary)
+        assert ("- scales (flower) → escamas (alternatives: brácteas)"
+                " — the bracts of a flower, not a weighing instrument") in result
+        assert "Fabre returns" not in result
 
 
 class TestEnsureProjectStructure:

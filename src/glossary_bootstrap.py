@@ -128,6 +128,8 @@ def glossary_terms_from_proposals(proposals: list[dict]) -> list[GlossaryTerm]:
             type=term_type.lower(),
             context=p.get("context", ""),
             alternatives=p.get("alternatives", []),
+            note=(str(p.get("note") or "").strip() or None),
+            aliases=[str(a).strip() for a in p.get("aliases") or [] if str(a).strip()],
         ))
     return terms
 

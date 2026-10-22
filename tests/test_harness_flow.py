@@ -1527,10 +1527,38 @@ def test_glossary_commit_surfaces_convention_reviews(project: Path):
     ]), encoding="utf-8")
 
     out = flow.glossary_commit(str(project))
-    reviews = [w for w in out["warnings"] if w.startswith("REVIEW:")]
+    reviews = [w for w in out["warnings"]
+               if w.startswith("REVIEW:") and "occur nowhere in the source" not in w]
     assert len(reviews) == 2
     assert out["term_count"] == 2          # advisory: the glossary still committed
     assert (project / "glossary.json").exists()
+
+
+def test_glossary_commit_flags_keys_the_source_never_uses(project: Path):
+    """A key no chunk would ship is a REVIEW line; an alias the source uses clears it."""
+    (project / "source.txt").write_text(
+        "The stalk of the mushroom was thin. They rode past the dog town.", encoding="utf-8")
+    state.ensure_harness_dir(project)
+    draft = project / ".harness" / "glossary_draft.json"
+    draft.write_text(json.dumps([
+        {"english": "stalk (mushroom)", "translation": "pie", "type": "technical",
+         "note": "the mushroom's stem, not a plant stalk"},
+        {"english": "prairie dog", "translation": "perrito de la pradera", "type": "other"},
+    ]), encoding="utf-8")
+
+    out = flow.glossary_commit(str(project))
+    [unmatched] = [w for w in out["warnings"] if "occur nowhere in the source" in w]
+    assert "'prairie dog'" in unmatched and "stalk" not in unmatched
+    stalk = next(t for t in out["terms"] if t["english"] == "stalk (mushroom)")
+    assert stalk["note"] == "the mushroom's stem, not a plant stalk"
+
+    draft.write_text(json.dumps([
+        {"english": "prairie dog", "translation": "perrito de la pradera", "type": "other",
+         "aliases": ["dog town"]},
+    ]), encoding="utf-8")
+    out = flow.glossary_commit(str(project))
+    assert not [w for w in out["warnings"] if "occur nowhere in the source" in w]
+    assert out["terms"][0]["aliases"] == ["dog town"]
 
 
 # ── heading-outline split ───────────────────────────────────────────────────

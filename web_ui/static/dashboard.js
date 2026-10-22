@@ -2011,6 +2011,21 @@
         }
     });
 
+    // One table row back into a term. Aliases are typed comma-separated.
+    function readGlossaryRow(tr) {
+        return {
+            english: tr.querySelector('.gl-english').value.trim(),
+            spanish: tr.querySelector('.gl-spanish').value.trim(),
+            type: tr.querySelector('.gl-type').value,
+            context: tr.querySelector('.gl-context').value,
+            note: tr.querySelector('.gl-note').value.trim(),
+            aliases: tr.querySelector('.gl-aliases').value.split(',')
+                .map(function(a) { return a.trim(); })
+                .filter(function(a) { return a; }),
+            alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
+        };
+    }
+
     function renderGlossaryProposals(proposals) {
         var review = document.getElementById('glossary-review');
         review.style.display = '';
@@ -2031,6 +2046,9 @@
                 '<td><input type="text" value="' + escapeHtml(p.spanish || '') + '" class="gl-spanish"></td>' +
                 '<td><select class="gl-type">' + typeOptions + '</select></td>' +
                 '<td><input type="text" value="' + escapeHtml(p.context || '') + '" class="gl-context"></td>' +
+                '<td><input type="text" value="' + escapeHtml(p.note || '') + '" class="gl-note"' +
+                    ' placeholder="only for a sense the translator could get wrong"></td>' +
+                '<td><input type="text" value="' + escapeHtml((p.aliases || []).join(', ')) + '" class="gl-aliases"></td>' +
                 '<td class="term-actions">' +
                     '<button class="accepted gl-accept">Keep</button> ' +
                     '<button class="gl-reject">Drop</button>' +
@@ -2053,16 +2071,9 @@
         var terms = [];
         document.querySelectorAll('#glossary-proposals-table tbody tr').forEach(function(tr) {
             if (tr.classList.contains('rejected')) return;
-            var eng = tr.querySelector('.gl-english').value.trim();
-            var spa = tr.querySelector('.gl-spanish').value.trim();
-            if (!eng || !spa) return;  // skip blank rows
-            terms.push({
-                english: eng,
-                spanish: spa,
-                type: tr.querySelector('.gl-type').value,
-                context: tr.querySelector('.gl-context').value,
-                alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
-            });
+            var term = readGlossaryRow(tr);
+            if (!term.english || !term.spanish) return;  // skip blank rows
+            terms.push(term);
         });
         var payload = { terms: terms, mode: glossaryEditMode ? 'replace' : 'merge' };
         apiPost('/api/setup/' + PROJECT + '/glossary', payload).then(function(data) {
@@ -2073,7 +2084,14 @@
                     ? 'Saved ' + terms.length + ' terms (replaced)'
                     : 'Saved ' + terms.length + ' terms';
                 glossaryEditMode = false;
-                setStatus('glossary-save-status', msg, 'success');
+                var unmatched = data.unmatched || [];
+                if (unmatched.length) {
+                    // Saved, but these never reach the translator.
+                    setStatus('glossary-save-status', msg + '. Not in the source, so never sent to the ' +
+                        'translator (add an alias or rename): ' + unmatched.join(', '), 'error');
+                } else {
+                    setStatus('glossary-save-status', msg, 'success');
+                }
                 loadStatus();
             }
         });
@@ -2101,16 +2119,10 @@
             glossaryProposals = [];
             rows.forEach(function(tr) {
                 if (tr.classList.contains('rejected')) return;
-                glossaryProposals.push({
-                    english: tr.querySelector('.gl-english').value,
-                    spanish: tr.querySelector('.gl-spanish').value,
-                    type: tr.querySelector('.gl-type').value,
-                    context: tr.querySelector('.gl-context').value,
-                    alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
-                });
+                glossaryProposals.push(readGlossaryRow(tr));
             });
         }
-        glossaryProposals.push({english:'', spanish:'', type:'other', context:'', alternatives:[]});
+        glossaryProposals.push({english:'', spanish:'', type:'other', context:'', note:'', aliases:[], alternatives:[]});
         renderGlossaryProposals(glossaryProposals);
     });
 

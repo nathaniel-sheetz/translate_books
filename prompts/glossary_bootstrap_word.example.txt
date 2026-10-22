@@ -15,7 +15,9 @@ For each LEGITIMATE candidate, return a JSON object with:
 - "english":      the original term (exactly as given)
 - "translation":  your proposed {{target_language}} translation
 - "type":         one of "character", "place", "concept", "technical", "other" — infer from how the term is used in the excerpts/source (person → character, location → place, abstract idea → concept, domain/technical word → technical, else other)
-- "context":      a brief note (1 sentence) on usage or disambiguation
+- "context":      a brief note (1 sentence) on why you chose this rendering, for the human reading the glossary table; NOT sent to the translator
+- "note":         omit by default. Sent to the translator with the entry: one short instruction, only where a wrong sense is plausible (a homonym or false friend: "scales" of a flower → escamas, not balanza). A key that needs a sense label carries it in parentheses, "stem (mushroom)"
+- "aliases":      omit by default. Other English forms the source uses for the same thing ("dog town" for "prairie dog"); plurals, possessives and hyphens already match
 - "alternatives": leave this an empty array by default. A personal or character name in particular should typically have exactly ONE translation and NO alternatives. Only add an alternative (max 2) for a title or a term that is genuinely rendered different ways in different contexts.
 
 Return ONLY a JSON array of these objects, no other text. Do not include entries you judge to be extraction artifacts.
