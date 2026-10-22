@@ -118,8 +118,17 @@ CALIBRATION_EXAMPLES_FILENAME = "editorial_examples.txt"
 MAX_CODED_FINDINGS_PER_CHUNK = 25
 
 
-def format_style_rules(rules: list[dict[str, Any]]) -> str:
-    """Render the ``style_rules.json`` entries as an id-cited rule list."""
+def format_style_rules(
+    rules: list[dict[str, Any]], chapter_labels: Optional[dict[str, str]] = None
+) -> str:
+    """Render the ``style_rules.json`` entries as an id-cited rule list.
+
+    A rule with a chapter window says so ("[applies chapter_13 (Chapter 12)
+    onward only]"): the judge reads every rule, but the translator got this one
+    only in those chapters, so a chunk outside them must not be held to it.
+    """
+    from src.house.scope import rule_window, window_text
+
     lines: list[str] = []
     for rule in rules:
         if not isinstance(rule, dict):
@@ -129,7 +138,11 @@ def format_style_rules(rules: list[dict[str, Any]]) -> str:
         if not rule_id or not text:
             continue
         note = str(rule.get("note") or "").strip()
-        lines.append(f'- "{rule_id}": {text}' + (f" ({note})" if note else ""))
+        window = window_text(*rule_window(rule), chapter_labels or {})
+        lines.append(
+            f'- "{rule_id}": {text}' + (f" ({note})" if note else "")
+            + (f" [applies {window} only]" if window else "")
+        )
     return "\n".join(lines)
 
 
@@ -397,9 +410,11 @@ def load_style_rules(project_dir: Path) -> str:
     trigger is matched against. Empty only when nothing is left.
     """
     from src.house import read_source
+    from src.house.scope import chapter_labels
 
     return format_style_rules(
-        rules_for(project_dir, read_source(project_dir), audience=AUDIENCE_JUDGE)
+        rules_for(project_dir, read_source(project_dir), audience=AUDIENCE_JUDGE),
+        chapter_labels(project_dir),
     )
 
 
@@ -514,6 +529,12 @@ def _add_editorial_inputs(
     style_rules = load_style_rules(project_dir)
     if style_rules:
         context["style_rules"] = style_rules
+
+    # A rule for some chapters only: the judge is told each passage's chapter.
+    from src.house.scope import chapter_labels, has_window
+
+    if any(has_window(r) for r in load_book_rules(project_dir)):
+        context["windowed_rule_chapter_labels"] = chapter_labels(project_dir)
 
     examples = load_calibration_examples(project_dir)
     if examples:

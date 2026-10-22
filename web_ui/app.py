@@ -5189,7 +5189,7 @@ def project_chunk_prompt(project_id, chunk_id):
 
         house = load_translator_house(project_dir)
         variables["house_rules"] = house.rules_block()
-        variables["house_notes"] = house.notes_block(chunk.source_text)
+        variables["house_notes"] = house.notes_block(chunk.source_text, chunk.chapter_id)
 
         rendered = render_prompt(template, variables)
         separator = "=" * 80

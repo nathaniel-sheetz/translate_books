@@ -526,7 +526,7 @@ def stage_translate(args, project_dir: Path, state: dict) -> dict:
     )
 
     # The house rules this book carries: the HOUSE RULES prefix and per-chunk
-    # HOUSE NOTES, counted in the estimate and sent with every chunk.
+    # NOTES FOR THIS PASSAGE, counted in the estimate and sent with every chunk.
     house = load_translator_house(project_dir)
 
     # Cost estimation

@@ -706,13 +706,15 @@ def build_translation_prompt(
 
     ``house`` is the book's house rules (:func:`src.house.prompt.load_translator_house`).
     Its global rules go into the fixed prefix as HOUSE RULES, identical in every
-    chunk; its triggered rules go after the glossary as HOUSE NOTES, only in a
-    chunk whose English triggers one. ``None`` renders neither.
+    chunk; after the glossary, NOTES FOR THIS PASSAGE carries what applies to
+    this chunk only (triggered house rules, the book's chapter-windowed or
+    triggered rules, address shifts), matched on its English and its
+    ``chapter_id``. ``None`` renders neither.
     """
     chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
     template = load_prompt_template()
     house_rules = house.rules_block() if house else ""
-    house_notes = house.notes_block(chunk.source_text) if house else ""
+    house_notes = house.notes_block(chunk.source_text, chunk.chapter_id) if house else ""
     variables = {
         "book_title": project_name,
         "source_text": chunk.source_text,
@@ -889,7 +891,7 @@ def estimate_cost(
             ``None`` auto-derives via ``_book_has_images(chunks)``.
         target_language: Target language for dialogue gating / feature counts.
         house: The book's house rules, so the estimate counts the HOUSE RULES
-            prefix and each chunk's HOUSE NOTES; ``None`` counts neither.
+            prefix and each chunk's NOTES FOR THIS PASSAGE; ``None`` counts neither.
 
     Returns:
         Dictionary with cost breakdown plus feature counts:
@@ -943,7 +945,7 @@ def estimate_cost(
                 chunk.source_text, target_language, always_include=always_include_dialogue
             ),
             "house_rules": house.rules_block() if house else "",
-            "house_notes": house.notes_block(chunk.source_text) if house else "",
+            "house_notes": house.notes_block(chunk.source_text, chunk.chapter_id) if house else "",
         }
 
         # Render prompt
