@@ -224,10 +224,12 @@ def dialogue_fingerprint(block_or_prompt: str) -> str:
     Accepts a whole rendered prompt or the block alone. Whitespace is folded so
     a re-wrapped but unchanged rule set fingerprints the same.
     """
-    start = block_or_prompt.find(_DIALOGUE_HEADER)
-    if start < 0:
+    # The header on a line of its own: the prompt's instructions mention "the
+    # DIALOGUE FORMATTING section below" earlier, and a bare find() hashed that.
+    header = re.search(rf"^{_DIALOGUE_HEADER}[ \t]*$", block_or_prompt, re.MULTILINE)
+    if not header:
         return ""
-    body = block_or_prompt[start + len(_DIALOGUE_HEADER):]
+    body = block_or_prompt[header.end():]
     body = re.sub(r"^\s*=+\s*", "", body, count=1)
     end = re.search(r"^=+\s*$", body, re.MULTILINE)
     if end:

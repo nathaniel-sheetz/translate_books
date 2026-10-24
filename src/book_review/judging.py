@@ -45,6 +45,11 @@ def _chunks_per_chapter(project_dir: Path) -> dict[str, int]:
     return counts
 
 
+def translated_chapters(status: dict[str, Any]) -> set[str]:
+    """Chapters with at least one translated chunk, from a ``detail=True`` status."""
+    return {row["id"] for row in status.get("chapters") or [] if row.get("translated")}
+
+
 def plan(project_dir: Path, *, judges: Optional[list[str]] = None) -> dict[str, Any]:
     """Owed chapters per judge, and chunks awaiting editorial pass 2."""
     from src.judges import editorial_wave as wave
@@ -53,11 +58,16 @@ def plan(project_dir: Path, *, judges: Optional[list[str]] = None) -> dict[str, 
     project_dir = Path(project_dir)
     has_map = (project_dir / "address_map.json").exists()
     names = [j for j in (judges or SWEEP_JUDGES) if j != "address" or has_map]
-    status = build_status(project_dir, judges=names)
+    status = build_status(project_dir, judges=names, detail=True)
+    # A chapter with no translated chunk rolls up as not_run, but there is nothing
+    # to judge yet; scoping it into the wave makes prepare raise (canary on a
+    # partly translated book).
+    translated = translated_chapters(status)
     owed: dict[str, list[str]] = {}
     for name in names:
         buckets = ((status.get("judges") or {}).get(name) or {}).get("chapters") or {}
-        chapters = [c for state in ("stale", "partial", "not_run") for c in buckets.get(state, [])]
+        chapters = [c for state in ("stale", "partial", "not_run") for c in buckets.get(state, [])
+                    if c in translated]
         if chapters:
             owed[name] = chapters
     pending_pass2 = 0

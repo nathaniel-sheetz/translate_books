@@ -675,22 +675,25 @@ def false_positive_clusters(corpus: BookCorpus) -> list[Signal]:
 
 def coverage(corpus: BookCorpus) -> dict[str, Any]:
     """What has not been judged, so the report can say what it could not see."""
+    from src.book_review.judging import translated_chapters
     from src.judges.status import build_status
 
     judges = ["dialogue", "editorial"]
     if corpus.address_map:
         judges.insert(1, "address")
     try:
-        status = build_status(corpus.project_dir, judges=judges)
+        status = build_status(corpus.project_dir, judges=judges, detail=True)
     except Exception as exc:  # a status failure must not sink the review
         return {"error": str(exc)}
+    translated = translated_chapters(status)
     out: dict[str, Any] = {"address_map": bool(corpus.address_map), "judges": {}}
     for name in judges:
         entry = (status.get("judges") or {}).get(name) or {}
         buckets = entry.get("chapters") or {}
         out["judges"][name] = {
             "state": entry.get("state"),
-            "owed": [c for state in ("stale", "partial", "not_run") for c in buckets.get(state, [])],
+            "owed": [c for state in ("stale", "partial", "not_run") for c in buckets.get(state, [])
+                     if c in translated],
             "done": len(buckets.get("done", [])),
             "last_run": entry.get("last_run"),
         }
