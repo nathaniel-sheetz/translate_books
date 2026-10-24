@@ -32,7 +32,8 @@ def apply_glossary(doc: dict, patch: dict) -> None:
     if kind == "glossary.add":
         terms.append({"english": patch["english"], "spanish": patch["spanish"], "type": "other",
                       "alternatives": patch.get("alternatives") or [],
-                      **({"context": patch["context"]} if patch.get("context") else {})})
+                      **({"context": patch["context"]} if patch.get("context") else {}),
+                      **({"note": patch["note"]} if patch.get("note") else {})})
         return
     entry = find_entry(terms, patch["english"])
     if entry is None:
@@ -44,7 +45,7 @@ def apply_glossary(doc: dict, patch: dict) -> None:
         twin["english"] = patch["new_english"]
         terms.insert(terms.index(entry) + 1, twin)
     elif kind == "glossary.edit":
-        for field in ("spanish", "alternatives", "context"):
+        for field in ("spanish", "alternatives", "context", "note"):
             if field in patch:
                 entry[field] = patch[field]
     elif kind == "glossary.split_sense":
@@ -62,7 +63,8 @@ def apply_glossary(doc: dict, patch: dict) -> None:
         for offset, e in enumerate(patch["entries"]):
             terms.insert(at + offset, {"english": e["english"], "spanish": e["spanish"],
                                        "type": entry.get("type") or "other", "alternatives": [],
-                                       **({"context": e["context"]} if e.get("context") else {})})
+                                       **({"context": e["context"]} if e.get("context") else {}),
+                                       **({"note": e["note"]} if e.get("note") else {})})
     elif kind == "glossary.remove":
         terms.remove(entry)
 
