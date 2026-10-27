@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from web_ui.app import app
 from web_ui.evaluations import REVIEW_TYPES
+from web_ui.project_cards import PROJECT_STATUSES
 
 
 @pytest.fixture
@@ -130,7 +131,7 @@ class TestReaderProjectList:
     def test_status_picker_replaced_the_filter_buttons(self, client, project_with_alignment):
         html = client.get("/read/").data.decode("utf-8")
         assert 'id="status-filter-popup"' in html
-        assert html.count('class="status-filter-cb"') == 4
+        assert html.count('class="status-filter-cb"') == len(PROJECT_STATUSES)
         # The old one-button-per-status bar is gone.
         assert 'data-status="all"' not in html
         assert 'class="filter-btn active"' not in html

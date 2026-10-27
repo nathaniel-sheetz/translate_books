@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.80.1.0] - 2026-10-27
+
+### Changed
+- **A book's status on the reader's home page now names its harness stage.** "In Progress" is split into **Needs translation** and **Needs review**, so the statuses run Pending → Needs translation → Needs review → Complete (plus Archived). Pending now means setup is unfinished: no style guide, an empty glossary, or nothing chunked. Needs translation means some chunk is still untranslated, even if every chapter has been read. Needs review means the book is translated but something is still open: an unread chapter, an annotation awaiting review, a blank footnote mark, or a live judge finding (dialogue, address, editorial). Before this, judge findings never held a book back. They now do, for every judge category regardless of the card's flag picker. Coded-checker flags still never count.
+- A status-filter cookie written before the split keeps working: a ticked "In Progress" ticks both of its successors, so books in the new statuses aren't silently hidden.
+
 ## [0.80.0.0] - 2026-10-26
 
 ### Added

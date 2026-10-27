@@ -8,7 +8,8 @@ and evaluator/judge findings — which is three more directory walks per project
 so the logic moved here and grew a cache.
 
 Status is *derived* from those same numbers (see :func:`derive_status`) rather
-than hand-set: the only thing a reader chooses is whether a book is archived.
+than hand-set — it names the harness stage a book is in (setup, translation,
+review, done). The only thing a reader chooses is whether a book is archived.
 
 Two things keep a 21-project home page cheap:
 
@@ -32,12 +33,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.annotations.summary import project_annotation_summary
-from web_ui.evaluations import empty_type_counts, load_project_type_counts
+from web_ui.evaluations import REVIEW_JUDGE_TYPES, empty_type_counts, load_project_type_counts
 
-# Every status a project can be in, in display order. The single source of
-# truth: app.py validates the filter cookie against this and the template loops
-# over it to build the Status picker.
-PROJECT_STATUSES = ("pending", "in_progress", "complete", "archived")
+# Every status a project can be in, in display order — which is also harness
+# order. The single source of truth: app.py validates the filter cookie against
+# this and the template loops over it to build the Status picker.
+PROJECT_STATUSES = ("pending", "needs_translation", "needs_review", "complete", "archived")
 
 # Directories whose contents feed a card, fingerprinted by (count, max mtime, size).
 _WATCHED_DIRS = ("chunks", "evaluations", "alignments")
@@ -128,39 +129,48 @@ def _count_chunks(chunks_dir: Path) -> tuple[int, int]:
 def derive_status(
     *,
     archived: bool,
+    setup_complete: bool,
+    total_chunks: int,
+    fully_translated: bool,
     chapter_count: int,
     read_chapters: int,
-    fully_translated: bool,
     awaiting_review: int,
     empty_footnotes: int,
-    setup_complete: bool,
+    judge_findings: int,
 ) -> str:
-    """Work out a project's status from what is actually on disk.
+    """Work out a project's status from where it stands in the harness.
 
     Archived is the one manual choice and wins over everything else. Otherwise
-    the rule reads off the same numbers the card's work chips show:
+    the first stage that still has work in it names the status:
 
-    * ``complete`` — nothing left to do: style guide and glossary present,
-      every chapter read, no annotation awaiting review, no blank footnote
-      mark, and translation finished. Evaluator/judge flags deliberately
-      don't count; you can finish a book while disagreeing with the judges.
-    * ``in_progress`` — at least one chapter read.
-    * ``pending`` — nothing read yet, which is also where a brand-new project
-      with no chapters lands (``chapter_count == 0`` can't be "complete", or
-      importing a book would mark it finished).
+    * ``pending`` — setup unfinished: no style guide, an empty glossary, or
+      nothing chunked yet.
+    * ``needs_translation`` — set up, but some chunk (or every one) is still
+      untranslated. Reading ahead doesn't move a book past this.
+    * ``needs_review`` — translated, but something is still open: an unread
+      chapter, an annotation awaiting review, a blank footnote mark, or a live
+      judge finding (dialogue, address, editorial). A translated book with no
+      alignments yet (``chapter_count == 0``) lands here too — there is
+      nothing to read, so it can't have been read.
+    * ``complete`` — none of the above. Coded-checker flags (dictionary,
+      grammar, …) deliberately don't count: they are right about one time in
+      ten, so a book could otherwise never finish.
     """
     if archived:
         return "archived"
+    if not setup_complete or total_chunks == 0:
+        return "pending"
+    if not fully_translated:
+        return "needs_translation"
     if (
-        chapter_count > 0
-        and read_chapters >= chapter_count
-        and fully_translated
-        and setup_complete
-        and awaiting_review == 0
-        and empty_footnotes == 0
+        chapter_count == 0
+        or read_chapters < chapter_count
+        or awaiting_review
+        or empty_footnotes
+        or judge_findings
     ):
-        return "complete"
-    return "in_progress" if read_chapters > 0 else "pending"
+        return "needs_review"
+    return "complete"
 
 
 def build_project_card(project_dir: Path, project_id: str) -> dict:
@@ -243,12 +253,16 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         "archived": archived,
         "status": derive_status(
             archived=archived,
+            setup_complete=setup_complete,
+            total_chunks=total_chunks,
+            fully_translated=fully_translated,
             chapter_count=len(chapter_ids),
             read_chapters=read_chapters,
-            fully_translated=fully_translated,
             awaiting_review=ann["awaiting_review"],
             empty_footnotes=ann["empty_footnotes"],
-            setup_complete=setup_complete,
+            # All judge categories, not the card's picker selection: status
+            # must not change with a display cookie.
+            judge_findings=sum(flag_counts[k] for k in REVIEW_JUDGE_TYPES),
         ),
         "chapter_count": len(chapter_ids),
         "has_style_guide": has_style_guide,

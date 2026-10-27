@@ -491,6 +491,10 @@ def set_review_types():
 # filter at all").
 _STATUS_FILTER_COOKIE = "reader_status_filter"
 _DEFAULT_STATUS_FILTER = tuple(s for s in PROJECT_STATUSES if s != "archived")
+# Statuses a cookie written before the harness-stage split can still carry,
+# mapped to what replaced them. Without this, a ticked "in_progress" would be
+# dropped as unknown and silently hide every book in the two new statuses.
+_LEGACY_STATUS_ALIASES = {"in_progress": ("needs_translation", "needs_review")}
 
 
 def _get_status_filter() -> list[str]:
@@ -503,7 +507,10 @@ def _get_status_filter() -> list[str]:
     raw = request.cookies.get(_STATUS_FILTER_COOKIE)
     if raw is None:
         return list(_DEFAULT_STATUS_FILTER)
-    return [s for s in PROJECT_STATUSES if s in set(raw.split(","))]
+    ticked = set()
+    for s in raw.split(","):
+        ticked.update(_LEGACY_STATUS_ALIASES.get(s, (s,)))
+    return [s for s in PROJECT_STATUSES if s in ticked]
 
 
 @app.route("/api/set-status-filter", methods=["POST"])
@@ -528,7 +535,7 @@ def set_status_filter():
 def update_project_archived(project_id):
     """Archive or unarchive a project — the one status the reader sets by hand.
 
-    Body: ``{"archived": true|false}``. The other three statuses are derived
+    Body: ``{"archived": true|false}``. The other four statuses are derived
     from the files by ``project_cards.derive_status``, so the response hands
     back the freshly derived status: after unarchiving, the caller needs to know
     where the card landed to re-apply the status filter.

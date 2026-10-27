@@ -594,10 +594,10 @@ def test_set_review_types_rejects_non_list(client):
 # ── 11. Derived status ───────────────────────────────────────────────────────
 
 def _status(**over):
-    """derive_status with a "one chapter, read, nothing outstanding" baseline."""
-    kwargs = dict(archived=False, chapter_count=1, read_chapters=1,
-                  fully_translated=True, awaiting_review=0, empty_footnotes=0,
-                  setup_complete=True)
+    """derive_status with a "set up, translated, read, nothing open" baseline."""
+    kwargs = dict(archived=False, setup_complete=True, total_chunks=1,
+                  fully_translated=True, chapter_count=1, read_chapters=1,
+                  awaiting_review=0, empty_footnotes=0, judge_findings=0)
     kwargs.update(over)
     return derive_status(**kwargs)
 
@@ -606,33 +606,52 @@ def test_status_is_complete_when_nothing_is_outstanding():
     assert _status() == "complete"
 
 
-def test_status_is_in_progress_while_a_chapter_is_unread():
-    assert _status(chapter_count=3, read_chapters=1) == "in_progress"
+def test_missing_setup_is_pending():
+    assert _status(setup_complete=False) == "pending"
 
 
-def test_status_is_pending_before_anything_is_read():
-    assert _status(chapter_count=3, read_chapters=0) == "pending"
+def test_an_unchunked_project_is_pending():
+    # Importing a book must not mark it anything further along.
+    assert _status(total_chunks=0, fully_translated=False,
+                   chapter_count=0, read_chapters=0) == "pending"
 
 
-def test_a_project_with_no_chapters_is_pending_not_complete():
-    # Importing a book must not mark it finished.
-    assert _status(chapter_count=0, read_chapters=0) == "pending"
+def test_missing_setup_outranks_finished_translation():
+    assert _status(setup_complete=False, read_chapters=0) == "pending"
 
 
-def test_unfinished_translation_holds_a_fully_read_project_at_in_progress():
-    assert _status(fully_translated=False) == "in_progress"
+def test_untranslated_project_needs_translation():
+    assert _status(fully_translated=False, chapter_count=0, read_chapters=0) == "needs_translation"
 
 
-def test_missing_setup_holds_a_fully_read_project_at_in_progress():
-    assert _status(setup_complete=False) == "in_progress"
+def test_partial_translation_needs_translation_even_when_read():
+    """Reading ahead doesn't move a book past the translation stage."""
+    assert _status(fully_translated=False, chapter_count=3, read_chapters=3) == "needs_translation"
 
 
-def test_annotations_awaiting_review_hold_a_project_at_in_progress():
-    assert _status(awaiting_review=1) == "in_progress"
+def test_an_unread_chapter_needs_review():
+    assert _status(chapter_count=3, read_chapters=1) == "needs_review"
 
 
-def test_blank_footnotes_hold_a_project_at_in_progress():
-    assert _status(empty_footnotes=1) == "in_progress"
+def test_a_never_opened_translated_project_needs_review():
+    assert _status(chapter_count=3, read_chapters=0) == "needs_review"
+
+
+def test_translated_with_no_chapters_needs_review_not_complete():
+    # No alignments yet means nothing has been read, so it can't be finished.
+    assert _status(chapter_count=0, read_chapters=0) == "needs_review"
+
+
+def test_annotations_awaiting_review_need_review():
+    assert _status(awaiting_review=1) == "needs_review"
+
+
+def test_blank_footnotes_need_review():
+    assert _status(empty_footnotes=1) == "needs_review"
+
+
+def test_judge_findings_need_review():
+    assert _status(judge_findings=1) == "needs_review"
 
 
 def test_archived_wins_over_a_would_be_complete_project():
@@ -640,24 +659,32 @@ def test_archived_wins_over_a_would_be_complete_project():
 
 
 def test_archived_wins_over_a_never_opened_project():
-    assert _status(archived=True, chapter_count=0, read_chapters=0) == "archived"
+    assert _status(archived=True, setup_complete=False, total_chunks=0) == "archived"
 
 
 def test_card_status_tracks_what_has_been_read(card_project):
-    assert _card(card_project)["status"] == "pending"
+    assert _card(card_project)["status"] == "needs_review"
 
     _reviewed(card_project, ["chapter_01"])
     assert _card(card_project)["status"] == "complete"
 
 
-def test_missing_setup_keeps_a_fully_read_card_in_progress(card_project):
+def test_missing_setup_makes_a_card_pending(card_project):
     _reviewed(card_project, ["chapter_01"])
     (card_project / "style.json").unlink()
-    assert _card(card_project)["status"] == "in_progress"
+    assert _card(card_project)["status"] == "pending"
 
 
-def test_flags_alone_do_not_stop_a_project_completing(card_project):
-    """You can finish a book while disagreeing with the judges."""
+def test_an_untranslated_chunk_makes_a_card_need_translation(card_project):
+    _reviewed(card_project, ["chapter_01"])
+    (card_project / "chunks" / "chapter_01_chunk_001.json").write_text(
+        json.dumps({"id": "chapter_01_chunk_001", "translated_text": ""}), encoding="utf-8"
+    )
+    assert _card(card_project)["status"] == "needs_translation"
+
+
+def test_coded_flags_alone_do_not_stop_a_project_completing(card_project):
+    """The coded checkers are too noisy to gate on."""
     _reviewed(card_project, ["chapter_01"])
     _blacklist_finding(card_project)
     card = _card(card_project)
@@ -665,9 +692,18 @@ def test_flags_alone_do_not_stop_a_project_completing(card_project):
     assert card["status"] == "complete"
 
 
+def test_a_live_judge_finding_holds_a_card_at_needs_review(card_project):
+    _reviewed(card_project, ["chapter_01"])
+    _dialogue_finding(card_project)
+    assert _card(card_project)["status"] == "needs_review"
+
+    append_feedback(card_project, "chapter_01_chunk_000", "dialogue", 0, "resolved")
+    assert _card(card_project)["status"] == "complete"
+
+
 def test_reviewed_chapters_that_no_longer_exist_do_not_count_as_read(card_project):
     _reviewed(card_project, ["chapter_99"])
-    assert _card(card_project)["status"] == "pending"
+    assert _card(card_project)["status"] == "needs_review"
 
 
 def test_the_legacy_status_field_still_archives(card_project):
@@ -685,7 +721,7 @@ def test_an_explicit_archived_false_beats_the_legacy_field(card_project):
         json.dumps({"title": "Card Project", "status": "archived", "archived": False}),
         encoding="utf-8",
     )
-    assert _card(card_project)["status"] == "pending"
+    assert _card(card_project)["status"] == "needs_review"
 
 
 def test_the_old_hand_set_statuses_no_longer_stick(card_project):
@@ -693,7 +729,7 @@ def test_the_old_hand_set_statuses_no_longer_stick(card_project):
     (card_project / "project.json").write_text(
         json.dumps({"title": "Card Project", "status": "complete"}), encoding="utf-8"
     )
-    assert _card(card_project)["status"] == "pending"
+    assert _card(card_project)["status"] == "needs_review"
 
 
 def test_archiving_via_the_api_updates_the_rendered_card(client, card_project):
@@ -710,8 +746,8 @@ def test_archiving_via_the_api_updates_the_rendered_card(client, card_project):
 def test_status_picker_hides_archived_by_default(client, card_project):
     html = client.get("/read/").data.decode("utf-8")
     picker = html.split('id="status-filter-popup"')[1].split('id="review-topbar-group"')[0]
-    assert picker.count('class="status-filter-cb"') == 4
-    assert picker.count("checked") == 3
+    assert picker.count('class="status-filter-cb"') == 5
+    assert picker.count("checked") == 4
     # Archived is the one left unticked.
     archived_box = picker.split('value="archived"')[1].split(">")[0]
     assert "checked" not in archived_box
@@ -734,6 +770,16 @@ def test_an_emptied_status_cookie_means_no_filter(client, card_project):
     # The cards still render; reader_projects.js reads an empty selection as
     # "no filter" and leaves every card visible.
     assert 'class="project-card' in html
+
+
+def test_a_legacy_in_progress_cookie_ticks_both_successors(client, card_project):
+    """A cookie from before the split must not hide the two new statuses."""
+    client.set_cookie("reader_status_filter", "in_progress,complete")
+    html = client.get("/read/").data.decode("utf-8")
+    picker = html.split('id="status-filter-popup"')[1].split('id="review-topbar-group"')[0]
+    assert picker.count("checked") == 3
+    for status in ("needs_translation", "needs_review", "complete"):
+        assert "checked" in picker.split(f'value="{status}"')[1].split(">")[0]
 
 
 def test_unknown_status_cookie_values_are_dropped(client, card_project):
