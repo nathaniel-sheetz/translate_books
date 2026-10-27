@@ -90,6 +90,14 @@ Two rules the prompt states and you must hold yourself to while drafting:
   none of it. So never write "see the address map", "as established elsewhere", "after chapter N",
   "if the relationship shifts later", or "consistent with the other books". Restate such a rule as
   something decidable from one excerpt (usually: the form that holds for most of the book), or drop it.
+  A rule that really holds only for part of the book goes **outside** the guide, as a scoped book
+  rule: `python scripts/harness.py style-rule set --project projects/<slug> --id <id> --rule "<text>"
+  --since <chapter_id> [--until <chapter_id>]` (or `--trigger <english form>` for a rule a word in
+  the passage should bring in). The translator then gets it only in the chunks it covers, after the
+  glossary, so the cached guide never changes. Chapter ids are file ids, not the book's numbering
+  (with a foreword, `chapter_13` is Chapter 12): run `style-rule list` and confirm the label with
+  the user. A change in how two characters address each other belongs in the address map's
+  `since`/`until`, which reaches the translator the same way, not in a style rule.
 - **No term→translation pairs in the guide.** Terms ship separately as the glossary; a guide that
   also names terms creates two sources of truth. When drafting surfaces a term that needs a fixed
   translation, **Write** it to the printed `carryforward_path` as a JSON array of

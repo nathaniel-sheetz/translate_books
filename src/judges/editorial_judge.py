@@ -292,6 +292,8 @@ class EditorialJudge(VerdictJudge):
                 context.get("calibration_examples") or ""
             ).strip()
             or _NO_EXAMPLES,
+            # Filled per item only for a book with chapter-windowed rules.
+            "passage_chapter": "",
         }
 
     def item_prompt_variables(
@@ -313,11 +315,24 @@ class EditorialJudge(VerdictJudge):
         """
         coded = context.get("coded_findings") or {}
         entries = coded.get(target.id) if isinstance(coded, dict) else None
-        return {
+        variables = {
             "translation_text": target.translated_text,
             "already_reported": format_already_reported(list(entries or [])),
             "max_findings": str(resolve_budget(target, context)),
         }
+        # Only a book with a chapter-windowed rule says which chapter this is:
+        # the rule list marks those rules "[applies ... only]", and the judge
+        # needs the chapter to tell. Every other book's prompt is unchanged (the
+        # empty default lives in the shared variables, so a batch item carries
+        # no empty tag).
+        labels = context.get("windowed_rule_chapter_labels")
+        if labels is not None:
+            chapter_id = str(target.context.get("chapter_id") or target.id.split("_chunk")[0])
+            label = labels.get(chapter_id)
+            variables["passage_chapter"] = (
+                f"This passage is from {chapter_id}" + (f" ({label})" if label else "") + ".\n\n"
+            )
+        return variables
 
     def select_findings(
         self, raw_findings: list[dict[str, Any]], target: JudgeTarget, context: dict[str, Any]

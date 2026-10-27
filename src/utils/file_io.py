@@ -387,7 +387,10 @@ def filter_glossary_for_chunk(glossary: Glossary, source_text: str) -> Glossary:
     Filter a glossary to only include terms that appear in the chunk's source text.
 
     Matches case-insensitively and handles common English variants:
-    plural (+s, +es), possessive ('s), and past tense (+d, +ed).
+    plural (+s, +es, y→ies), possessive ('s), and past tense (+d, +ed). A sense
+    label is ignored ("stalk (mushroom)" ships on "stalk"), a slash key ships on
+    either half, and any of the entry's ``aliases`` ships it too
+    (:func:`src.house.match.entry_occurs`).
 
     Args:
         glossary: Full project glossary
@@ -401,10 +404,10 @@ def filter_glossary_for_chunk(glossary: Glossary, source_text: str) -> Glossary:
 
     # The shared matcher: house-rule triggers and the house lexicon decide
     # "does this chunk need it" the same way.
-    from src.house.match import term_occurs
+    from src.house.match import entry_occurs
 
     text_lower = source_text.lower()
-    matching_terms = [t for t in glossary.terms if term_occurs(t.english, text_lower)]
+    matching_terms = [t for t in glossary.terms if entry_occurs(t.english, t.aliases, text_lower)]
 
     return Glossary(
         terms=matching_terms,
@@ -413,12 +416,27 @@ def filter_glossary_for_chunk(glossary: Glossary, source_text: str) -> Glossary:
     )
 
 
+def unmatched_glossary_terms(glossary: Glossary, source_text: str) -> list[str]:
+    """The keys of entries that would ship to no chunk of ``source_text``.
+
+    The same test :func:`filter_glossary_for_chunk` applies, run against the
+    whole book: an entry listed here never reaches the translator, and the
+    judges still hold the translation to it. The fix is an alias (the form the
+    source actually uses) or a renamed key.
+    """
+    from src.house.match import entry_occurs
+
+    text_lower = (source_text or "").lower()
+    return [t.english for t in glossary.terms if not entry_occurs(t.english, t.aliases, text_lower)]
+
+
 def format_glossary_for_prompt(glossary: Glossary) -> str:
     """
     Format a Glossary into human-readable text for prompt inclusion.
 
     Groups terms by type (CHARACTER, PLACE, CONCEPT, etc.) and formats them
-    with alternatives if present.
+    with alternatives and the translator ``note`` if present. ``context`` is
+    never printed.
 
     Args:
         glossary: The Glossary object to format
@@ -468,12 +486,14 @@ def format_glossary_for_prompt(glossary: Glossary) -> str:
         if term_type in terms_by_type:
             sections.append(f"{label}:")
             for term in terms_by_type[term_type]:
-                # Format alternatives
-                if hasattr(term, 'alternatives') and term.alternatives:
-                    alts = ", ".join(term.alternatives)
-                    sections.append(f"- {term.english} → {term.spanish} (alternatives: {alts})")
-                else:
-                    sections.append(f"- {term.english} → {term.spanish}")
+                line = f"- {term.english} → {term.spanish}"
+                if getattr(term, 'alternatives', None):
+                    line += f" (alternatives: {', '.join(term.alternatives)})"
+                # The note is the translator's; context is the human's and never ships.
+                note = (getattr(term, 'note', None) or "").strip()
+                if note:
+                    line += f" — {note}"
+                sections.append(line)
             sections.append("")  # Blank line between sections
 
     return "\n".join(sections).strip()

@@ -128,8 +128,23 @@ def glossary_terms_from_proposals(proposals: list[dict]) -> list[GlossaryTerm]:
             type=term_type.lower(),
             context=p.get("context", ""),
             alternatives=p.get("alternatives", []),
+            note=(str(p.get("note") or "").strip() or None),
+            aliases=_proposal_aliases(p.get("aliases")),
         ))
     return terms
+
+
+def _proposal_aliases(raw) -> list[str]:
+    """A proposal's aliases as a list; a string is read as comma-separated.
+
+    Iterating a bare string would make every letter an alias, and a one-letter
+    alias matches every chunk, so those are dropped too.
+    """
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [s for s in (str(a).strip() for a in raw) if len(s) >= 2]
 
 
 def proposals_to_glossary(terms: list[GlossaryTerm]) -> Glossary:

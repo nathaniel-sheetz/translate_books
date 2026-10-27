@@ -83,6 +83,12 @@ are easy to get wrong:
 - **`style_guide_summary` has a chunk-local reader.** General rules first, then only the
   high-frequency *exceptions*. No full pair list, no chapter numbers, no "later in the book",
   no reference to the map itself. See 0B-f.
+- **A shift goes in `since`/`until`, and the translator gets it.** For any direction with a
+  window, each chunk that names either character gets one line in its passage notes: the rule in
+  force for that chapter, form and `when` only (`notes` stay with the judge). So the shift does
+  not have to be squeezed into the summary. The ids are the split's file ids (`chapter_13`), not
+  the book's numbering, which differs when the book has front matter: check the chapter where
+  the change actually happens.
 
 Refine with the user, then:
 ```bash
@@ -93,7 +99,8 @@ returns a `warnings` entry about a missing `style_guide_summary`, add it and re-
 it the style guide falls back to the single questionnaire answer and this beat informed nothing.
 
 **0B-e. STOP — approval beat.** Present, in this order:
-- the committed **pairs** and **global rules**;
+- the committed **pairs** and **global rules**, calling out every `since`/`until` window with
+  the chapter it names, since each window now changes what the translator reads there;
 - the **`style_guide_summary`** verbatim, flagged as *"this text goes into the style guide and is
   what every translator worker will actually see"* — it is the part with production impact, so
   it deserves its own look rather than being buried in the pair list;

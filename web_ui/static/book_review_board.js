@@ -227,6 +227,7 @@
             var c = p.current;
             var line = c.english + ' → ' + c.spanish;
             if (c.alternatives && c.alternatives.length) line += ' (' + c.alternatives.join(', ') + ')';
+            if (c.note) line += '\n' + S.translator_note + ': ' + c.note;
             if (c.context) line += '\n' + c.context;
             box.appendChild(textBlock(S.current_entry, line, 'br-block-now'));
         }
@@ -236,12 +237,17 @@
             box.appendChild(markedBlock(S.becomes, words ? words.add : [[raw.after, false]], 'br-block-after'));
         } else if (p.type === 'style.append') {
             box.appendChild(textBlock(S.adds, raw.text, 'br-block-after'));
-        } else if (p.type === 'glossary.edit' && raw.context) {
-            box.appendChild(textBlock(S.becomes, raw.context, 'br-block-after'));
+        } else if (p.type === 'glossary.edit' && (raw.context || raw.note)) {
+            var edited = [];
+            if (raw.note) edited.push(S.translator_note + ': ' + raw.note);
+            if (raw.context) edited.push(raw.context);
+            box.appendChild(textBlock(S.becomes, edited.join('\n'), 'br-block-after'));
         } else if (p.type === 'glossary.split_sense' || p.type === 'glossary.add') {
             var entries = raw.entries || [raw];
             box.appendChild(textBlock(S.becomes, entries.map(function (e) {
-                return e.english + ' → ' + e.spanish + (e.context ? '\n  ' + e.context : '');
+                return e.english + ' → ' + e.spanish
+                    + (e.note ? '\n  ' + S.translator_note + ': ' + e.note : '')
+                    + (e.context ? '\n  ' + e.context : '');
             }).join('\n'), 'br-block-after'));
         } else if (p.type === 'manual') {
             box.appendChild(el('div', 'br-block-text', raw.description || ''));

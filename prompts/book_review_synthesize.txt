@@ -34,12 +34,17 @@ you. Work from them alone: do not search or open files.
   - only the **glossary entries whose English key occurs in its chunk's source as
     written**.
 
-  It never sees the address map, and never sees a glossary entry's `context` note.
-  So, for glossary entries:
-  - A key with a hyphen or space the source lacks, a curly apostrophe, a
-    "(sense)" label or a "/" never matches.
+  It never sees the address map. Of a glossary entry it gets the key as written
+  (a "(sense)" label included), the Spanish, the alternatives and the entry's
+  `note`; it never sees `context`, which is for the judges and the editor. So,
+  for glossary entries:
+  - The matcher ignores a "(sense)" label, tries each side of a "/", and
+    tolerates hyphen/space, curly-apostrophe and -ies/-y differences. A key that
+    still never matches is spelled differently from the source in some other way.
   - A homonym key ("scales", "locust") reaches chunks where the word means
-    something else.
+    something else. A sense label on the key, or a `note` saying which sense is
+    meant (or what it is not), is how the translator learns this; `context`
+    never reaches it.
 - Dialogue punctuation is governed by the shared dialogue rules, not the style
   guide. Never propose copying or restating dialogue-punctuation rules into the
   style guide. If those rules are wrong or unclear, propose a `manual` patch naming
@@ -88,9 +93,9 @@ Each patch is an object with a `type` and the fields shown.
 |---|---|
 | `glossary.rekey` | `english` (current key, exact), `new_english` (key as the source writes it) |
 | `glossary.add_variant` | `english` (existing key), `new_english` (another surface form; the entry is copied) |
-| `glossary.edit` | `english`, and any of `spanish`, `alternatives`, `context` |
-| `glossary.split_sense` | `english`, `entries`: [{`english`, `spanish`, `context`}] (replaces the entry) |
-| `glossary.add` | `english`, `spanish`, optional `alternatives`, `context` |
+| `glossary.edit` | `english`, and any of `spanish`, `alternatives`, `context`, `note` |
+| `glossary.split_sense` | `english`, `entries`: [{`english`, `spanish`, `context`, `note`}] (replaces the entry) |
+| `glossary.add` | `english`, `spanish`, optional `alternatives`, `context`, `note` |
 | `glossary.remove` | `english` |
 | `style.replace_text` | `before` (exact text now in the style guide, occurring once), `after` |
 | `style.append` | `text` |

@@ -134,7 +134,11 @@ it covered); `book_review.py skip` records a deliberate skip the same way.
 The judge sweep (`book_review.py judge`) prepares one manifest with per-judge scopes
 (`{judge: [chapter:<id>, ...]}`), fans it out headless, commits, and then runs
 editorial pass 2 over every chunk still awaiting it. It refuses while another wave
-holds the book's lock, or when the CLI preflight fails.
+holds the book's lock, or when the CLI preflight fails. Each job is killed after the
+CLI's ceiling (900 s on Cursor and Codex, 1800 s on Claude); `--job-timeout <seconds>`
+replaces it for both passes, and `--estimate` echoes the one in force
+(`job_timeout_s`, `job_timeout_source`). Grok 4.7 editorial jobs have run past 900 s
+on chapters of 1,500-2,300 words.
 
 ## Synthesis
 

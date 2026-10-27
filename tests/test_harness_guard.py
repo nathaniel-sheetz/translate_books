@@ -52,6 +52,16 @@ class TestGuardGlossaryProposals:
         terms = glossary_terms_from_proposals(proposals)
         assert {t.english for t in terms} == {"Harry", "wand"}
 
+    def test_aliases_string_is_comma_separated_not_letters(self):
+        [term] = glossary_terms_from_proposals([
+            {"english": "prairie dog", "translation": "perrito", "aliases": "dog town, the town, x"},
+        ])
+        assert term.aliases == ["dog town", "the town"]  # a one-letter alias would match every chunk
+        [term] = glossary_terms_from_proposals([
+            {"english": "prairie dog", "translation": "perrito", "aliases": 7},
+        ])
+        assert term.aliases == []
+
     def test_missing_english_raises_not_keyerror(self):
         # Without the guard this dict hits `p["english"]` -> KeyError 500.
         proposals = [{"translation": "varita", "type": "other"}]

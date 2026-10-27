@@ -28,22 +28,33 @@ glossary changed or left out, and `house_check` points at `reports/house_check.m
 reading sibling glossaries by hand.
 
 **Read the printed `prompt_path`** and draft the glossary proposals yourself — the thinking-mode
-step. Produce a JSON array of `{english, translation, type, context, alternatives}` objects and
+step. Produce a JSON array of `{english, translation, type, context, alternatives}` objects (plus
+`note` / `aliases` where an entry needs them) and
 **Write** it to the printed `draft_path`. **Write the target language WITH its diacritics**
 (Spanish: á é í ó ú ñ ¿ ¡). The `Write` tool is UTF-8 — do **not** ASCII-fold "to be safe";
 stripped accents (`Tia` for `Tía`, `senor` for `señor`) become the canonical forms fed verbatim
 to every translator worker.
 
-Two field conventions the prompt spells out and the commit step lints for:
+Field conventions the prompt spells out and the commit step lints for:
 - **`alternatives` is not free.** It lets a worker pick a different rendering per chunk. Places
   and bare personal names take **none**. A title + personal name leads with the **narration form
   including the article** (`el tío Antony`) and offers the **bare vocative** (`tío Antony`) as its
   single alternative — the style guide's word-choice rule tells the worker which to use where.
 - **`context` is GUI-only.** It is shown in the dashboard's glossary table and is **not** sent to
-  the translator (`format_glossary_for_prompt` emits only `english → spanish (alternatives: …)`).
-  Never park a usage rule there expecting it to reach the translation — that belongs in the style
-  guide. Use `context` to explain a decision to the human reading the table, including the reason
-  for any deliberate exception to the conventions above.
+  the translator. Use it to explain a decision to the human reading the table, including the
+  reason for any deliberate exception to the conventions above.
+- **`note` is the translator's.** `format_glossary_for_prompt` prints it after the entry
+  (`english → spanish (alternatives: …) — note`) in every chunk the entry ships to. Leave it out
+  unless a wrong sense is plausible: a homonym or a false friend (`scales` of a flower → escamas,
+  not balanza; `locust` the insect, not the tree). One short instruction, no rationale. Word-level
+  guidance like this goes in `note`, **not** in the style guide, which every chunk pays for.
+- **Sense labels and `aliases` decide where an entry ships.** An entry reaches a chunk when its
+  key, or one of its `aliases`, occurs in that chunk's English. Plurals (including -ies),
+  possessives, hyphen/space and curly-apostrophe differences already match. A sense label in
+  parentheses is ignored for matching (`stem (mushroom)` ships wherever "stem" appears, and the
+  translator reads the label), and a slash key ships on either half. Two senses of one word get
+  two labelled entries; both ship, and the translator picks. Use `aliases` only for a form the
+  key doesn't cover (`dog town` for `prairie dog`).
 
 As you draft, **track every term whose translation you were unsure about**
 (ambiguous sense, multiple valid renderings, dialect/register judgement calls) and why — keep that
@@ -56,8 +67,9 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
 
 **STOP — approval beat.** Do all of the following, in this order:
 - **Show the full list of glossary terms** (use the `terms` the command printed) — render every
-  `english → translation` pair with type/context so the user can scan the actual decisions. Do not
-  collapse it to "N terms drafted."
+  `english → translation` pair with type/context so the user can scan the actual decisions. Give
+  `note` and `aliases` columns of their own, so the user approves what the translator will
+  read separately from the rationale. Do not collapse it to "N terms drafted."
 - **Call out the uncertain translations** you tracked: name each term, its chosen rendering, the
   alternative(s) you considered, and why you hesitated, so the user can adjudicate the close calls.
 - **Triage `warnings`** — `commit` returns one array holding two different kinds of thing. Split
@@ -67,8 +79,9 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
     re-run `commit`, **then** present the gate.
   - *`REVIEW:` lines — human judgement calls, present them.* These flag the alternatives
     conventions (a place or a bare personal name carrying alternatives; a title + name whose
-    primary lacks the article or whose vocative alternative is missing) and a stale address-map
-    cast. They are advisory, not errors — a genuine exception like `océano Atlántico` /
+    primary lacks the article or whose vocative alternative is missing), keys that occur nowhere
+    in the source (they would never ship; propose an alias or a renamed key), and a stale
+    address-map cast. They are advisory, not errors — a genuine exception like `océano Atlántico` /
     `Atlántico` will trip one legitimately. Show each one and say whether you think it is a real
     fix or a justified exception, and let the user decide.
   - If a `REVIEW:` line says `address_map.json` still uses English cast names, that is the

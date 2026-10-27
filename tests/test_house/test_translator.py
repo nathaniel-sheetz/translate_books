@@ -40,7 +40,7 @@ def test_prefix_is_identical_and_notes_follow_the_trigger(house):
     assert p1 == p2, "the cached prefix must be byte-identical across chunks"
     assert "HOUSE RULES" in p1 and "Write Mexican Spanish." in p1
     assert "Old + surname" not in p1  # triggered rules never sit in the prefix
-    assert "HOUSE NOTES" not in s1 and "HOUSE NOTES" in s2
+    assert "NOTES FOR THIS PASSAGE" not in s1 and "NOTES FOR THIS PASSAGE" in s2
     assert "Old + surname is el viejo" in s2
     assert "casilla" in s1 and "casilla" not in s2  # the glossary filter, unchanged
     for prompt in (p1 + s1, p2 + s2):
@@ -49,7 +49,7 @@ def test_prefix_is_identical_and_notes_follow_the_trigger(house):
 
 def test_no_house_renders_no_house_blocks():
     prompt = build_translation_prompt(_chunk("Old Dawson led the mare out."))
-    assert "HOUSE RULES" not in prompt and "HOUSE NOTES" not in prompt
+    assert "HOUSE RULES" not in prompt and "NOTES FOR THIS PASSAGE" not in prompt
 
 
 def test_a_template_without_slots_still_gets_both_blocks():

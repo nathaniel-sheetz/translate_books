@@ -145,10 +145,13 @@ def describe_patch(patch: dict[str, Any]) -> str:
                             for k, v in patch.items() if k not in ("type", "english"))
         return f"glossary: edit `{patch['english']}`: {changes}"
     if kind == "glossary.split_sense":
-        parts = "; ".join(f"`{e['english']}` → {e['spanish']}" for e in patch["entries"])
+        parts = "; ".join(f"`{e['english']}` → {e['spanish']}"
+                          + (f" (note: “{_clip(e['note'], 100)}”)" if e.get("note") else "")
+                          for e in patch["entries"])
         return f"glossary: split `{patch['english']}` into {parts}"
     if kind == "glossary.add":
-        return f"glossary: add `{patch['english']}` → {patch['spanish']}"
+        line = f"glossary: add `{patch['english']}` → {patch['spanish']}"
+        return line + (f" (note: “{_clip(patch['note'], 140)}”)" if patch.get("note") else "")
     if kind == "glossary.remove":
         return f"glossary: remove `{patch['english']}`"
     if kind == "style.replace_text":

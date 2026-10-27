@@ -28,10 +28,11 @@
 #       (prompts/house_style_rules.json, in scope and not turned off for the
 #       book). Identical in every chunk, so it belongs in the fixed prefix.
 #       Build with src.house.prompt.TranslatorHouse.rules_block().
-#   house_notes - HOUSE NOTES section: the triggered house rules whose
-#       triggers occur in this chunk's source; empty otherwise. Per-chunk,
-#       so it belongs after the GLOSSARY TERMS split.
-#       Build with TranslatorHouse.notes_block(source_text).
+#   house_notes - NOTES FOR THIS PASSAGE section: the triggered house rules,
+#       the book's chapter-windowed or triggered rules and the address shifts
+#       that apply to this chunk; empty otherwise. Per-chunk, so it belongs
+#       after the GLOSSARY TERMS split.
+#       Build with TranslatorHouse.notes_block(source_text, chapter_id).
 #
 # Instructions:
 # - All variables must be provided when rendering this template

@@ -454,6 +454,120 @@ def setup(
     }
 
 
+# ── chapter-scoped book rules ──────────────────────────────────────────────
+
+def style_rule_list(project: str) -> dict:
+    """The book's own rules (style_rules.json), with what each reaches."""
+    from src.house.scope import book_chapter_ids, chapter_labels
+    from src.judges.context import load_book_rules
+
+    project_dir = state.resolve_project_dir(project)
+    labels = chapter_labels(project_dir)
+    chunks = _load_chunks_for_rules(project_dir)
+    return {
+        "rules": [_describe_book_rule(project_dir, r, labels, chunks) for r in load_book_rules(project_dir)],
+        "chapters": [{"id": c, "label": labels.get(c, "")} for c in book_chapter_ids(project_dir)],
+    }
+
+
+def style_rule_set(project: str, *, rule_id: str, rule: str, note: str | None = None,
+                   since: str | None = None, until: str | None = None,
+                   triggers: list[str] | None = None) -> dict:
+    """Add or replace a book rule. A window or triggers sends it to the translator.
+
+    ``since`` / ``until`` are chapter ids (``chapter_13``), the split's file ids,
+    which is not the book's numbering when it has front matter: ``style-rule
+    list`` prints both.
+
+    Replacing merges into the existing entry: ``None`` keeps a field's current
+    value, an empty value clears it, and fields this call does not manage
+    (``enforce``, ``settles``, ...) are kept.
+    """
+    from src.house.scope import book_chapter_ids, chapter_labels, has_window, window_problems
+    from src.judges.context import load_book_rules, load_house_rules, rule_triggers, save_book_rule
+
+    project_dir = state.resolve_project_dir(project)
+    rule_id = rule_id.strip()
+    existing = next((r for r in load_book_rules(project_dir) if r.get("id") == rule_id), None)
+    entry: dict = dict(existing or {})
+    entry.pop("text", None)  # an older entry's spelling of "rule"
+    entry["id"] = rule_id
+    entry["rule"] = rule.strip()
+    for key, value in (("note", note), ("since", since), ("until", until)):
+        if value is None:
+            continue
+        if value.strip():
+            entry[key] = value.strip()
+        else:
+            entry.pop(key, None)
+    if triggers is not None:
+        kept = [t for t in (s.strip() for s in triggers) if t]
+        if kept:
+            entry["triggers"] = kept
+        else:
+            entry.pop("triggers", None)
+    if not entry["id"] or not entry["rule"]:
+        raise ValueError("a rule needs an id and its text")
+    if (has_window(entry) or rule_triggers(entry)) and rule_id in {
+        str(r.get("id") or "").strip() for r in load_house_rules()
+    }:
+        raise ValueError(f"{rule_id!r} is a house rule's id; a book entry with it only overrides "
+                         "that rule's note, so a chapter-scoped rule needs its own id")
+    problems = window_problems([entry], book_chapter_ids(project_dir))
+    if problems:
+        raise ValueError("; ".join(problems))
+    replaced = save_book_rule(project_dir, entry)
+    described = _describe_book_rule(project_dir, entry, chapter_labels(project_dir),
+                                    _load_chunks_for_rules(project_dir))
+    warnings = []
+    if described["to_translator"] and described["chunks"] == 0:
+        warnings.append(f"rule {entry['id']!r} reaches no chunk yet (no chunks, or none in its window "
+                        "and triggers)")
+    return {"rule": described, "replaced": replaced, "warnings": warnings}
+
+
+def style_rule_remove(project: str, *, rule_id: str) -> dict:
+    from src.judges.context import remove_book_rule
+
+    project_dir = state.resolve_project_dir(project)
+    return {"removed": remove_book_rule(project_dir, rule_id), "id": rule_id}
+
+
+def _load_chunks_for_rules(project_dir: Path) -> list:
+    """The book's chunks, loaded once for every rule a listing describes."""
+    from src.utils.file_io import load_chunk
+
+    chunks = []
+    for path in sorted((project_dir / "chunks").glob("*.json")):
+        try:
+            chunks.append(load_chunk(path))
+        except Exception:  # noqa: BLE001 - a broken chunk just is not counted
+            continue
+    return chunks
+
+
+def _describe_book_rule(project_dir: Path, rule: dict, labels: dict, chunks: list) -> dict:
+    """The rule, its window in the book's labels, and how many chunks it reaches."""
+    from src.house.match import any_trigger
+    from src.house.scope import has_window, rule_in_scope, rule_window, window_text
+    from src.judges.context import rule_triggers
+
+    to_translator = has_window(rule) or bool(rule_triggers(rule))
+    reached = 0
+    if to_translator:
+        for chunk in chunks:
+            if rule_in_scope(rule, chunk.chapter_id) and (
+                not rule_triggers(rule) or any_trigger(rule_triggers(rule), chunk.source_text)
+            ):
+                reached += 1
+    return {
+        **rule,
+        "window": window_text(*rule_window(rule), labels),
+        "to_translator": to_translator,
+        "chunks": reached if to_translator else None,
+    }
+
+
 # ── book groups and precedent ──────────────────────────────────────────────
 
 def group_list(project: str | None = None) -> dict:
@@ -1380,10 +1494,12 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
         }),
         "instructions": (
             "Read prompt_path, draft proposals as a JSON array of "
-            "{english, translation, type, context, alternatives} to draft_path (tracking any "
-            "uncertain renderings to surface at the approval gate), then run `glossary commit`. "
+            "{english, translation, type, context, alternatives} (plus note / aliases where "
+            "needed) to draft_path (tracking any uncertain renderings to surface at the approval "
+            "gate), then run `glossary commit`. "
             "Note the alternatives conventions in the prompt: places and bare personal names "
-            "take none; a title + name leads with the narration form including the article."
+            "take none; a title + name leads with the narration form including the article. "
+            "`note` reaches the translator, `context` does not."
             + _SECTIONS_HINT
         ),
     }
@@ -1419,6 +1535,10 @@ def glossary_commit(project: str, *, draft: str | None = None,
     save_glossary(glossary, out, writer="harness:glossary commit", reason=reason)
     validate_glossary_file(out)  # belt-and-suspenders
 
+    # An entry whose key the source never uses never reaches the translator,
+    # while the judges still hold the translation to it.
+    warnings.extend(_unmatched_key_warnings(project_dir, glossary))
+
     # The address map is drafted before the glossary and carries English cast
     # names; now that the target-language forms are approved, flag the drift.
     warnings.extend(_stale_cast_warnings(project_dir, glossary=glossary))
@@ -1445,10 +1565,30 @@ def glossary_commit(project: str, *, draft: str | None = None,
         "house_check": write_report(project_dir),
         "warnings": warnings,
         "terms": [
-            {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context}
+            {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context,
+             "note": t.note, "aliases": t.aliases}
             for t in glossary.terms
         ],
     }
+
+
+def _unmatched_key_warnings(project_dir: Path, glossary) -> list[str]:
+    """One ``REVIEW:`` line naming the keys no chunk of the source would ship."""
+    from src.house import read_source
+    from src.utils.file_io import unmatched_glossary_terms
+
+    source = read_source(project_dir)
+    if not source:
+        return []
+    unmatched = unmatched_glossary_terms(glossary, source)
+    if not unmatched:
+        return []
+    return [
+        "REVIEW: these glossary keys occur nowhere in the source, so they never reach the "
+        "translator (the judges still enforce them): "
+        + ", ".join(repr(k) for k in unmatched)
+        + ". Add the form the source uses to `aliases`, or rename the key."
+    ]
 
 
 # ── address-map beat (forms-of-address expectations for the address judge) ──

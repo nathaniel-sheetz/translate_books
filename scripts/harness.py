@@ -269,6 +269,29 @@ def _build_parser() -> argparse.ArgumentParser:
                             help="Light style-guide draft (default: .harness/style_guide_light_draft.txt)")
             add_reason(ap)
 
+    # style-rule <action> ---------------------------------------------------
+    sr = sub.add_parser("style-rule",
+                        help="The book's own rules (style_rules.json); a chapter window or "
+                             "triggers sends one to the translator, only where it applies")
+    sr_sub = sr.add_subparsers(dest="action", required=True)
+    srl = sr_sub.add_parser("list", help="List the book's rules and its chapter ids with labels")
+    add_project(srl)
+    srs = sr_sub.add_parser("set", help="Add or replace a rule (by --id); on a replace, a flag "
+                                        "left out keeps its current value and an empty one "
+                                        "(--note \"\") clears it")
+    add_project(srs)
+    srs.add_argument("--id", required=True, dest="rule_id")
+    srs.add_argument("--rule", required=True, help="The instruction, as the translator reads it")
+    srs.add_argument("--note", default=None, help="An example or clarification, appended to the rule")
+    srs.add_argument("--since", default=None,
+                     help="First chapter id it applies to (chapter_13; see `list` for labels)")
+    srs.add_argument("--until", default=None, help="Last chapter id it applies to")
+    srs.add_argument("--trigger", action="append", dest="triggers", default=None,
+                     help="English form that brings it into a chunk (repeatable; re:<regex> allowed)")
+    srr = sr_sub.add_parser("remove", help="Remove a rule (by --id)")
+    add_project(srr)
+    srr.add_argument("--id", required=True, dest="rule_id")
+
     # glossary <action> -----------------------------------------------------
     gl = sub.add_parser("glossary", help="Glossary beat (prepare/commit)")
     gl_sub = gl.add_subparsers(dest="action", required=True)
@@ -724,6 +747,15 @@ def _dispatch(args: argparse.Namespace):
             return flow.group_leave(args.project, group=args.group)
     if cmd == "precedent":
         return flow.precedent(args.project, rebuild=not args.keep)
+    if cmd == "style-rule":
+        if args.action == "list":
+            return flow.style_rule_list(args.project)
+        if args.action == "set":
+            return flow.style_rule_set(args.project, rule_id=args.rule_id, rule=args.rule,
+                                       note=args.note, since=args.since, until=args.until,
+                                       triggers=args.triggers)
+        if args.action == "remove":
+            return flow.style_rule_remove(args.project, rule_id=args.rule_id)
     if cmd in ("split-preview", "split"):
         fn = flow.split_preview if cmd == "split-preview" else flow.split_apply
         return fn(

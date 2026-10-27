@@ -951,6 +951,8 @@ def setup_load_glossary(project_id):
             "type": t.type.value if hasattr(t.type, "value") else t.type,
             "context": t.context or "",
             "alternatives": t.alternatives or [],
+            "note": t.note or "",
+            "aliases": t.aliases or [],
         }
         for t in g.terms
     ]})
@@ -986,7 +988,8 @@ def setupsave_glossary(project_id):
         glossary = proposals_to_glossary(terms)
         save_glossary(glossary, glossary_path, writer="web_ui:glossary replace",
                       reason=_change_reason(data))
-        return jsonify({"ok": True, "total": len(terms), "mode": "replace"})
+        return jsonify({"ok": True, "total": len(terms), "mode": "replace",
+                        "unmatched": _unmatched_glossary_keys(project_dir, glossary)})
 
     # Merge with existing if present
     if glossary_path.exists():
@@ -999,12 +1002,86 @@ def setupsave_glossary(project_id):
         existing.updated_at = datetime.now()
         save_glossary(existing, glossary_path, writer="web_ui:glossary merge",
                       reason=_change_reason(data))
-        return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms)})
+        return jsonify({"ok": True, "total": len(existing.terms), "new": len(new_terms),
+                        "unmatched": _unmatched_glossary_keys(project_dir, existing)})
     else:
         glossary = proposals_to_glossary(terms)
         save_glossary(glossary, glossary_path, writer="web_ui:glossary merge",
                       reason=_change_reason(data))
-        return jsonify({"ok": True, "total": len(terms), "new": len(terms)})
+        return jsonify({"ok": True, "total": len(terms), "new": len(terms),
+                        "unmatched": _unmatched_glossary_keys(project_dir, glossary)})
+
+
+@app.route("/api/setup/<project_id>/style-rules", methods=["GET"])
+def setup_list_style_rules(project_id):
+    """The book's own rules (style_rules.json) and its chapters, for the scoped-notes list."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    from src.harness import flow
+
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify(flow.style_rule_list(str(project_dir)))
+
+
+@app.route("/api/setup/<project_id>/style-rules", methods=["POST"])
+def setup_save_style_rule(project_id):
+    """Add or replace one book rule; a chapter window or triggers send it to the translator."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    from src.harness import flow
+
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Bad request"}), 400
+    # A field left out of the body keeps the rule's current value; an empty one clears it.
+    def field(key):
+        return None if key not in data else str(data.get(key) or "")
+
+    triggers = data.get("triggers")
+    if isinstance(triggers, str):
+        # One per line: a re: trigger may itself contain commas.
+        triggers = triggers.splitlines()
+    if triggers is not None and not isinstance(triggers, list):
+        return jsonify({"error": "triggers must be a list or one trigger per line"}), 400
+    try:
+        out = flow.style_rule_set(
+            str(project_dir),
+            rule_id=str(data.get("id") or ""), rule=str(data.get("rule") or ""),
+            note=field("note"), since=field("since"), until=field("until"),
+            triggers=None if triggers is None else [str(t) for t in triggers],
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(out)
+
+
+@app.route("/api/setup/<project_id>/style-rules/<rule_id>", methods=["DELETE"])
+def setup_remove_style_rule(project_id, rule_id):
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    from src.harness import flow
+
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    try:
+        return jsonify(flow.style_rule_remove(str(project_dir), rule_id=rule_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def _unmatched_glossary_keys(project_dir: Path, glossary) -> list[str]:
+    """Keys no chunk of the source would ship, for the save status line."""
+    from src.house import read_source
+    from src.utils.file_io import unmatched_glossary_terms
+
+    source = read_source(project_dir)
+    return unmatched_glossary_terms(glossary, source) if source else []
 
 
 # ============================================================================
@@ -1529,6 +1606,8 @@ def _glossary_term_row(term) -> dict:
         "type": str(term_type or ""),
         "context": term.context or "",
         "alternatives": list(term.alternatives or []),
+        "note": term.note or "",
+        "aliases": list(term.aliases or []),
     }
 
 
@@ -5173,7 +5252,7 @@ def project_chunk_prompt(project_id, chunk_id):
 
         house = load_translator_house(project_dir)
         variables["house_rules"] = house.rules_block()
-        variables["house_notes"] = house.notes_block(chunk.source_text)
+        variables["house_notes"] = house.notes_block(chunk.source_text, chunk.chapter_id)
 
         rendered = render_prompt(template, variables)
         separator = "=" * 80

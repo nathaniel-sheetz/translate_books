@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from src.book_review.corpus import parse_shipped_glossary, theme_of
+from src.book_review.corpus import dialogue_fingerprint, parse_shipped_glossary, theme_of
 from src.book_review.signals import (
     address_style_conflicts,
     dead_glossary_keys,
@@ -32,6 +32,21 @@ def test_parse_shipped_glossary_reads_only_the_glossary_block():
     prompt = logged_prompt([("porte-cochere", "la cochera"), ("Nancy", "Nancy")])
     prompt += "\n- not → a glossary line\n"
     assert parse_shipped_glossary(prompt) == {"porte-cochere", "nancy"}
+
+
+def test_dialogue_fingerprint_hashes_the_framed_block_not_the_style_guide():
+    bar = "=" * 80
+    block = f"{bar}\nDIALOGUE FORMATTING\n{bar}\n\nUse the raya for each speaker.\nNo quotes."
+    style_guide = "DIALOGUE FORMATTING\nUse rayas: a looser restatement in the style guide."
+    prompt = (
+        "Follow the DIALOGUE FORMATTING section below.\n\n"
+        f"{bar}\nSTYLE GUIDE\n{bar}\n\n{style_guide}\n\n"
+        f"{block}\n\n{bar}\nSOURCE TEXT\n{bar}\n\nHello."
+    )
+    assert dialogue_fingerprint(block)
+    assert dialogue_fingerprint(prompt) == dialogue_fingerprint(block)
+    # A chunk with no dialogue carries no block; the style guide's header is not one.
+    assert dialogue_fingerprint(f"{bar}\nSTYLE GUIDE\n{bar}\n\n{style_guide}") == ""
 
 
 def test_theme_reads_the_rule_not_the_message():

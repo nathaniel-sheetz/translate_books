@@ -394,7 +394,7 @@ class TestLiveTranslationTemplate:
         assert "{{dialogue_instructions}}" in example_template
 
     def test_example_template_places_house_blocks_around_the_cache_split(self, example_template):
-        """HOUSE RULES belong in the cached prefix, HOUSE NOTES after the glossary split."""
+        """HOUSE RULES belong in the cached prefix, NOTES FOR THIS PASSAGE after the glossary split."""
         split = example_template.index("=" * 80 + "\nGLOSSARY TERMS")
         assert example_template.index("{{house_rules}}") < split < example_template.index("{{house_notes}}")
 

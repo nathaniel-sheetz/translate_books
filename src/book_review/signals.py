@@ -43,7 +43,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional
 
 from src.book_review.corpus import BookCorpus, Finding
-from src.house.match import term_occurs
+from src.house.match import entry_occurs, term_variants
 
 #: Marks that mean "the finding was right".
 ACCEPT_MARKS = frozenset({"applied", "resolved"})
@@ -163,7 +163,8 @@ def dead_glossary_keys(corpus: BookCorpus) -> list[Signal]:
     def shipped_keys(chunk) -> set[str]:
         if chunk.shipped_glossary is not None:
             return chunk.shipped_glossary
-        return {k for k, t in by_key.items() if term_occurs(t["english"], lowered_source[chunk.id])}
+        return {k for k, t in by_key.items()
+                if entry_occurs(t["english"], t.get("aliases") or [], lowered_source[chunk.id])}
 
     shipped_by_chunk = {c.id: shipped_keys(c) for c in chunks}
 
@@ -207,8 +208,9 @@ def dead_glossary_keys(corpus: BookCorpus) -> list[Signal]:
         for c in chunks:
             # The key is in the text as written, yet the logged prompt lacks it:
             # the entry was added (or the filter changed) after translation.
+            # Literal on purpose: the looser forms are the reasons below.
             if c.id not in shipped and c.shipped_glossary is not None \
-                    and term_occurs(key, lowered_source[c.id]):
+                    and any(v in lowered_source[c.id] for v in term_variants(key_lower)):
                 missed[c.id] = "not_in_logged_prompt"
         for form, reason in loose_variants(key):
             pattern = _word_re(form)
@@ -673,22 +675,25 @@ def false_positive_clusters(corpus: BookCorpus) -> list[Signal]:
 
 def coverage(corpus: BookCorpus) -> dict[str, Any]:
     """What has not been judged, so the report can say what it could not see."""
+    from src.book_review.judging import translated_chapters
     from src.judges.status import build_status
 
     judges = ["dialogue", "editorial"]
     if corpus.address_map:
         judges.insert(1, "address")
     try:
-        status = build_status(corpus.project_dir, judges=judges)
+        status = build_status(corpus.project_dir, judges=judges, detail=True)
     except Exception as exc:  # a status failure must not sink the review
         return {"error": str(exc)}
+    translated = translated_chapters(status)
     out: dict[str, Any] = {"address_map": bool(corpus.address_map), "judges": {}}
     for name in judges:
         entry = (status.get("judges") or {}).get(name) or {}
         buckets = entry.get("chapters") or {}
         out["judges"][name] = {
             "state": entry.get("state"),
-            "owed": [c for state in ("stale", "partial", "not_run") for c in buckets.get(state, [])],
+            "owed": [c for state in ("stale", "partial", "not_run") for c in buckets.get(state, [])
+                     if c in translated],
             "done": len(buckets.get("done", [])),
             "last_run": entry.get("last_run"),
         }
@@ -755,7 +760,8 @@ def glossary_sense(corpus: BookCorpus) -> list[Signal]:
         hits = []
         for c in corpus.chunks_in_order():
             reached = (c.shipped_glossary is not None and key.lower() in c.shipped_glossary) or (
-                c.shipped_glossary is None and term_occurs(key, c.source_text.lower()))
+                c.shipped_glossary is None
+                and entry_occurs(key, term.get("aliases") or [], c.source_text.lower()))
             if not reached:
                 continue
             for f in by_chunk.get(c.id, []):

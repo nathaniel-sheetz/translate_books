@@ -85,7 +85,8 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
                 return None, f"new key {english!r} never occurs in the source"
             out.update(english=english, spanish=spanish,
                        alternatives=[_str(a) for a in patch.get("alternatives") or [] if _str(a)],
-                       context=_str(patch.get("context")) or None)
+                       context=_str(patch.get("context")) or None,
+                       note=_str(patch.get("note")) or None)
             return out, None
         key = _glossary_key(corpus, _str(patch.get("english")))
         if not key:
@@ -101,15 +102,16 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
                 return None, f"new key {new!r} never occurs in the source"
             out["new_english"] = new
         elif kind == "glossary.edit":
-            changes = {k: patch[k] for k in ("spanish", "alternatives", "context") if k in patch}
+            changes = {k: patch[k] for k in ("spanish", "alternatives", "context", "note") if k in patch}
             if not changes:
                 return None, "glossary.edit changes nothing"
             if "spanish" in changes and not _str(changes["spanish"]):
                 return None, "glossary.edit cannot blank spanish"
             if "spanish" in changes:
                 changes["spanish"] = _str(changes["spanish"])
-            if "context" in changes:
-                changes["context"] = _str(changes["context"]) or None
+            for field in ("context", "note"):
+                if field in changes:
+                    changes[field] = _str(changes[field]) or None
             if "alternatives" in changes:
                 changes["alternatives"] = [_str(a) for a in changes["alternatives"] or [] if _str(a)]
             out.update(changes)
@@ -131,7 +133,8 @@ def check_patch(patch: Any, corpus: BookCorpus, finding_ids: set[str],
                 if not _occurs_in_source(corpus, english):
                     return None, f"split key {english!r} never occurs in the source"
                 entries.append({"english": english, "spanish": _str(e["spanish"]),
-                                "context": _str(e.get("context")) or None})
+                                "context": _str(e.get("context")) or None,
+                                "note": _str(e.get("note")) or None})
             if len(entries) < 2:
                 return None, "split_sense needs at least two entries"
             out["entries"] = entries

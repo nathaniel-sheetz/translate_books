@@ -1527,10 +1527,95 @@ def test_glossary_commit_surfaces_convention_reviews(project: Path):
     ]), encoding="utf-8")
 
     out = flow.glossary_commit(str(project))
-    reviews = [w for w in out["warnings"] if w.startswith("REVIEW:")]
+    reviews = [w for w in out["warnings"]
+               if w.startswith("REVIEW:") and "occur nowhere in the source" not in w]
     assert len(reviews) == 2
     assert out["term_count"] == 2          # advisory: the glossary still committed
     assert (project / "glossary.json").exists()
+
+
+def test_style_rule_set_list_remove_with_a_chapter_window(project: Path):
+    out = flow.style_rule_set(str(project), rule_id="late-register", rule="Speak as adults now.",
+                              since="chapter_02")
+    assert out["rule"]["to_translator"] and out["rule"]["window"] == "chapter_02 onward"
+    assert out["warnings"]  # no chunks yet, so it reaches none
+    flow.style_rule_set(str(project), rule_id="plain", rule="Plain.")
+
+    listed = flow.style_rule_list(str(project))
+    assert [r["id"] for r in listed["rules"]] == ["late-register", "plain"]
+    assert [c["id"] for c in listed["chapters"]] == ["chapter_01", "chapter_02"]
+    assert not listed["rules"][1]["to_translator"]  # no window, no triggers: judge-only
+
+    with pytest.raises(ValueError, match="not a chapter of this book"):
+        flow.style_rule_set(str(project), rule_id="x", rule="X.", since="chapter_13")
+    with pytest.raises(ValueError, match="after until"):
+        flow.style_rule_set(str(project), rule_id="x", rule="X.", since="chapter_02",
+                            until="chapter_01")
+
+    assert flow.style_rule_remove(str(project), rule_id="late-register")["removed"]
+    assert [r["id"] for r in flow.style_rule_list(str(project))["rules"]] == ["plain"]
+
+
+def test_style_rule_set_merges_into_the_rule_it_replaces(project: Path):
+    (project / "style_rules.json").write_text(json.dumps({"rules": [
+        {"id": "grown", "text": "Old wording.", "note": "e.g. no diminutives",
+         "enforce": "prompt", "settles": {"style:x": "y"}, "triggers": ["stag"]},
+    ]}), encoding="utf-8")
+
+    def stored():
+        return json.loads((project / "style_rules.json").read_text(encoding="utf-8"))["rules"][0]
+
+    out = flow.style_rule_set(str(project), rule_id="grown", rule="New wording.")
+    assert out["replaced"]
+    rule = stored()
+    assert rule["rule"] == "New wording." and "text" not in rule
+    assert rule["note"] == "e.g. no diminutives" and rule["triggers"] == ["stag"]
+    assert rule["enforce"] == "prompt" and rule["settles"] == {"style:x": "y"}
+
+    flow.style_rule_set(str(project), rule_id="grown", rule="New wording.", note="", triggers=[])
+    rule = stored()
+    assert "note" not in rule and "triggers" not in rule and rule["settles"] == {"style:x": "y"}
+
+
+def test_style_rule_set_keeps_house_ids_for_note_overrides_only(project: Path, monkeypatch):
+    from src.judges import context
+
+    monkeypatch.setattr(context, "load_house_rules",
+                        lambda: [{"id": "no-vos", "rule": "Only tú, usted and ustedes."}])
+    with pytest.raises(ValueError, match="house rule's id"):
+        flow.style_rule_set(str(project), rule_id="no-vos", rule="X.", since="chapter_02")
+    with pytest.raises(ValueError, match="house rule's id"):
+        flow.style_rule_set(str(project), rule_id="no-vos", rule="X.", triggers=["vos"])
+    # No window, no triggers: the judges read it as a note on the house rule.
+    assert not flow.style_rule_set(str(project), rule_id="no-vos", rule="Only tú.",
+                                   note="This book's note.")["rule"]["to_translator"]
+
+
+def test_glossary_commit_flags_keys_the_source_never_uses(project: Path):
+    """A key no chunk would ship is a REVIEW line; an alias the source uses clears it."""
+    (project / "source.txt").write_text(
+        "The stalk of the mushroom was thin. They rode past the dog town.", encoding="utf-8")
+    state.ensure_harness_dir(project)
+    draft = project / ".harness" / "glossary_draft.json"
+    draft.write_text(json.dumps([
+        {"english": "stalk (mushroom)", "translation": "pie", "type": "technical",
+         "note": "the mushroom's stem, not a plant stalk"},
+        {"english": "prairie dog", "translation": "perrito de la pradera", "type": "other"},
+    ]), encoding="utf-8")
+
+    out = flow.glossary_commit(str(project))
+    [unmatched] = [w for w in out["warnings"] if "occur nowhere in the source" in w]
+    assert "'prairie dog'" in unmatched and "stalk" not in unmatched
+    stalk = next(t for t in out["terms"] if t["english"] == "stalk (mushroom)")
+    assert stalk["note"] == "the mushroom's stem, not a plant stalk"
+
+    draft.write_text(json.dumps([
+        {"english": "prairie dog", "translation": "perrito de la pradera", "type": "other",
+         "aliases": ["dog town"]},
+    ]), encoding="utf-8")
+    out = flow.glossary_commit(str(project))
+    assert not [w for w in out["warnings"] if "occur nowhere in the source" in w]
+    assert out["terms"][0]["aliases"] == ["dog town"]
 
 
 # ── heading-outline split ───────────────────────────────────────────────────

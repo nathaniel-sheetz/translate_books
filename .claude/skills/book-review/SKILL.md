@@ -56,7 +56,7 @@ object with a `_schema` block.
 | `status` | none, writes nothing | findings per judge, owed chapters per judge, last report |
 | `judge` | none | the plan only: owed chapters per judge, chunks awaiting pass 2 |
 | `judge --estimate` | none (keeps drafts whose prompt is unchanged, clears the rest) | prepares the sweep and projects its tokens and wall time at the chosen width; spawns nothing |
-| `judge --yes [--concurrency N]` | subscription | dialogue, address (when the book has a map) and editorial over owed chapters, then editorial pass 2, 10 at a time by default; a re-run after a cut-off resumes from the drafts already written |
+| `judge --yes [--concurrency N] [--job-timeout S]` | subscription | dialogue, address (when the book has a map) and editorial over owed chapters, then editorial pass 2, 10 at a time by default; a re-run after a cut-off resumes from the drafts already written |
 | `signals` | none | coded detectors over every finding; writes `.harness/book_review/signals.json` and `reports/book_review_signals_<date>.md` |
 | `prepare` | none | detectors, budgeted evidence, and one synthesis job per theme under `.harness/book_review/synthesis/` |
 | `fanout` | subscription | runs the synthesis jobs as one headless wave (resumes: skips jobs with a draft) |
@@ -93,8 +93,8 @@ object with a `_schema` block.
 
    **END your turn.**
 
-3. **On approval, `judge --yes`** with the same flags, including `--concurrency` if
-   the user changed it. Send stderr to a file, never `$null`. Progress goes there,
+3. **On approval, `judge --yes`** with the same flags, including `--concurrency` and
+   `--job-timeout` if the user changed them. Send stderr to a file, never `$null`. Progress goes there,
    and the first line names the job count and width. Report `summary` (ran, resumed,
    failed, missing, adjudication, errors). A `fatal` means nothing was committed:
    relay it and stop.

@@ -118,8 +118,17 @@ CALIBRATION_EXAMPLES_FILENAME = "editorial_examples.txt"
 MAX_CODED_FINDINGS_PER_CHUNK = 25
 
 
-def format_style_rules(rules: list[dict[str, Any]]) -> str:
-    """Render the ``style_rules.json`` entries as an id-cited rule list."""
+def format_style_rules(
+    rules: list[dict[str, Any]], chapter_labels: Optional[dict[str, str]] = None
+) -> str:
+    """Render the ``style_rules.json`` entries as an id-cited rule list.
+
+    A rule with a chapter window says so ("[applies chapter_13 (Chapter 12)
+    onward only]"): the judge reads every rule, but the translator got this one
+    only in those chapters, so a chunk outside them must not be held to it.
+    """
+    from src.house.scope import rule_window, window_text
+
     lines: list[str] = []
     for rule in rules:
         if not isinstance(rule, dict):
@@ -129,7 +138,11 @@ def format_style_rules(rules: list[dict[str, Any]]) -> str:
         if not rule_id or not text:
             continue
         note = str(rule.get("note") or "").strip()
-        lines.append(f'- "{rule_id}": {text}' + (f" ({note})" if note else ""))
+        window = window_text(*rule_window(rule), chapter_labels or {})
+        lines.append(
+            f'- "{rule_id}": {text}' + (f" ({note})" if note else "")
+            + (f" [applies {window} only]" if window else "")
+        )
     return "\n".join(lines)
 
 
@@ -231,16 +244,7 @@ def set_book_override(
 
     Keeps the sidecar's other entries and its top-level shape as they were.
     """
-    path = Path(project_dir) / STYLE_RULES_FILENAME
-    doc: Any = {"rules": []}
-    if path.exists():
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise ValueError(f"{path} is unreadable ({exc}); fix it before overriding a rule") from exc
-    rules = doc.get("rules") if isinstance(doc, dict) else doc
-    if not isinstance(rules, list):
-        raise ValueError(f"{path}: expected a 'rules' list")
+    path, doc, rules = _sidecar_doc(project_dir)
     present = [r for r in rules if isinstance(r, dict) and r.get("off") and r.get("id") == rule_id]
     if off and present:
         return False
@@ -253,10 +257,61 @@ def set_book_override(
         rules.append(entry)
     else:
         rules[:] = [r for r in rules if r not in present]
-    if isinstance(doc, list):
+    _write_sidecar_doc(path, doc, rules)
+    return True
+
+
+def save_book_rule(project_dir: Path, rule: dict[str, Any]) -> bool:
+    """Add or replace (by ``id``) one of the book's own sidecar rules.
+
+    Returns whether it replaced one. An ``off`` override with the same id is a
+    different entry and is left alone. Keeps the sidecar's other entries and
+    top-level shape as they were.
+    """
+    rule_id = str(rule.get("id") or "").strip()
+    if not rule_id:
+        raise ValueError("a book rule needs an id")
+    path, doc, rules = _sidecar_doc(project_dir)
+    at = next((i for i, r in enumerate(rules)
+               if isinstance(r, dict) and not r.get("off") and r.get("id") == rule_id), None)
+    if at is None:
+        rules.append(rule)
+    else:
+        rules[at] = rule
+    _write_sidecar_doc(path, doc, rules)
+    return at is not None
+
+
+def remove_book_rule(project_dir: Path, rule_id: str) -> bool:
+    """Drop one of the book's own sidecar rules. Returns whether it was there."""
+    path, doc, rules = _sidecar_doc(project_dir)
+    kept = [r for r in rules if not (isinstance(r, dict) and not r.get("off") and r.get("id") == rule_id)]
+    if len(kept) == len(rules):
+        return False
+    _write_sidecar_doc(path, doc, kept)
+    return True
+
+
+def _sidecar_doc(project_dir: Path) -> tuple[Path, Any, list]:
+    path = Path(project_dir) / STYLE_RULES_FILENAME
+    doc: Any = {"rules": []}
+    if path.exists():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError(f"{path} is unreadable ({exc}); fix it before changing its rules") from exc
+    rules = doc.get("rules") if isinstance(doc, dict) else doc
+    if not isinstance(rules, list):
+        raise ValueError(f"{path}: expected a 'rules' list")
+    return path, doc, rules
+
+
+def _write_sidecar_doc(path: Path, doc: Any, rules: list) -> None:
+    if isinstance(doc, dict):
+        doc["rules"] = rules
+    else:
         doc = {"rules": rules}
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return True
 
 
 def house_rules_for_book(project_dir: Optional[Path]) -> list[dict[str, Any]]:
@@ -288,7 +343,9 @@ def rules_for(
     Applies, in order: scope (the book's groups), the book's ``off`` overrides,
     the audience, and the triggers. The judges also get the book's own sidecar
     rules after the house set; the translator gets the house set only, because
-    its book-specific rules are its style guide.
+    its book-specific rules are its style guide (a book rule with a chapter
+    window or triggers reaches it separately, through
+    :func:`src.house.prompt.load_translator_house`).
 
     ``source_text`` is the English the prompt is about (a chunk, or the whole
     book for a book-level judge prompt). A triggered rule stays only when one of
@@ -397,9 +454,11 @@ def load_style_rules(project_dir: Path) -> str:
     trigger is matched against. Empty only when nothing is left.
     """
     from src.house import read_source
+    from src.house.scope import chapter_labels
 
     return format_style_rules(
-        rules_for(project_dir, read_source(project_dir), audience=AUDIENCE_JUDGE)
+        rules_for(project_dir, read_source(project_dir), audience=AUDIENCE_JUDGE),
+        chapter_labels(project_dir),
     )
 
 
@@ -514,6 +573,12 @@ def _add_editorial_inputs(
     style_rules = load_style_rules(project_dir)
     if style_rules:
         context["style_rules"] = style_rules
+
+    # A rule for some chapters only: the judge is told each passage's chapter.
+    from src.house.scope import chapter_labels, has_window
+
+    if any(has_window(r) for r in load_book_rules(project_dir)):
+        context["windowed_rule_chapter_labels"] = chapter_labels(project_dir)
 
     examples = load_calibration_examples(project_dir)
     if examples:

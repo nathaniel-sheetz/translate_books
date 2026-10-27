@@ -1373,7 +1373,127 @@
         // map before the style guide, so a book can have a map while the wizard
         // is still showing. Gating this on the guide hid the map entirely.
         renderAddressMap(status);
+        loadScopedRules();
     }
+
+    // The book's own rules (style_rules.json). Nodes, not an HTML string: the
+    // rule text is operator-authored.
+    function loadScopedRules() {
+        apiGet('/api/setup/' + PROJECT + '/style-rules').then(function(data) {
+            if (data.error) {
+                setStatus('scoped-rule-status', data.error, 'error');
+                return;
+            }
+            fillChapterSelect('scoped-rule-since', data.chapters || [], 'from the start');
+            fillChapterSelect('scoped-rule-until', data.chapters || [], 'to the end');
+            renderScopedRules(data.rules || []);
+        });
+    }
+
+    function fillChapterSelect(id, chapters, openLabel) {
+        var sel = document.getElementById(id);
+        var keep = sel.value;
+        sel.innerHTML = '';
+        var none = document.createElement('option');
+        none.value = '';
+        none.textContent = '(' + openLabel + ')';
+        sel.appendChild(none);
+        chapters.forEach(function(c) {
+            var opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.label ? c.label + ' (' + c.id + ')' : c.id;
+            sel.appendChild(opt);
+        });
+        sel.value = keep;
+    }
+
+    function renderScopedRules(rules) {
+        var host = document.getElementById('scoped-rules-view');
+        host.innerHTML = '';
+        if (!rules.length) {
+            var empty = document.createElement('p');
+            empty.className = 'section-hint';
+            empty.textContent = 'No book rules yet.';
+            host.appendChild(empty);
+            return;
+        }
+        var table = document.createElement('table');
+        table.className = 'glossary-table';
+        var head = table.createTHead().insertRow();
+        ['Id', 'Rule', 'Applies', 'Reaches', ''].forEach(function(h) {
+            var th = document.createElement('th');
+            th.textContent = h;
+            head.appendChild(th);
+        });
+        var body = table.createTBody();
+        rules.forEach(function(r) {
+            var tr = body.insertRow();
+            var where = r.window || '';
+            if (r.triggers && r.triggers.length) {
+                where += (where ? '; ' : '') + 'where the passage has ' + r.triggers.join(', ');
+            }
+            [r.id, (r.rule || r.text || '') + (r.note ? ' ' + r.note : ''), where || 'whole book (judges only)',
+             r.to_translator ? r.chunks + ' chunks' : 'judges only'].forEach(function(text) {
+                tr.insertCell().textContent = text;
+            });
+            var actions = tr.insertCell();
+            actions.className = 'term-actions';
+            var edit = document.createElement('button');
+            edit.textContent = 'Edit';
+            edit.addEventListener('click', function() {
+                document.getElementById('scoped-rule-id').value = r.id;
+                document.getElementById('scoped-rule-text').value = r.rule || r.text || '';
+                document.getElementById('scoped-rule-note').value = r.note || '';
+                document.getElementById('scoped-rule-since').value = r.since || '';
+                document.getElementById('scoped-rule-until').value = r.until || '';
+                document.getElementById('scoped-rule-triggers').value = (r.triggers || []).join('\n');
+            });
+            var del = document.createElement('button');
+            del.textContent = 'Remove';
+            del.addEventListener('click', function() {
+                if (!confirm('Remove the rule "' + r.id + '"?')) return;
+                fetch('/api/setup/' + PROJECT + '/style-rules/' + encodeURIComponent(r.id), { method: 'DELETE' })
+                    .then(function(resp) { return resp.json(); })
+                    .then(function(data) {
+                        if (data.error) setStatus('scoped-rule-status', data.error, 'error');
+                        else setStatus('scoped-rule-status', 'Removed ' + r.id, 'success');
+                        loadScopedRules();
+                    });
+            });
+            actions.appendChild(edit);
+            actions.appendChild(document.createTextNode(' '));
+            actions.appendChild(del);
+        });
+        host.appendChild(table);
+    }
+
+    document.getElementById('btn-save-scoped-rule').addEventListener('click', function() {
+        var payload = {
+            id: document.getElementById('scoped-rule-id').value.trim(),
+            rule: document.getElementById('scoped-rule-text').value.trim(),
+            note: document.getElementById('scoped-rule-note').value.trim(),
+            since: document.getElementById('scoped-rule-since').value,
+            until: document.getElementById('scoped-rule-until').value,
+            triggers: document.getElementById('scoped-rule-triggers').value,
+        };
+        if (!payload.id || !payload.rule) {
+            setStatus('scoped-rule-status', 'A rule needs an id and its text', 'error');
+            return;
+        }
+        apiPost('/api/setup/' + PROJECT + '/style-rules', payload).then(function(data) {
+            if (data.error) {
+                setStatus('scoped-rule-status', data.error, 'error');
+                return;
+            }
+            var msg = (data.replaced ? 'Replaced ' : 'Added ') + payload.id;
+            if (data.warnings && data.warnings.length) {
+                setStatus('scoped-rule-status', msg + '. ' + data.warnings.join(' '), 'error');
+            } else {
+                setStatus('scoped-rule-status', msg, 'success');
+            }
+            loadScopedRules();
+        });
+    });
 
     // Read-only view of address_map.json. Built as nodes rather than an HTML
     // string: every value here is operator-authored free text (character names,
@@ -2011,6 +2131,21 @@
         }
     });
 
+    // One table row back into a term. Aliases are typed comma-separated.
+    function readGlossaryRow(tr) {
+        return {
+            english: tr.querySelector('.gl-english').value.trim(),
+            spanish: tr.querySelector('.gl-spanish').value.trim(),
+            type: tr.querySelector('.gl-type').value,
+            context: tr.querySelector('.gl-context').value,
+            note: tr.querySelector('.gl-note').value.trim(),
+            aliases: tr.querySelector('.gl-aliases').value.split(',')
+                .map(function(a) { return a.trim(); })
+                .filter(function(a) { return a; }),
+            alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
+        };
+    }
+
     function renderGlossaryProposals(proposals) {
         var review = document.getElementById('glossary-review');
         review.style.display = '';
@@ -2031,6 +2166,8 @@
                 '<td><input type="text" value="' + escapeHtml(p.spanish || '') + '" class="gl-spanish"></td>' +
                 '<td><select class="gl-type">' + typeOptions + '</select></td>' +
                 '<td><input type="text" value="' + escapeHtml(p.context || '') + '" class="gl-context"></td>' +
+                '<td><input type="text" value="' + escapeHtml(p.note || '') + '" class="gl-note"></td>' +
+                '<td><input type="text" value="' + escapeHtml((p.aliases || []).join(', ')) + '" class="gl-aliases"></td>' +
                 '<td class="term-actions">' +
                     '<button class="accepted gl-accept">Keep</button> ' +
                     '<button class="gl-reject">Drop</button>' +
@@ -2053,16 +2190,9 @@
         var terms = [];
         document.querySelectorAll('#glossary-proposals-table tbody tr').forEach(function(tr) {
             if (tr.classList.contains('rejected')) return;
-            var eng = tr.querySelector('.gl-english').value.trim();
-            var spa = tr.querySelector('.gl-spanish').value.trim();
-            if (!eng || !spa) return;  // skip blank rows
-            terms.push({
-                english: eng,
-                spanish: spa,
-                type: tr.querySelector('.gl-type').value,
-                context: tr.querySelector('.gl-context').value,
-                alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
-            });
+            var term = readGlossaryRow(tr);
+            if (!term.english || !term.spanish) return;  // skip blank rows
+            terms.push(term);
         });
         var payload = { terms: terms, mode: glossaryEditMode ? 'replace' : 'merge' };
         apiPost('/api/setup/' + PROJECT + '/glossary', payload).then(function(data) {
@@ -2073,7 +2203,14 @@
                     ? 'Saved ' + terms.length + ' terms (replaced)'
                     : 'Saved ' + terms.length + ' terms';
                 glossaryEditMode = false;
-                setStatus('glossary-save-status', msg, 'success');
+                var unmatched = data.unmatched || [];
+                if (unmatched.length) {
+                    // Saved, but these never reach the translator.
+                    setStatus('glossary-save-status', msg + '. Not in the source, so never sent to the ' +
+                        'translator (add an alias or rename): ' + unmatched.join(', '), 'error');
+                } else {
+                    setStatus('glossary-save-status', msg, 'success');
+                }
                 loadStatus();
             }
         });
@@ -2101,16 +2238,10 @@
             glossaryProposals = [];
             rows.forEach(function(tr) {
                 if (tr.classList.contains('rejected')) return;
-                glossaryProposals.push({
-                    english: tr.querySelector('.gl-english').value,
-                    spanish: tr.querySelector('.gl-spanish').value,
-                    type: tr.querySelector('.gl-type').value,
-                    context: tr.querySelector('.gl-context').value,
-                    alternatives: JSON.parse(tr.dataset.alternatives || '[]'),
-                });
+                glossaryProposals.push(readGlossaryRow(tr));
             });
         }
-        glossaryProposals.push({english:'', spanish:'', type:'other', context:'', alternatives:[]});
+        glossaryProposals.push({english:'', spanish:'', type:'other', context:'', note:'', aliases:[], alternatives:[]});
         renderGlossaryProposals(glossaryProposals);
     });
 

@@ -160,6 +160,33 @@ def test_split_sense_rejects_a_colliding_key_and_may_reuse_its_own(book):
     assert [t["english"] for t in doc["terms"]] == ["paragraph", "under"]
 
 
+def test_glossary_patches_carry_the_translator_note(book):
+    from src.book_review.patches import apply_glossary
+
+    added, why = check(book, {"type": "glossary.add", "english": "First paragraph (opening)",
+                              "spanish": "el primer párrafo", "note": " The opening one only. "})
+    assert added is not None, why
+    assert added["note"] == "The opening one only."
+    edited, why = check(book, {"type": "glossary.edit", "english": "porte cochere",
+                               "note": "A covered carriage entrance, not a door"})
+    assert edited == {"type": "glossary.edit", "english": "porte cochere",
+                      "note": "A covered carriage entrance, not a door"}, why
+    split, why = check(book, {"type": "glossary.split_sense", "english": "porte cochere", "entries": [
+        {"english": "porte-cochere", "spanish": "la cochera cubierta", "note": "the porch"},
+        {"english": "stopped", "spanish": "se detuvieron"},
+    ]})
+    assert [e["note"] for e in split["entries"]] == ["the porch", None], why
+
+    doc = {"terms": [term("porte cochere", "la cochera cubierta", context="carriage porch")]}
+    apply_glossary(doc, edited)
+    apply_glossary(doc, added)
+    assert doc["terms"][0]["note"] == "A covered carriage entrance, not a door"
+    assert doc["terms"][0]["context"] == "carriage porch"
+    assert doc["terms"][1]["note"] == "The opening one only."
+    apply_glossary(doc, {**added, "english": "plain", "note": None})
+    assert "note" not in doc["terms"][2]
+
+
 def test_reconcile_marks_two_recommendations_on_one_key():
     recs = [{"id": "R-1", "patches": [{"type": "glossary.edit", "english": "X", "spanish": "a"}]},
             {"id": "R-2", "patches": [{"type": "glossary.remove", "english": "x"}]}]
