@@ -47,7 +47,8 @@ STRINGS = {
         "chip_flags": "flags",
         "chip_clean": "Nothing pending",
         "status_pending": "Pending",
-        "status_in_progress": "In Progress",
+        "status_needs_translation": "Needs translation",
+        "status_needs_review": "Needs review",
         "status_complete": "Complete",
         "status_archived": "Archived",
 
@@ -796,7 +797,8 @@ STRINGS = {
         "chip_flags": "marcas",
         "chip_clean": "Nada pendiente",
         "status_pending": "Pendiente",
-        "status_in_progress": "En Progreso",
+        "status_needs_translation": "Por traducir",
+        "status_needs_review": "Por revisar",
         "status_complete": "Completo",
         "status_archived": "Archivado",
 
