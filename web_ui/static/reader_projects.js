@@ -1,7 +1,8 @@
 /* Reader home page (`/read/`, mode == "projects").
  *
  * The header's language menu, the new-project modal, the status filter, the
- * review-category picker, and each card's ⋮ menu. Lifted out of the template's
+ * review-category picker, the posters/cards toggle, badge fitting, and each
+ * card's ⋮ menu. Lifted out of the template's
  * inline <script> when the picker landed; strings arrive via
  * window.__i18n_projects, the same way the reader gets window.__i18n.
  *
@@ -12,6 +13,114 @@
     'use strict';
 
     var i = window.__i18n_projects || {};
+
+    /* ── Badge fitting ──
+     *
+     * The server renders every badge a card has, most important first. How many
+     * show depends on the view and the room: a poster keeps one row of at most
+     * two, a card up to two rows of all of them. When a row would overflow, the
+     * last badge steps down — icon + number, then icon only, then gone — before
+     * the one ahead of it is touched. The first badge is never dropped; it
+     * shortens to icon + number only as a last resort. A flags badge at zero
+     * (`data-zero`, set by the category picker) is out of the running.
+     */
+
+    var grid = document.getElementById('project-grid');
+
+    function fitLimits() {
+        return grid && grid.classList.contains('library-cards')
+            ? { rows: 2, max: Infinity }
+            : { rows: 1, max: 2 };
+    }
+
+    function fitChips(row) {
+        var lim = fitLimits();
+        var live = [];
+        Array.prototype.forEach.call(row.querySelectorAll('.chip'), function (c) {
+            c.classList.remove('short', 'icon');
+            var on = !c.hasAttribute('data-zero') && live.length < lim.max;
+            c.hidden = !on;
+            if (on) live.push(c);
+        });
+        row.hidden = live.length === 0;
+        if (!live.length) return;
+
+        function fits() {
+            if (lim.rows === 1) return row.scrollWidth <= row.clientWidth + 0.5;
+            var tops = {};
+            live.forEach(function (c) { if (!c.hidden) tops[c.offsetTop] = true; });
+            return Object.keys(tops).length <= lim.rows;
+        }
+
+        if (fits()) return;
+        for (var k = live.length - 1; k >= 1; k--) {
+            var c = live[k];
+            if (c.dataset.short) {
+                c.classList.add('short');
+                if (fits()) return;
+                c.classList.remove('short');
+            }
+            c.classList.add('icon');
+            if (fits()) return;
+            c.hidden = true;
+            if (fits()) return;
+        }
+        if (live[0].dataset.short) live[0].classList.add('short');
+    }
+
+    function fitAll() {
+        document.querySelectorAll('.project-card .chips').forEach(fitChips);
+    }
+
+    // A row's width changes with the viewport, the view, and a card coming back
+    // from the status filter's display:none, so watch the rows themselves.
+    if (window.ResizeObserver) {
+        var ro = new ResizeObserver(function (entries) {
+            entries.forEach(function (e) { fitChips(e.target); });
+        });
+        document.querySelectorAll('.project-card .chips').forEach(function (row) { ro.observe(row); });
+    }
+    fitAll();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitAll);
+
+    // Badges sit above the tile's link so a shortened one still shows its full
+    // text on hover, so they navigate themselves: to the row's data-href (the
+    // tile's link, or the dashboard for a pending book's setup badges), in a
+    // new tab on Ctrl/Cmd/Shift-click or middle-click, as a real link would.
+    document.querySelectorAll('.project-card .chips[data-href]').forEach(function (row) {
+        function go(e) {
+            var newTab = e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey;
+            if (e.button > 1) return;
+            e.preventDefault();
+            if (newTab) window.open(row.dataset.href, '_blank', 'noopener');
+            else window.location.href = row.dataset.href;
+        }
+        row.addEventListener('click', go);
+        row.addEventListener('auxclick', go);
+    });
+
+    /* ── View toggle (posters / cards) ── */
+    (function () {
+        var btns = Array.prototype.slice.call(document.querySelectorAll('.view-btn[data-view]'));
+        if (!grid || !btns.length) return;
+        btns.forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var view = btn.dataset.view;
+                if (btn.getAttribute('aria-pressed') === 'true') return;
+                grid.classList.remove('library-posters', 'library-cards');
+                grid.classList.add('library-' + view);
+                btns.forEach(function (b) {
+                    b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+                });
+                fitAll();
+                fetch('/api/set-library-view', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ view: view })
+                }).catch(function () { /* the view already switched; only the cookie is lost, so the next load opens the old view */ });
+            });
+        });
+    })();
 
     /* ── Popups ──
      *
@@ -230,7 +339,12 @@
                 label.textContent = data.archived ? i.unarchive : i.archive;
                 card.classList.toggle('card-archived', data.archived);
                 // Unarchiving lands on whichever status the files imply, so
-                // take it from the response rather than guessing.
+                // take it from the response rather than guessing. (An archived
+                // card hides its badges in CSS; unarchived ones return on reload.)
+                card.classList.remove('st-' + card.dataset.status);
+                card.classList.add('st-' + data.status);
+                var pill = card.querySelector('.status-pill');
+                if (pill && i.statuses && i.statuses[data.status]) pill.textContent = i.statuses[data.status];
                 card.dataset.status = data.status;
                 api.close();
                 card.style.display = showsStatus(data.status) ? '' : 'none';
@@ -272,16 +386,17 @@
 
             document.querySelectorAll('.project-card[data-flags]').forEach(function (card) {
                 var chip = card.querySelector('.project-chip-flags');
-                if (!chip) return;   // nothing translated yet: no work chips at all
+                if (!chip) return;   // no flags badge for this status at all
                 var counts = {};
                 try { counts = JSON.parse(card.dataset.flags) || {}; } catch (e) { counts = {}; }
                 var total = chosen.reduce(function (sum, t) { return sum + (counts[t] || 0); }, 0);
-                chip.querySelector('.chip-flag-count').textContent = total;
-                chip.querySelector('.chip-flag-label').textContent =
-                    total === 1 ? i.flag_one : i.flag_many;
-                chip.hidden = total === 0;
-                var clean = card.querySelector('.project-chip-clean');
-                if (clean) clean.hidden = total !== 0;
+                var label = total === 1 ? i.flag_one : i.flag_many;
+                chip.querySelector('.chip-count').textContent = total;
+                chip.querySelector('.chip-label').textContent = label;
+                chip.title = total + ' ' + label;
+                if (total) chip.removeAttribute('data-zero');
+                else chip.setAttribute('data-zero', '');
+                fitChips(chip.parentNode);
             });
         }
 

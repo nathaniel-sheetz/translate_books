@@ -64,6 +64,16 @@
     --badge-unread-bg: rgba(180, 180, 180, 0.12);
     --badge-warn-bg: rgba(220, 140, 40, 0.12);
     --badge-warn-color: #b07020;
+    --st-pending: #77726c;
+    --st-pending-bg: rgba(130, 124, 118, 0.14);
+    --st-translate: #3c68ad;
+    --st-translate-bg: rgba(60, 104, 173, 0.11);
+    --st-review: #a0611a;
+    --st-review-bg: rgba(220, 140, 40, 0.14);
+    --st-complete: #3f8455;
+    --st-complete-bg: rgba(90, 158, 111, 0.13);
+    --st-archived: #858079;
+    --st-archived-bg: rgba(140, 136, 130, 0.12);
     --banner-warn-bg: rgba(220, 140, 40, 0.1);
     --low-confidence-border: #ccc;
     --corrected-dot: #5a9e6f;
@@ -129,6 +139,16 @@
     --badge-unread-bg: rgba(180, 180, 180, 0.1);
     --badge-warn-bg: rgba(220, 140, 40, 0.15);
     --badge-warn-color: #d4943a;
+    --st-pending: #a8a29a;
+    --st-pending-bg: rgba(168, 162, 154, 0.14);
+    --st-translate: #7fa6e3;
+    --st-translate-bg: rgba(110, 150, 220, 0.16);
+    --st-review: #e0a24e;
+    --st-review-bg: rgba(224, 162, 78, 0.15);
+    --st-complete: #74c08a;
+    --st-complete-bg: rgba(106, 184, 127, 0.15);
+    --st-archived: #8d8882;
+    --st-archived-bg: rgba(140, 136, 130, 0.14);
     --banner-warn-bg: rgba(220, 140, 40, 0.12);
     --low-confidence-border: #555;
     --corrected-dot: #6ab87f;
@@ -285,78 +305,316 @@ body {
     background: var(--bg-filter-hover);
 }
 
-/* Project dashboard cards */
+/* Reader home: the library. One markup per book, two views chosen by the
+   grid's class — .library-posters (the cover is the tile, text on a scrim) or
+   .library-cards (cover beside the text). reader_projects.js swaps the class
+   and fits the badges. */
 
-.project-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
+.library-page {
+    max-width: 1320px;
+    padding: 24px 16px 48px;
 }
 
-.project-card {
-    border: 1px solid var(--border);
+@media (min-width: 900px) {
+    .library-page {
+        padding: 32px 32px 64px;
+    }
+}
+
+/* The header's three buttons outgrow a phone; let them drop under the title. */
+.library-page .nav-header {
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.view-toggle {
+    display: inline-flex;
+    margin-left: auto;
+    border: 1px solid var(--border-light);
     border-radius: 8px;
-    padding: 16px;
+    overflow: hidden;
     background: var(--bg-card);
 }
 
-/* Title block on the left, the ⋮ menu pinned top-right. */
-.project-card-header {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    margin-bottom: 15px;
+.view-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 34px;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted2);
+    cursor: pointer;
 }
 
-/* Rows carry their own bottom margin for the row below; the last one has no
-   row below it, so its margin would just double the card's bottom padding. */
-.project-card > *:last-child {
-    margin-bottom: 0;
+.view-btn[aria-pressed="true"] {
+    background: var(--bg-hover);
+    color: var(--text-heading);
 }
 
-.project-card-header .nav-title {
-    display: block;
-    font-size: 18px;
-    font-weight: 600;
+.project-grid {
+    display: grid;
 }
 
-/* The whole title block is the link into the book. */
-.project-card-link {
-    display: block;
-    flex: 1;
+.project-card {
+    position: relative;
     min-width: 0;
-    text-decoration: none;
-    color: inherit;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-.project-card-link:hover .nav-title {
-    text-decoration: underline;
+/* The whole tile is the link into the book. It sits over everything; the ⋮
+   menu and the badges sit over it (badges forward their click to it, so they
+   can still show their full text on hover). */
+.card-stretch {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
 }
 
-.project-card-link:focus-visible {
+.card-stretch:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-    border-radius: 4px;
 }
 
-.nav-subtitle {
-    display: block;
-    font-size: 14px;
-    color: var(--text-muted);
-    font-style: italic;
-    margin-top: 2px;
+.project-card:hover .card-title {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
 }
+
+/* Cover: a book, not a thumbnail — 2:3, a spine crease, a soft shadow. */
+.card-cover {
+    position: relative;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border-radius: 4px 6px 6px 4px;
+    background: var(--bg-hover);
+    box-shadow: 0 1px 2px rgba(40, 30, 20, 0.08), 0 4px 14px rgba(40, 30, 20, 0.1);
+    container-type: inline-size;
+}
+
+.card-cover img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.card-cover::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 7px;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.08) 40%, transparent);
+    pointer-events: none;
+}
+
+/* No cover yet: a cloth binding with the title stamped on it. The cloth index
+   comes from the project id (project_cards.COVER_CLOTHS). */
+.cover-gen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12%;
+    padding: 14% 12%;
+    text-align: center;
+    color: #f3ead6;
+}
+
+.cover-gen::before {
+    content: "";
+    position: absolute;
+    inset: 7%;
+    border: 1px solid rgba(243, 234, 214, 0.42);
+    border-radius: 2px;
+}
+
+.cover-gen-title {
+    position: relative;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: clamp(13px, 9cqw, 22px);
+    line-height: 1.2;
+}
+
+.cover-gen-rule {
+    position: relative;
+    width: 28%;
+    height: 1px;
+    background: rgba(243, 234, 214, 0.55);
+}
+
+.cloth-0 { background: #3d5a4a; }
+.cloth-1 { background: #6b3b3b; }
+.cloth-2 { background: #2f4a6b; }
+.cloth-3 { background: #5b4a2f; }
+.cloth-4 { background: #4a3d63; }
+.cloth-5 { background: #2f5f5f; }
+.cloth-6 { background: #7a5a2a; }
+.cloth-7 { background: #384048; }
+.cloth-8 { background: #5e3550; }
+
+.card-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.card-title {
+    margin: 0;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-weight: normal;
+    line-height: 1.22;
+    color: var(--text-heading);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+}
+
+/* Status: one color per harness stage. */
+.st-pending { --st: var(--st-pending); --st-bg: var(--st-pending-bg); }
+.st-needs_translation { --st: var(--st-translate); --st-bg: var(--st-translate-bg); }
+.st-needs_review { --st: var(--st-review); --st-bg: var(--st-review-bg); }
+.st-complete { --st: var(--st-complete); --st-bg: var(--st-complete-bg); }
+.st-archived { --st: var(--st-archived); --st-bg: var(--st-archived-bg); }
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: 5px;
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--st);
+    background: var(--st-bg);
+}
+
+.card-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border-light);
+    overflow: hidden;
+}
+
+.card-progress i {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--st-translate);
+}
+
+/* Badges. Every one carries an icon: it is what the short forms keep
+   (.short = icon + number, .icon = icon only). */
+.project-card .chips {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    cursor: pointer;
+}
+
+.chip {
+    position: relative;  /* contains the clipped label of a shortened badge */
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 11px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--chip);
+    background: var(--chip-bg);
+}
+
+/* `display: flex` above otherwise wins over the UA `[hidden]` rule. */
+.project-card .chips[hidden],
+.chip[hidden] {
+    display: none;
+}
+
+/* A shortened badge drops its words from view but not from a screen reader. */
+.chip.short .chip-label,
+.chip.icon .chip-label,
+.chip.icon .chip-count {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.chip svg {
+    flex: none;
+    opacity: 0.85;
+}
+
+.chip-count {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.chip.short {
+    padding: 0 7px;
+}
+
+.chip.icon {
+    justify-content: center;
+    width: 22px;
+    padding: 0;
+}
+
+.chip-translate { --chip: var(--st-translate); --chip-bg: var(--st-translate-bg); }
+.chip-review { --chip: var(--ann-word-choice-color); --chip-bg: var(--ann-word-choice-badge); }
+.chip-flag { --chip: var(--badge-warn-color); --chip-bg: var(--badge-warn-bg); }
+.chip-unread { --chip: var(--text-muted3); --chip-bg: var(--badge-unread-bg); }
+.chip-footnote { --chip: var(--ann-footnote-color); --chip-bg: var(--ann-footnote); }
+.chip-setup { --chip: var(--st-pending); --chip-bg: var(--st-pending-bg); }
 
 /* Card ⋮ menu: everything you can do *to* a project rather than in it.
    Anchors its popup the same way .review-topbar-group does. */
 
 .card-menu {
-    position: relative;
-    flex: none;
+    position: absolute;
+    z-index: 3;
 }
 
-.card-menu-btn {
-    padding: 4px;
+.card-menu .card-menu-btn {
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    margin: 0;
+    padding: 0;
+    border-radius: 16px;
+}
+
+/* 44px hit area around the 32px button. */
+.card-menu .card-menu-btn::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+}
+
+/* An open menu's popup must clear the next tile's menu and badges. */
+.card-menu:has(.popup-open) {
+    z-index: 10;
 }
 
 /* min-height, not padding: the two rows sit right next to each other, so the
@@ -389,56 +647,230 @@ body {
     color: var(--text-muted);
 }
 
-/* Archived card */
-
-.card-archived {
+/* Archived: a greyed cover, and no badges (the server renders none for an
+   archived book; this covers one archived from the ⋮ menu without a reload). */
+.card-archived .card-cover img,
+.card-archived .cover-gen {
+    filter: grayscale(0.85);
     opacity: 0.6;
 }
 
-/* Card body: chips (setup gaps + work remaining) and the progress bar. Both
-   rows are progressively disclosed, so either may be absent entirely. Chips
-   reuse the chapter-list .badge palette. */
-
-.project-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 12px;
+.card-archived .chips,
+.card-archived .card-progress {
+    display: none;
 }
 
-.project-chips a.badge {
-    text-decoration: none;
+.card-archived .card-title {
+    color: var(--text-muted);
 }
 
-.project-chips a.badge:hover {
-    filter: brightness(0.95);
+/* ── Posters: the cover is the tile ──
+   Cover and text share one grid cell, the text on a scrim at the bottom; the
+   status pill pins to the cover's top-left. One row of badges, at most two. */
+
+/* Two across on any phone, however narrow; from 640px, as many as fit. */
+.library-posters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
 }
 
-.project-progress {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 13px;
-    color: var(--text-muted3);
+@media (min-width: 640px) {
+    .library-posters {
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 18px;
+    }
 }
 
-.project-progress-track {
-    flex: 1;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--border-light);
+@media (min-width: 1200px) {
+    .library-posters {
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 22px;
+    }
+}
+
+.library-posters .project-card {
+    display: grid;
+    border-radius: 8px;
+}
+
+.library-posters .card-cover,
+.library-posters .card-meta {
+    grid-area: 1 / 1;
+}
+
+.library-posters .card-cover {
+    border-radius: 8px;
+}
+
+.library-posters .card-cover::after {
+    display: none;
+}
+
+/* A generated cover keeps its stamped title, as most real covers carry one in
+   the artwork. It sits high, clear of the pill and the scrim. */
+.library-posters .cover-gen {
+    justify-content: flex-start;
+    padding-top: 24%;
+}
+
+/* z-index lifts the scrim over the (positioned) cover without making it the
+   pill's containing block; clicks fall through it to the tile's link. */
+.library-posters .card-meta {
+    z-index: 1;
+    pointer-events: none;
+    align-self: end;
+    gap: 7px;
+    padding: 48px 10px 10px;
+    border-radius: 0 0 8px 8px;
+    background: linear-gradient(180deg, transparent, rgba(10, 8, 6, 0.72) 42%, rgba(10, 8, 6, 0.9));
+}
+
+.library-posters .card-title {
+    font-size: 16px;
+    line-height: 1.2;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+@media (max-width: 639px) {
+    .library-posters .card-meta {
+        padding: 40px 8px 8px;
+    }
+
+    .library-posters .card-title {
+        font-size: 14px;
+    }
+}
+
+.library-posters .status-pill {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    font-size: 11.5px;
+    font-weight: 700;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+[data-theme="dark"] .library-posters .status-pill {
+    background: rgba(28, 27, 26, 0.92);
+}
+
+.library-posters .status-pill::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--st);
+}
+
+.library-posters .chips {
+    pointer-events: auto;
+    flex-wrap: nowrap;
     overflow: hidden;
 }
 
-.project-progress-fill {
-    height: 100%;
-    background: var(--accent);
+/* On the scrim every badge goes light-on-dark; the tint keeps its kind. */
+.library-posters .chip {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(4px);
 }
 
-.project-progress-label {
-    white-space: nowrap;
+.library-posters .chip-review { background: rgba(120, 160, 240, 0.55); }
+.library-posters .chip-flag { background: rgba(224, 150, 50, 0.62); }
+.library-posters .chip-footnote { background: rgba(160, 120, 210, 0.6); }
+.library-posters .chip-translate { background: rgba(110, 150, 220, 0.55); }
+
+.library-posters .card-progress {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.library-posters .card-progress i {
+    background: #fff;
+}
+
+.library-posters .card-menu {
+    top: 4px;
+    right: 4px;
+}
+
+.library-posters .card-menu .card-menu-btn {
+    color: #fff;
+    background: rgba(0, 0, 0, 0.32);
+}
+
+.library-posters .card-menu .card-menu-btn:hover {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.library-posters .card-archived .card-title {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+/* ── Cards: cover beside the text ──
+   Only the title clears the ⋮ button; status, progress and badges run under it.
+   Badges wrap, up to two rows. */
+
+.library-cards {
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
+    gap: 12px;
+}
+
+@media (min-width: 640px) {
+    .library-cards {
+        grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
+        gap: 16px;
+    }
+}
+
+.library-cards .project-card {
+    display: flex;
+    gap: 14px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+}
+
+.library-cards .project-card:hover {
+    border-color: var(--border-light);
+}
+
+.library-cards .card-cover {
+    flex: none;
+    align-self: flex-start;
+    width: 92px;
+}
+
+@media (min-width: 640px) {
+    .library-cards .card-cover {
+        width: 104px;
+    }
+}
+
+.library-cards .card-meta {
+    flex: 1;
+    padding: 2px 0;
+}
+
+.library-cards .card-title {
+    padding-right: 30px;
+    font-size: 18px;
+}
+
+.library-cards .card-menu {
+    top: 8px;
+    right: 6px;
+}
+
+.library-cards .card-menu .card-menu-btn {
+    color: var(--text-muted2);
+}
+
+.library-cards .card-menu .card-menu-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
 }
 
 .btn-card {
@@ -528,6 +960,35 @@ body {
 
 .btn-new-project:hover {
     opacity: 0.88;
+}
+
+/* The review inbox shrinks to its tray icon on a phone; the name stays as the
+   link's label. */
+.inbox-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+}
+
+.inbox-link svg {
+    flex: none;
+}
+
+@media (max-width: 639px) {
+    .inbox-link {
+        padding: 6px 8px;
+    }
+
+    .inbox-link-text {
+        display: none;
+    }
+}
+
+@media (min-width: 640px) {
+    .inbox-link svg {
+        display: none;
+    }
 }
 
 .modal-overlay {

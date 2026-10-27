@@ -118,7 +118,9 @@ class TestReaderProjectList:
 
     def test_card_hides_work_chips_before_translation(self, client, project_with_alignment):
         html = client.get("/read/").data.decode("utf-8")
-        assert "project-work-chips" not in html
+        assert "project-chip-flags" not in html
+        assert 'class="chip chip-review' not in html
+        assert 'class="chip chip-unread' not in html
         assert "Nothing pending" not in html
 
     def test_category_picker_rendered_in_filter_bar(self, client, project_with_alignment):

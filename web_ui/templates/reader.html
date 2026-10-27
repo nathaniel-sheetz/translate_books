@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
     <title>{{ t.reader_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=12">
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=16">
     <link rel="stylesheet" href="{{ url_for('static', filename='concordance.css') }}">
     {% if mode == "read" and reader_ui_version == "v2" %}
     <link rel="stylesheet" href="{{ url_for('static', filename='reader_sheet_v2.css') }}?v=26">
@@ -27,7 +27,7 @@
 
 {% if mode == "projects" %}
 <!-- Project list -->
-<div class="nav-page">
+<div class="nav-page library-page">
     <div class="nav-header">
         <h1>{{ t.reader_title }}</h1>
         <div class="nav-header-actions">
@@ -67,7 +67,15 @@
                 book; this is the same channel for all of them at once. The repo
                 has no email/webhook/toast, so a link in the header is the whole
                 surface the nightly pass gets. -#}
-            <a class="btn-new-project" href="/review-inbox">{{ t.inbox_link }}</a>
+            <a class="btn-new-project inbox-link" href="/review-inbox"
+               title="{{ t.inbox_link }}" aria-label="{{ t.inbox_link }}">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+                    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+                </svg>
+                <span class="inbox-link-text">{{ t.inbox_link }}</span>
+            </a>
             <button class="btn-new-project" id="btn-new-project">+ {{ t.new_project_btn }}</button>
         </div>
     </div>
@@ -120,118 +128,139 @@
                 </div>
             </div>
         </div>
+        <!-- Posters (cover first) or cards (cover beside the text). Swaps the
+             grid's class in place; the choice is a per-device cookie. -->
+        <div class="view-toggle" role="group" aria-label="{{ t.view_label }}">
+            <button class="view-btn" type="button" data-view="posters"
+                    title="{{ t.view_posters }}" aria-label="{{ t.view_posters }}"
+                    aria-pressed="{{ 'true' if library_view == 'posters' else 'false' }}">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                     stroke-width="2" aria-hidden="true">
+                    <rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="9" rx="1"/>
+                    <rect x="3" y="15" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/>
+                </svg>
+            </button>
+            <button class="view-btn" type="button" data-view="cards"
+                    title="{{ t.view_cards }}" aria-label="{{ t.view_cards }}"
+                    aria-pressed="{{ 'true' if library_view == 'cards' else 'false' }}">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                     stroke-width="2" aria-hidden="true">
+                    <rect x="3" y="4" width="6" height="7" rx="1"/><line x1="12" y1="6" x2="21" y2="6"/>
+                    <line x1="12" y1="9" x2="18" y2="9"/><rect x="3" y="14" width="6" height="7" rx="1"/>
+                    <line x1="12" y1="16" x2="21" y2="16"/><line x1="12" y1="19" x2="18" y2="19"/>
+                </svg>
+            </button>
+        </div>
     </div>
 
     {% if projects %}
-    <div class="project-grid" id="project-grid">
+    {#- One markup for both views: the grid's class picks posters or cards, so
+        the toggle in the filter bar swaps them in place. Badges arrive from
+        project_cards.card_badges in priority order; reader_projects.js fits
+        them (a poster: one row, at most two; a card: up to two rows) by
+        stepping the last badge down to icon + number, then icon only, then
+        out. Icons are what the short forms keep, so every badge carries one. -#}
+    {% macro badge_icon(kind) -%}
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    {%- if kind == 'review' -%}<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    {%- elif kind == 'flags' -%}<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/>
+    {%- elif kind == 'unread' -%}<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+    {%- elif kind == 'footnotes' -%}<line x1="12" y1="5" x2="12" y2="19"/><line x1="5.5" y1="8.5" x2="18.5" y2="15.5"/><line x1="18.5" y1="8.5" x2="5.5" y2="15.5"/>
+    {%- elif kind == 'translated' -%}<path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/>
+    {%- else -%}<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    {%- endif -%}
+    </svg>
+    {%- endmacro %}
+    {% macro badge(b) -%}
+    {%- if b.kind == 'translated' -%}{% set label = t.badge_translated %}{% set cls = 'chip-translate' %}
+    {%- elif b.kind == 'review' -%}{% set label = t.badge_review %}{% set cls = 'chip-review' %}
+    {%- elif b.kind == 'flags' -%}{% set label = t.chip_flag_one if b.count == 1 else t.chip_flags %}{% set cls = 'chip-flag project-chip-flags' %}
+    {%- elif b.kind == 'unread' -%}{% set label = t.badge_unread %}{% set cls = 'chip-unread' %}
+    {%- elif b.kind == 'footnotes' -%}{% set label = t.chip_empty_fn_one if b.count == 1 else t.chip_empty_fn %}{% set cls = 'chip-footnote' %}
+    {%- else -%}{% set label = t[b.kind] %}{% set cls = 'chip-setup' %}
+    {%- endif -%}
+    <span class="chip {{ cls }}" title="{% if b.count is not none %}{{ b.count }} {% endif %}{{ label }}"
+          {%- if b.count is not none %} data-short="1"{% endif %}
+          {%- if b.kind == 'flags' and not b.count %} data-zero hidden{% endif %}>
+        {{- badge_icon(b.kind) -}}
+        {%- if b.count is not none %}<b class="chip-count">{{ b.count }}</b>{% endif -%}
+        <span class="chip-label">{{ label }}</span></span>
+    {%- endmacro %}
+    <div class="project-grid library-{{ library_view }}" id="project-grid">
         {% for p in projects %}
-        {#- Progressive disclosure: setup facts only while something is missing,
-            progress only while translation is unfinished, and once any chunk is
-            translated, the work that remains. `ns.flags` is the flag total under
-            the *current* category selection; reader_projects.js re-sums it from
-            data-flags when the picker changes. -#}
-        {% set ns = namespace(flags=0) %}
-        {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + p.flag_counts.get(tkey, 0) %}{% endfor %}
-        {% set setup_done = p.has_style_guide and p.glossary_count > 0 %}
-        {#- A book you have not read through still has work outstanding — the
-            read-through itself — so unread chapters suppress the clean chip. -#}
-        {% set clean_eligible = setup_done and p.fully_translated and p.unread_chapters == 0 and p.awaiting_review == 0 and p.empty_footnotes == 0 %}
-        {% set work_href = '/read/' ~ p.id if p.has_alignments else '/project/' ~ p.id %}
-        <div class="project-card{% if p.status == 'archived' %} card-archived{% endif %}"
-             data-status="{{ p.status }}"
-             data-flags='{{ p.flag_counts | tojson }}'>
-            <div class="project-card-header">
-                {#- Title and subtitle are one link into the book: the reader when
-                    there is something to read, the dashboard otherwise (same
-                    fallback the work chips use). -#}
-                <a class="project-card-link" href="{{ work_href }}">
-                {% if lang == 'es' and p.spanish_title %}
-                    <span class="nav-title">{{ p.spanish_title }}</span>
-                    <span class="nav-subtitle">{{ p.title }}</span>
+        <article class="project-card st-{{ p.status }}{% if p.status == 'archived' %} card-archived{% endif %}"
+                 data-status="{{ p.status }}"
+                 data-flags='{{ p.flag_counts | tojson }}'>
+            {#- The whole tile is one link into the book (the reader when there
+                is something to read, the dashboard otherwise); the ⋮ menu sits
+                above it rather than inside it. -#}
+            <a class="card-stretch" href="{{ p.work_href }}" aria-label="{{ p.display_title }}"></a>
+            <div class="card-cover">
+                {% if p.cover %}
+                <img src="/projects/{{ p.id }}/cover-thumb?v={{ p.cover_version }}" alt=""
+                     loading="lazy" decoding="async">
                 {% else %}
-                    <span class="nav-title">{{ p.title }}</span>
-                    {% if p.spanish_title %}
-                    <span class="nav-subtitle">{{ p.spanish_title }}</span>
-                    {% endif %}
+                <div class="cover-gen cloth-{{ p.cloth }}" aria-hidden="true">
+                    <span class="cover-gen-rule"></span>
+                    <span class="cover-gen-title">{{ p.display_title }}</span>
+                    <span class="cover-gen-rule"></span>
+                </div>
                 {% endif %}
-                </a>
-                {#- Everything you can do *to* a project rather than in it. One
-                    button per card, so no ids: the JS resolves by class. -#}
-                <div class="card-menu">
-                    <button class="topbar-icon-btn card-menu-btn" type="button"
-                            title="{{ t.card_menu_label }}" aria-label="{{ t.card_menu_label }}"
-                            aria-haspopup="true" aria-expanded="false">
-                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
-                            <circle cx="12" cy="5" r="2"/>
-                            <circle cx="12" cy="12" r="2"/>
-                            <circle cx="12" cy="19" r="2"/>
+            </div>
+            <div class="card-meta">
+                <h2 class="card-title">{{ p.display_title }}</h2>
+                {#- Under the title on a card; pinned to the cover's corner on a poster. -#}
+                <span class="status-pill">{{ t['status_' ~ p.status] }}</span>
+                {% if p.status == 'needs_translation' and p.chapters_total %}
+                <div class="card-progress" role="progressbar" aria-label="{{ t.badge_translated }}"
+                     aria-valuemin="0" aria-valuemax="{{ p.chapters_total }}" aria-valuenow="{{ p.chapters_translated }}">
+                    <i style="width: {{ (100 * p.chapters_translated / p.chapters_total) | round | int }}%"></i>
+                </div>
+                {% endif %}
+                {% if p.badges %}
+                {#- A pending book's badges name setup that's missing, which is
+                    fixed on the dashboard, wherever the tile itself goes. -#}
+                <div class="chips" data-href="{{ '/project/' ~ p.id if p.status == 'pending' else p.work_href }}">
+                    {%- for b in p.badges %}{{ badge(b) }}{% endfor -%}
+                </div>
+                {% endif %}
+            </div>
+            {#- Everything you can do *to* a project rather than in it. One
+                button per card, so no ids: the JS resolves by class. -#}
+            <div class="card-menu">
+                <button class="topbar-icon-btn card-menu-btn" type="button"
+                        title="{{ t.card_menu_label }}" aria-label="{{ t.card_menu_label }}"
+                        aria-haspopup="true" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+                        <circle cx="12" cy="5" r="2"/>
+                        <circle cx="12" cy="12" r="2"/>
+                        <circle cx="12" cy="19" r="2"/>
+                    </svg>
+                </button>
+                <div class="card-menu-popup" hidden>
+                    <a class="card-menu-item" href="/project/{{ p.id }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                         </svg>
+                        <span>{{ t.dashboard_btn }}</span>
+                    </a>
+                    <button class="card-menu-item card-archive-btn" type="button"
+                            data-project-id="{{ p.id }}"
+                            data-archived="{{ 1 if p.archived else 0 }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 8v13H3V8"/>
+                            <rect x="1" y="3" width="22" height="5"/>
+                            <line x1="10" y1="12" x2="14" y2="12"/>
+                        </svg>
+                        <span class="card-archive-label">{{ t.unarchive_action if p.archived else t.archive_action }}</span>
                     </button>
-                    <div class="card-menu-popup" hidden>
-                        <a class="card-menu-item" href="/project/{{ p.id }}">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <circle cx="12" cy="12" r="3"/>
-                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                            </svg>
-                            <span>{{ t.dashboard_btn }}</span>
-                        </a>
-                        <button class="card-menu-item card-archive-btn" type="button"
-                                data-project-id="{{ p.id }}"
-                                data-archived="{{ 1 if p.archived else 0 }}">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M21 8v13H3V8"/>
-                                <rect x="1" y="3" width="22" height="5"/>
-                                <line x1="10" y1="12" x2="14" y2="12"/>
-                            </svg>
-                            <span class="card-archive-label">{{ t.unarchive_action if p.archived else t.archive_action }}</span>
-                        </button>
-                    </div>
                 </div>
             </div>
-            {% if not setup_done %}
-            <div class="project-chips">
-                {% if not p.has_style_guide %}
-                <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.no_style_guide }}</a>
-                {% endif %}
-                {% if p.glossary_count == 0 %}
-                <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.no_glossary }}</a>
-                {% endif %}
-            </div>
-            {% endif %}
-            {% if p.total_chunks == 0 %}
-            <div class="project-chips">
-                <a class="badge badge-warn" href="/project/{{ p.id }}">{{ t.not_chunked }}</a>
-            </div>
-            {% elif not p.fully_translated %}
-            <div class="project-progress">
-                <div class="project-progress-track">
-                    <div class="project-progress-fill"
-                         style="width: {{ (100 * p.translated_chunks / p.total_chunks) | round | int }}%"></div>
-                </div>
-                <span class="project-progress-label">{{ p.translated_chunks }}/{{ p.total_chunks }} {{ t.chunks_suffix }}</span>
-            </div>
-            {% endif %}
-            {% if p.translated_chunks > 0 %}
-            <div class="project-chips project-work-chips">
-                {% if p.unread_chapters %}
-                <a class="badge badge-unread" href="{{ work_href }}">{{ p.unread_chapters }} {{ t.badge_unread }}</a>
-                {% endif %}
-                {% if p.awaiting_review %}
-                <a class="badge badge-review" href="{{ work_href }}">{{ p.awaiting_review }} {{ t.badge_review }}</a>
-                {% endif %}
-                {% if p.empty_footnotes %}
-                <a class="badge badge-footnote" href="{{ work_href }}">{{ p.empty_footnotes }} {{ t.chip_empty_fn }}</a>
-                {% endif %}
-                <a class="badge badge-warn project-chip-flags" href="{{ work_href }}"
-                   {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> <span class="chip-flag-label">{{ t.chip_flag_one if ns.flags == 1 else t.chip_flags }}</span></a>
-                {% if clean_eligible %}
-                <span class="badge badge-clean project-chip-clean" {% if ns.flags %}hidden{% endif %}>✓ {{ t.chip_clean }}</span>
-                {% endif %}
-            </div>
-            {% endif %}
-        </div>
+        </article>
         {% endfor %}
     </div>
     {% else %}
@@ -258,9 +287,12 @@
     flag_many: {{ t.chip_flags | tojson }},
     archive: {{ t.archive_action | tojson }},
     unarchive: {{ t.unarchive_action | tojson }},
-    archive_error: {{ t.archive_error | tojson }}
+    archive_error: {{ t.archive_error | tojson }},
+    statuses: {
+        {%- for skey in statuses %}{{ skey | tojson }}: {{ t['status_' ~ skey] | tojson }}{{ ',' if not loop.last }}{% endfor -%}
+    }
 };</script>
-<script src="{{ url_for('static', filename='reader_projects.js') }}?v=5"></script>
+<script src="{{ url_for('static', filename='reader_projects.js') }}?v=6"></script>
 
 {% elif mode == "chapters" %}
 <!-- Chapter list -->
