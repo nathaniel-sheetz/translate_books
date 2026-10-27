@@ -276,7 +276,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sr_sub = sr.add_subparsers(dest="action", required=True)
     srl = sr_sub.add_parser("list", help="List the book's rules and its chapter ids with labels")
     add_project(srl)
-    srs = sr_sub.add_parser("set", help="Add or replace a rule (by --id)")
+    srs = sr_sub.add_parser("set", help="Add or replace a rule (by --id); on a replace, a flag "
+                                        "left out keeps its current value and an empty one "
+                                        "(--note \"\") clears it")
     add_project(srs)
     srs.add_argument("--id", required=True, dest="rule_id")
     srs.add_argument("--rule", required=True, help="The instruction, as the translator reads it")

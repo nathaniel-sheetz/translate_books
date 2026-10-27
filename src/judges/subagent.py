@@ -743,6 +743,7 @@ def fanout(
     cache: str | None = None,
     runner=None,
     on_job_done: Callable[[dict[str, Any]], None] | None = None,
+    job_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Run one headless CLI wave for judge-prepare manifest entries.
 
@@ -780,6 +781,9 @@ def fanout(
     :func:`~src.harness.headless.run_headless_wave` and fires once per finished
     job, so a caller with a progress bar (the dashboard) is not blind for the
     several minutes a wave takes. Unset, the wave behaves exactly as before.
+
+    ``job_timeout`` (seconds) replaces the per-CLI job ceiling for this wave;
+    unset keeps the CLI's default.
     """
     from src.harness.headless import (
         _build_cmd,
@@ -1102,6 +1106,7 @@ def fanout(
         effort=resolved_effort,
         cache=requested_cache,
         on_job_done=on_job_done,
+        job_timeout=job_timeout,
     )
 
     if "error" in wave_out and not wave_out.get("wrote") and not wave_out.get("failed"):

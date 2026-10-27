@@ -168,6 +168,11 @@ merged in for every book, and the sidecar adds only what is specific to this
 one. On an id collision the house wording wins and the book's `note` overrides,
 so findings still aggregate by rule across books.
 
+A book rule may also carry `since` / `until` (chapter ids bounding a window)
+and `triggers` (English forms, or `re:<regex>`). Such a rule also reaches the
+translator, in the NOTES FOR THIS PASSAGE block of only the chunks it covers.
+The judges see a windowed rule marked "[applies … only]".
+
 ### Already-reported findings
 
 The dictionary and grammar evaluators fire on the same chunks at 3.2 and 2.8

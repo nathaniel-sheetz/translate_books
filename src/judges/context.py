@@ -343,7 +343,9 @@ def rules_for(
     Applies, in order: scope (the book's groups), the book's ``off`` overrides,
     the audience, and the triggers. The judges also get the book's own sidecar
     rules after the house set; the translator gets the house set only, because
-    its book-specific rules are its style guide.
+    its book-specific rules are its style guide (a book rule with a chapter
+    window or triggers reaches it separately, through
+    :func:`src.house.prompt.load_translator_house`).
 
     ``source_text`` is the English the prompt is about (a chunk, or the whole
     book for a book-level judge prompt). A triggered rule stays only when one of

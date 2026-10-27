@@ -1556,6 +1556,41 @@ def test_style_rule_set_list_remove_with_a_chapter_window(project: Path):
     assert [r["id"] for r in flow.style_rule_list(str(project))["rules"]] == ["plain"]
 
 
+def test_style_rule_set_merges_into_the_rule_it_replaces(project: Path):
+    (project / "style_rules.json").write_text(json.dumps({"rules": [
+        {"id": "grown", "text": "Old wording.", "note": "e.g. no diminutives",
+         "enforce": "prompt", "settles": {"style:x": "y"}, "triggers": ["stag"]},
+    ]}), encoding="utf-8")
+
+    def stored():
+        return json.loads((project / "style_rules.json").read_text(encoding="utf-8"))["rules"][0]
+
+    out = flow.style_rule_set(str(project), rule_id="grown", rule="New wording.")
+    assert out["replaced"]
+    rule = stored()
+    assert rule["rule"] == "New wording." and "text" not in rule
+    assert rule["note"] == "e.g. no diminutives" and rule["triggers"] == ["stag"]
+    assert rule["enforce"] == "prompt" and rule["settles"] == {"style:x": "y"}
+
+    flow.style_rule_set(str(project), rule_id="grown", rule="New wording.", note="", triggers=[])
+    rule = stored()
+    assert "note" not in rule and "triggers" not in rule and rule["settles"] == {"style:x": "y"}
+
+
+def test_style_rule_set_keeps_house_ids_for_note_overrides_only(project: Path, monkeypatch):
+    from src.judges import context
+
+    monkeypatch.setattr(context, "load_house_rules",
+                        lambda: [{"id": "no-vos", "rule": "Only tú, usted and ustedes."}])
+    with pytest.raises(ValueError, match="house rule's id"):
+        flow.style_rule_set(str(project), rule_id="no-vos", rule="X.", since="chapter_02")
+    with pytest.raises(ValueError, match="house rule's id"):
+        flow.style_rule_set(str(project), rule_id="no-vos", rule="X.", triggers=["vos"])
+    # No window, no triggers: the judges read it as a note on the house rule.
+    assert not flow.style_rule_set(str(project), rule_id="no-vos", rule="Only tú.",
+                                   note="This book's note.")["rule"]["to_translator"]
+
+
 def test_glossary_commit_flags_keys_the_source_never_uses(project: Path):
     """A key no chunk would ship is a REVIEW line; an alias the source uses clears it."""
     (project / "source.txt").write_text(

@@ -760,12 +760,14 @@ def fanout(
     cache: str = "auto",
     on_job_done: Optional[Callable[[dict[str, Any]], None]] = None,
     on_profile: Optional[Callable[[dict[str, Any]], None]] = None,
+    job_timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Headless wave over the prepared manifest.
 
     Inherits the CLI, worker model and effort ``prepare`` wrote into the
     manifest, so a bare call reproduces the wave that was consented to. The
     arguments are the one-flag correction for a bad pin, not the primary knobs.
+    ``job_timeout`` (seconds) replaces the per-CLI job ceiling; unset keeps it.
 
     ``on_profile`` fires the moment the profile resolves, before any process is
     launched, so a caller can surface its warnings while they are still
@@ -914,6 +916,7 @@ def fanout(
         effort=resolved_effort,
         cache=cache,
         on_job_done=on_job_done,
+        job_timeout=job_timeout,
     )
     return {
         "status": "error" if wave.get("error") else "ok",

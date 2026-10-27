@@ -37,12 +37,9 @@ WALL_WARN_S = 6000
 RESUME = "if_unchanged"
 
 
-def _chunks_per_chapter(project_dir: Path) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for path in (Path(project_dir) / "chunks").glob("*.json"):
-        chapter = path.stem.split("_chunk")[0]
-        counts[chapter] = counts.get(chapter, 0) + 1
-    return counts
+def _translated_per_chapter(status: dict[str, Any]) -> dict[str, int]:
+    """Translated chunks per chapter: the ones a chapter scope actually judges."""
+    return {row["id"]: int(row.get("translated") or 0) for row in status.get("chapters") or []}
 
 
 def translated_chapters(status: dict[str, Any]) -> set[str]:
@@ -74,7 +71,7 @@ def plan(project_dir: Path, *, judges: Optional[list[str]] = None) -> dict[str, 
     if "editorial" in names:
         pending, _skipped = wave.collect_pending(project_dir, ["book"])
         pending_pass2 = len(pending)
-    per_chapter = _chunks_per_chapter(project_dir)
+    per_chapter = _translated_per_chapter(status)
     return {
         "judges": names,
         "address_map": has_map,
@@ -120,6 +117,23 @@ def _bad_concurrency(concurrency: Optional[int]) -> Optional[str]:
     if concurrency is not None and concurrency < 1:
         return f"concurrency must be at least 1, got {concurrency}"
     return None
+
+
+def _bad_job_timeout(job_timeout: Optional[float]) -> Optional[str]:
+    if job_timeout is not None and not (0 < job_timeout < float("inf")):
+        return f"job_timeout must be above 0 seconds, got {job_timeout:g}"
+    return None
+
+
+def _job_timeout_payload(prof, job_timeout: Optional[float]) -> dict[str, Any]:
+    """The per-job ceiling the wave will run under, and where it came from."""
+    from src.harness.headless import _CLI_JOB_TIMEOUT_S
+
+    if job_timeout is not None:
+        return {"job_timeout_s": job_timeout, "job_timeout_source": "--job-timeout"}
+    cli = getattr(prof, "cli", None)
+    return {"job_timeout_s": _CLI_JOB_TIMEOUT_S.get(cli),
+            "job_timeout_source": f"default for {cli}"}
 
 
 def _project_wall(
@@ -180,6 +194,7 @@ def _todo_per_judge(project_dir: Path) -> dict[str, int]:
 def estimate(
     project_dir: Path, *, judges: Optional[list[str]] = None, cli=None, worker_model=None,
     effort=None, cache: Optional[str] = None, concurrency: Optional[int] = None,
+    job_timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Prepare the sweep and project its tokens. Spawns nothing."""
     from src.judges import editorial_wave as wave
@@ -190,8 +205,9 @@ def estimate(
     prof = _profile(project_dir, cli, worker_model, effort)
     out: dict[str, Any] = {"plan": p, "effective": prof.to_payload(),
                            "concurrency": concurrency or DEFAULT_CONCURRENCY,
-                           "concurrency_source": "--concurrency" if concurrency else "default"}
-    bad = _bad_concurrency(concurrency)
+                           "concurrency_source": "--concurrency" if concurrency else "default",
+                           **_job_timeout_payload(prof, job_timeout)}
+    bad = _bad_concurrency(concurrency) or _bad_job_timeout(job_timeout)
     if bad:
         return {**out, "status": "error", "error": bad}
     if p["nothing_to_do"]:
@@ -264,18 +280,20 @@ def _stderr_emit(event: str, **fields: Any) -> None:
 def run(
     project_dir: Path, *, judges: Optional[list[str]] = None, cli=None, worker_model=None,
     effort=None, cache: Optional[str] = None, emit: Callable[..., None] = _stderr_emit,
-    concurrency: Optional[int] = None,
+    concurrency: Optional[int] = None, job_timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Run the sweep under the book's lock. Spends subscription tokens.
 
     ``concurrency`` is the width of both waves (pass 1 and editorial pass 2);
-    ``None`` means :data:`DEFAULT_CONCURRENCY`. A sweep cut off part-way resumes
-    on the next call: drafts whose prompt is unchanged are kept, not re-run.
+    ``None`` means :data:`DEFAULT_CONCURRENCY`. ``job_timeout`` (seconds)
+    replaces the CLI's per-job ceiling in both waves; ``None`` keeps it. A sweep
+    cut off part-way resumes on the next call: drafts whose prompt is unchanged
+    are kept, not re-run.
     """
     from src.harness import locks
     from src.judges import sweep
 
-    bad = _bad_concurrency(concurrency)
+    bad = _bad_concurrency(concurrency) or _bad_job_timeout(job_timeout)
     if bad:
         return {"status": "error", "error": bad}
     width = concurrency or DEFAULT_CONCURRENCY
@@ -302,6 +320,7 @@ def run(
                     context=context, cli=cli, worker_model=worker_model, effort=effort,
                     prompt_cache=cache, default_cli=prof.cli,
                     adjudicate_scopes=["book"], concurrency=width, keep_drafts=RESUME,
+                    job_timeout=job_timeout,
                 )
             # The sweep adjudicates only when editorial is among the judges it ran; pass 2
             # can still be owed (and was quoted) when editorial itself is current.
@@ -313,6 +332,7 @@ def run(
                     project_dir, ["book"], emit, backend="headless", context=context,
                     cli=cli, worker_model=worker_model, effort=effort,
                     prompt_cache=cache or "auto", concurrency=width, keep_drafts=RESUME,
+                    job_timeout=job_timeout,
                 )
                 summary = {**summary, "adjudication": adjudication,
                            "error_count": (summary.get("error_count") or 0) + len(errors),

@@ -140,7 +140,10 @@ def load_translator_house(project_dir: Optional[Path]) -> TranslatorHouse:
     """The translator-facing rules for this book: house global/triggered, book scoped, address."""
     from src.judges.context import (
         AUDIENCE_TRANSLATOR,
+        ENFORCE_PROMPT,
         load_book_rules,
+        load_house_rules,
+        rule_enforce,
         rule_triggers,
         rules_for,
         split_global_triggered,
@@ -152,9 +155,14 @@ def load_translator_house(project_dir: Optional[Path]) -> TranslatorHouse:
     )
     # A book rule with neither a window nor triggers restates the style guide
     # (which the translator already has) for the judges, so only scoped ones ship.
+    # One that reuses a house id only overrides that rule's note for the judges
+    # (merge_style_rules), so the translator does not get a second copy either.
+    house_ids = {str(r.get("id") or "").strip() for r in load_house_rules()}
     book_scoped = [
         r for r in (load_book_rules(project_dir) if project_dir is not None else [])
         if (has_window(r) or rule_triggers(r)) and str(r.get("rule") or r.get("text") or "").strip()
+        and rule_enforce(r) == ENFORCE_PROMPT
+        and str(r.get("id") or "").strip() not in house_ids
     ]
     return TranslatorHouse(
         tuple(global_rules), tuple(triggered), tuple(book_scoped),

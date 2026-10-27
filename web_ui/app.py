@@ -1019,7 +1019,10 @@ def setup_list_style_rules(project_id):
         return jsonify({"error": "Bad request"}), 400
     from src.harness import flow
 
-    return jsonify(flow.style_rule_list(str(_resolve_project_dir(project_id))))
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify(flow.style_rule_list(str(project_dir)))
 
 
 @app.route("/api/setup/<project_id>/style-rules", methods=["POST"])
@@ -1029,16 +1032,28 @@ def setup_save_style_rule(project_id):
         return jsonify({"error": "Bad request"}), 400
     from src.harness import flow
 
-    data = request.get_json() or {}
-    triggers = data.get("triggers") or []
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Bad request"}), 400
+    # A field left out of the body keeps the rule's current value; an empty one clears it.
+    def field(key):
+        return None if key not in data else str(data.get(key) or "")
+
+    triggers = data.get("triggers")
     if isinstance(triggers, str):
-        triggers = [t.strip() for t in triggers.split(",")]
+        # One per line: a re: trigger may itself contain commas.
+        triggers = triggers.splitlines()
+    if triggers is not None and not isinstance(triggers, list):
+        return jsonify({"error": "triggers must be a list or one trigger per line"}), 400
     try:
         out = flow.style_rule_set(
-            str(_resolve_project_dir(project_id)),
+            str(project_dir),
             rule_id=str(data.get("id") or ""), rule=str(data.get("rule") or ""),
-            note=data.get("note") or None, since=data.get("since") or None,
-            until=data.get("until") or None, triggers=[t for t in triggers if t],
+            note=field("note"), since=field("since"), until=field("until"),
+            triggers=None if triggers is None else [str(t) for t in triggers],
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1051,8 +1066,11 @@ def setup_remove_style_rule(project_id, rule_id):
         return jsonify({"error": "Bad request"}), 400
     from src.harness import flow
 
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
     try:
-        return jsonify(flow.style_rule_remove(str(_resolve_project_dir(project_id)), rule_id=rule_id))
+        return jsonify(flow.style_rule_remove(str(project_dir), rule_id=rule_id))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 

@@ -82,6 +82,17 @@ def test_windowed_and_triggered_book_rules_ship_where_they_apply(house):
     assert "adult stag" not in book_house.notes_block("He walked on.")
 
 
+def test_translator_skips_draft_book_rules_and_house_id_overrides(house):
+    book = _bambi(house, rules=[
+        {"id": "draft-only", "rule": "Decided at the gate.", "since": "chapter_13", "enforce": "draft"},
+        {"id": "no-vos", "rule": "A book copy of the house rule.", "since": "chapter_13"},
+        {"id": "grown-register", "rule": "Bambi now speaks as an adult stag.", "since": "chapter_13"},
+    ])
+    notes = load_translator_house(book).notes_block("He walked on.", "chapter_14")
+    assert "adult stag" in notes
+    assert "Decided at the gate" not in notes and "book copy" not in notes
+
+
 def test_judge_rule_list_marks_the_window_with_the_books_label():
     rules = [{"id": "grown-register", "rule": "Adult register.", "since": "chapter_13"},
              {"id": "plain", "rule": "Plain."}]

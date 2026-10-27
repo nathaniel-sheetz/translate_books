@@ -349,12 +349,14 @@
                     <input type="text" id="scoped-rule-id" placeholder="grown-register">
                     <label for="scoped-rule-text">Rule</label>
                     <input type="text" id="scoped-rule-text" placeholder="Bambi now speaks as a grown stag: no diminutives.">
+                    <label for="scoped-rule-note">Note</label>
+                    <input type="text" id="scoped-rule-note" placeholder="optional example or clarification, appended to the rule">
                     <label for="scoped-rule-since">From</label>
                     <select id="scoped-rule-since"></select>
                     <label for="scoped-rule-until">Through</label>
                     <select id="scoped-rule-until"></select>
                     <label for="scoped-rule-triggers">Triggers</label>
-                    <input type="text" id="scoped-rule-triggers" placeholder="optional, comma-separated English words">
+                    <textarea id="scoped-rule-triggers" rows="2" placeholder="optional, one English word or re:pattern per line"></textarea>
                 </div>
                 <div class="btn-row" style="margin-top:8px;">
                     <button class="btn-save" id="btn-save-scoped-rule">Add / replace</button>

@@ -1432,7 +1432,7 @@
             if (r.triggers && r.triggers.length) {
                 where += (where ? '; ' : '') + 'where the passage has ' + r.triggers.join(', ');
             }
-            [r.id, r.rule + (r.note ? ' ' + r.note : ''), where || 'whole book (judges only)',
+            [r.id, (r.rule || r.text || '') + (r.note ? ' ' + r.note : ''), where || 'whole book (judges only)',
              r.to_translator ? r.chunks + ' chunks' : 'judges only'].forEach(function(text) {
                 tr.insertCell().textContent = text;
             });
@@ -1442,10 +1442,11 @@
             edit.textContent = 'Edit';
             edit.addEventListener('click', function() {
                 document.getElementById('scoped-rule-id').value = r.id;
-                document.getElementById('scoped-rule-text').value = r.rule;
+                document.getElementById('scoped-rule-text').value = r.rule || r.text || '';
+                document.getElementById('scoped-rule-note').value = r.note || '';
                 document.getElementById('scoped-rule-since').value = r.since || '';
                 document.getElementById('scoped-rule-until').value = r.until || '';
-                document.getElementById('scoped-rule-triggers').value = (r.triggers || []).join(', ');
+                document.getElementById('scoped-rule-triggers').value = (r.triggers || []).join('\n');
             });
             var del = document.createElement('button');
             del.textContent = 'Remove';
@@ -1470,6 +1471,7 @@
         var payload = {
             id: document.getElementById('scoped-rule-id').value.trim(),
             rule: document.getElementById('scoped-rule-text').value.trim(),
+            note: document.getElementById('scoped-rule-note').value.trim(),
             since: document.getElementById('scoped-rule-since').value,
             until: document.getElementById('scoped-rule-until').value,
             triggers: document.getElementById('scoped-rule-triggers').value,

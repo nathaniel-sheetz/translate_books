@@ -97,6 +97,9 @@ _JUDGE_SCHEMA = {
     "concurrency": "--estimate only: parallel CLI processes both passes will run (--concurrency, "
     "default 10)",
     "concurrency_source": "--estimate only: '--concurrency' or 'default'",
+    "job_timeout_s": "--estimate only: seconds a job may run before it is killed (--job-timeout, "
+    "else the CLI's default: 900 on cursor and codex, 1800 on claude)",
+    "job_timeout_source": "--estimate only: '--job-timeout' or 'default for <cli>'",
     "wall": "--estimate only: {pass1_s, pass2_max_s, total_s, per_judge_s, median_job_s, "
     "p90_job_s, source, background_cap_s, fits_background_cap} projected from logged job "
     "walls at this width; null when no job of this CLI has been logged",
@@ -196,7 +199,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
 def _cmd_judge(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     options = dict(judges=args.judge, cli=args.cli, worker_model=args.worker_model,
-                   effort=args.effort, cache=args.prompt_cache, concurrency=args.concurrency)
+                   effort=args.effort, cache=args.prompt_cache, concurrency=args.concurrency,
+                   job_timeout=args.job_timeout)
     if args.yes:
         out = judging.run(project_dir, **options)
         out["instructions"] = "Run `signals` next to read the new findings."
@@ -511,6 +515,9 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=["auto", "5m", "1h", "off"], help="Claude prompt-cache TTL")
     judge.add_argument("--concurrency", type=int, default=None,
                        help="parallel CLI processes for both passes (default 10)")
+    judge.add_argument("--job-timeout", dest="job_timeout", type=float, default=None,
+                       help="seconds one job may run before it is killed, both passes "
+                            "(default: 900 on cursor and codex, 1800 on claude)")
     return parser
 
 

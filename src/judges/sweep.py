@@ -23,7 +23,7 @@ Emit = Callable[..., None]
 def adjudicate_editorial(
     project_dir, scopes, emit, *, backend, context,
     cli=None, worker_model=None, effort=None, prompt_cache="auto", concurrency=None,
-    keep_drafts=False,
+    keep_drafts=False, job_timeout=None,
 ):
     """Pass 2 of the editorial judge, run inline after pass 1 in the same job.
 
@@ -47,7 +47,8 @@ def adjudicate_editorial(
 
     ``concurrency`` widens the headless wave; ``None`` keeps the manifest's
     ``batch_size``. ``keep_drafts`` is handed to ``prepare`` (``"if_unchanged"``
-    resumes a cut-off wave). The API backend ignores both.
+    resumes a cut-off wave). ``job_timeout`` (seconds) replaces the per-CLI job
+    ceiling. The API backend ignores all three.
     """
     from src.judges import editorial_wave as wave
 
@@ -118,6 +119,7 @@ def adjudicate_editorial(
             project_dir,
             cache=prompt_cache,
             concurrency=concurrency,
+            job_timeout=job_timeout,
             on_job_done=lambda rec: emit(
                 "target_done",
                 target_id=rec.get("id"),
@@ -172,6 +174,7 @@ def run_headless_sweep(
     adjudicate_scopes: Any = None,
     concurrency: Optional[int] = None,
     keep_drafts: Any = False,
+    job_timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """``prepare`` -> ``fanout`` -> ``commit(persist)`` -> editorial pass 2.
 
@@ -181,6 +184,8 @@ def run_headless_sweep(
     ``judge_names``. ``concurrency`` is the width of both waves; ``None`` keeps
     each manifest's ``batch_size``. ``keep_drafts`` reaches both ``prepare``
     calls; ``"if_unchanged"`` lets a re-run resume a sweep that was cut off.
+    ``job_timeout`` (seconds) replaces the per-CLI job ceiling in both waves;
+    ``None`` keeps the CLI's default.
 
     Returns the job summary: ``ran``, ``total``, ``wrote``, ``failed``,
     ``missing``, ``adjudication``, ``error_count``, ``errors``, ``usage``,
@@ -209,6 +214,7 @@ def run_headless_sweep(
         project_dir,
         cache=prompt_cache,
         concurrency=concurrency,
+        job_timeout=job_timeout,
         on_job_done=lambda rec: emit(
             "target_done",
             target_id=rec.get("id"),
@@ -259,7 +265,7 @@ def run_headless_sweep(
             emit, backend="headless", context=context,
             cli=cli, worker_model=worker_model, effort=effort,
             prompt_cache=prompt_cache or "auto", concurrency=concurrency,
-            keep_drafts=keep_drafts,
+            keep_drafts=keep_drafts, job_timeout=job_timeout,
         )
         errors += adj_errors
 

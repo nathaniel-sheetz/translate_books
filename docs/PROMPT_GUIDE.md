@@ -125,7 +125,7 @@ from `book_groups.json`), `enforce` (`prompt`, the default; `mechanical` with a
 `fixer`, applied in code at chunk commit and logged to the book's
 `house_fixes.jsonl`; or `draft`, read only by the drafting steps), `triggers`
 (English forms, or `re:<regex>`; a triggered rule reaches only the chunks that
-contain one, in a HOUSE NOTES block after the glossary, while a global rule sits
+contain one, in the NOTES FOR THIS PASSAGE block after the glossary, while a global rule sits
 in the HOUSE RULES block of the cached prefix) and `settles` (the
 `style:<question>`, `decisions:<category>` or `address:global_rules` it answers,
 which are then pre-filled at the gate instead of asked). The translation

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.80.0.0] - 2026-10-26
+
+### Added
+- **Chapter-scoped book rules and address shifts reach only the chunks they cover.** The translator is never told which chapter it is in, so it could not follow a rule meant for chapter 13 onward. A rule in a book's `style_rules.json` may now carry `since`/`until` chapter ids or `triggers`. An address-map direction whose form changes partway through the book becomes one line. Both go only to the chunks they cover, in a NOTES FOR THIS PASSAGE block after the glossary (the old HOUSE NOTES slot), so the cached prefix stays byte-identical. The judges still see every rule, with a windowed one marked by its chapters.
+- **Authoring scoped rules.** `harness.py style-rule list|set|remove` and a Chapter-scoped Notes section on the dashboard's style-guide stage edit the book's own rules. They reject unknown chapter ids and reversed windows, and say how many chunks each rule reaches. Replacing a rule merges into the existing entry: a field that isn't passed keeps its value, an empty value clears it, and fields the form doesn't manage (`enforce`, `settles`) are kept. A windowed or triggered rule can't reuse a house rule's id.
+- **Glossary entries carry a translator note and aliases.** `note` is printed after the entry in the translator prompt. `context` stays the human's rationale and is still never sent. `aliases` lists other source forms the entry should match. The harness glossary step drafts both, the dashboard glossary table edits both, and book-review glossary changes accept `note`.
+- **`book_review.py judge --job-timeout <seconds>`** replaces the CLI's per-job ceiling for both passes, and `--estimate` echoes the ceiling in force.
+
+### Changed
+- **Every glossary entry a chunk needs now ships.** The filter folds hyphens, spaces and curly apostrophes, ignores a sense label, matches either half of a slash key and takes -ies plurals. Across the library, glossary keys that never reach the translator drop from 57 to 18.
+
+### Fixed
+- **Book review judges only translated chapters.** A canary on a partly translated book no longer scopes untranslated chapters into the wave (which made `prepare` raise). Its chunk estimate counts only the translated chunks it will judge.
+- **The dialogue-rule fingerprint hashes the real DIALOGUE FORMATTING block.** It now anchors on the block's `====` banner. Before, it matched the prompt's earlier mention of the section or a style guide's own dialogue header, and `rule_drift` reported every dialogue finding in those books as judged against rules the translation never saw.
+- An `aliases` string in a glossary draft is read as comma-separated, not split into one-letter aliases that matched every chunk.
+- Book rules with `enforce: draft` or `mechanical` no longer reach the translator's passage notes.
+- The style-rule web routes return 404 for a missing project and 400 for a malformed body, instead of a 500. The dashboard's triggers field takes one trigger per line, so an `re:` trigger containing a comma survives a save. The rule list loads the book's chunks once rather than once per rule. `--job-timeout nan` is rejected.
+
 ## [0.79.0.0] - 2026-10-21
 
 ### Added

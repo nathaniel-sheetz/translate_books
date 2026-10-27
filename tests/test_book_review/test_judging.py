@@ -78,6 +78,78 @@ def test_run_passes_concurrency_to_both_waves(tmp_path, monkeypatch):
     assert widths == {"pass1": 10, "pass2": 10}  # book-review's default, not the manifests' 5
 
 
+def test_run_passes_job_timeout_to_both_waves(tmp_path, monkeypatch):
+    from src.harness import headless
+    from src.judges import editorial_wave, subagent
+
+    _stub_run(monkeypatch, {"judges": ["editorial"], "address_map": False,
+                            "owed": {"editorial": ["chapter_01"]},
+                            "owed_chunks": {"editorial": 1}, "pending_pass2_chunks": 0,
+                            "nothing_to_do": False})
+    seen = {}
+    monkeypatch.setattr(subagent, "prepare", lambda *a, **k: {"manifest": [{}]})
+    monkeypatch.setattr(subagent, "commit", lambda *a, **k: {"counts": {"committed": 1}})
+    monkeypatch.setattr(editorial_wave, "prepare",
+                        lambda *a, **k: {"counts": {"chunks": 1}})
+    monkeypatch.setattr(editorial_wave, "commit", lambda *a, **k: {"committed": 1})
+
+    def fake_pass1(project_dir, **kwargs):
+        seen["pass1"] = kwargs.get("job_timeout")
+        return {"wrote": ["x"]}
+
+    def fake_pass2(project_dir, **kwargs):
+        seen["pass2"] = kwargs.get("job_timeout")
+        return {}
+
+    monkeypatch.setattr(subagent, "fanout", fake_pass1)
+    monkeypatch.setattr(editorial_wave, "fanout", fake_pass2)
+
+    judging.run(tmp_path, emit=lambda *a, **k: None, job_timeout=1800)
+    assert seen == {"pass1": 1800, "pass2": 1800}
+    judging.run(tmp_path, emit=lambda *a, **k: None)
+    assert seen == {"pass1": None, "pass2": None}  # the wave falls back to the CLI ceiling
+
+    out = judging.run(tmp_path, emit=lambda *a, **k: None, job_timeout=0)
+    assert out["status"] == "error" and "above 0" in out["error"]
+
+    # The estimate names the ceiling in force and where it came from.
+    prof = type("P", (), {"cli": "cursor"})()
+    assert judging._job_timeout_payload(prof, None) == {
+        "job_timeout_s": headless._CLI_JOB_TIMEOUT_S["cursor"],
+        "job_timeout_source": "default for cursor"}
+    assert judging._job_timeout_payload(prof, 1800) == {
+        "job_timeout_s": 1800, "job_timeout_source": "--job-timeout"}
+
+
+def test_job_timeout_rejects_nan_and_infinity():
+    assert judging._bad_job_timeout(float("nan"))
+    assert judging._bad_job_timeout(float("inf"))
+    assert judging._bad_job_timeout(1800) is None and judging._bad_job_timeout(None) is None
+
+
+def test_plan_counts_only_the_translated_chunks_it_will_judge(tmp_path, monkeypatch):
+    from src.judges import status
+
+    monkeypatch.setattr(status, "build_status", lambda *a, **k: {
+        "chapters": [{"id": "chapter_01", "chunks": 3, "translated": 1},
+                     {"id": "chapter_02", "chunks": 2, "translated": 0}],
+        "judges": {"dialogue": {"chapters": {"not_run": ["chapter_01", "chapter_02"]}}},
+    })
+    out = judging.plan(tmp_path, judges=["dialogue"])
+    assert out["owed"] == {"dialogue": ["chapter_01"]}
+    assert out["owed_chunks"] == {"dialogue": 1}
+
+
+def test_subagent_fanout_hands_job_timeout_to_the_wave(tmp_path, monkeypatch):
+    import inspect
+
+    from src.judges import editorial_wave, subagent
+
+    # Both fanouts accept it; the wave itself owns the per-CLI fallback.
+    assert "job_timeout" in inspect.signature(subagent.fanout).parameters
+    assert "job_timeout" in inspect.signature(editorial_wave.fanout).parameters
+
+
 def test_run_refuses_a_width_below_one_before_taking_the_lock(tmp_path, monkeypatch):
     from src.harness import locks
 
@@ -102,6 +174,8 @@ def test_cli_judge_accepts_concurrency():
     parser = cli.build_parser()
     assert parser.parse_args(["judge", "--project", "x", "--concurrency", "10"]).concurrency == 10
     assert parser.parse_args(["run", "--project", "x", "--concurrency", "8"]).concurrency == 8
+    assert parser.parse_args(["judge", "--project", "x", "--job-timeout", "1800"]).job_timeout == 1800
+    assert parser.parse_args(["judge", "--project", "x"]).job_timeout is None
 
 
 def test_run_resumes_from_drafts_on_both_passes(tmp_path, monkeypatch):
