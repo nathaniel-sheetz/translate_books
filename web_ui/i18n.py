@@ -23,7 +23,11 @@ STRINGS = {
         "new_project_create": "Create",
         "new_project_error": "Please enter a title.",
         "dashboard_btn": "Dashboard",
-        "chunks_suffix": "chunks",
+        "badge_translated": "translated",
+        "chip_empty_fn_one": "empty note",
+        "view_label": "View",
+        "view_posters": "Covers",
+        "view_cards": "Cards",
         "filter_status_label": "Status",
         # Names what the chip actually filters — which flag types the card's
         # flag count includes — rather than the evaluator's word, "categories".
@@ -779,7 +783,11 @@ STRINGS = {
         "new_project_create": "Crear",
         "new_project_error": "Por favor ingrese un t\u00edtulo.",
         "dashboard_btn": "Panel",
-        "chunks_suffix": "fragmentos",
+        "badge_translated": "traducidos",
+        "chip_empty_fn_one": "nota vacía",
+        "view_label": "Vista",
+        "view_posters": "Portadas",
+        "view_cards": "Tarjetas",
         "filter_status_label": "Estado",
         "filter_categories_label": "Tipos de marcas",
         # Project card overflow menu

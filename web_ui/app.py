@@ -7,6 +7,7 @@ Provides the pipeline dashboard and bilingual reader:
 - Bilingual sentence-aligned reader with annotations and corrections
 """
 
+import functools
 import ipaddress
 import json
 import math
@@ -113,7 +114,12 @@ from web_ui.evaluations import (
     triage_mark,
 )
 from web_ui import favorites as favorites_store
-from web_ui.project_cards import PROJECT_STATUSES, build_project_card
+from web_ui.project_cards import (
+    PROJECT_STATUSES,
+    build_project_card,
+    card_badges,
+    find_cover,
+)
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # For session management
@@ -429,6 +435,31 @@ def set_ui_version():
         version = _DEFAULT_READER_UI_VERSION
     resp = make_response(jsonify({"version": version}))
     resp.set_cookie("reader_ui_version", version, max_age=365 * 24 * 3600, samesite="Lax")
+    return resp
+
+
+# Home-page library view: cover posters, or cards with the cover beside the
+# text. Per device, like the sheet version above — a phone and a laptop want
+# different ones. The page swaps views in place; the cookie only remembers.
+_LIBRARY_VIEWS = ("posters", "cards")
+_DEFAULT_LIBRARY_VIEW = "posters"
+_LIBRARY_VIEW_COOKIE = "reader_library_view"
+
+
+def _get_library_view() -> str:
+    """Read the home-page library view from cookie, default to posters."""
+    v = request.cookies.get(_LIBRARY_VIEW_COOKIE, _DEFAULT_LIBRARY_VIEW)
+    return v if v in _LIBRARY_VIEWS else _DEFAULT_LIBRARY_VIEW
+
+
+@app.route("/api/set-library-view", methods=["POST"])
+def set_library_view():
+    """Persist the home-page library view via cookie."""
+    view = (request.json or {}).get("view")
+    if view not in _LIBRARY_VIEWS:
+        return jsonify({"error": f"view must be one of: {', '.join(_LIBRARY_VIEWS)}"}), 400
+    resp = make_response(jsonify({"ok": True, "view": view}))
+    resp.set_cookie(_LIBRARY_VIEW_COOKIE, view, max_age=365 * 24 * 3600, samesite="Lax")
     return resp
 
 
@@ -1222,6 +1253,12 @@ def create_project():
     return jsonify({"id": project_id, "redirect": f"/project/{project_id}"})
 
 
+# Home-page order: the statuses with work in them first, in the order you would
+# take them up (finish reviewing before translating more), then the rest. Not
+# PROJECT_STATUSES' order, which is harness order and drives the filter picker.
+_LIBRARY_STATUS_ORDER = ("needs_review", "needs_translation", "pending", "complete", "archived")
+
+
 @app.route("/read/")
 def reader_projects():
     """List available projects with status dashboard."""
@@ -1242,15 +1279,32 @@ def reader_projects():
         seen_ids[proj_dir.name] = proj_dir
         projects.append(build_project_card(proj_dir, proj_dir.name))
 
+    lang = _get_ui_lang()
+    review_types_selected = _get_review_types()
+    # The cached card is shared and read-only; what depends on this request (UI
+    # language, the category cookie) goes on a per-render copy.
+    view = []
+    for card in projects:
+        p = dict(card)
+        p["display_title"] = (card["spanish_title"] if lang == "es" else "") or card["title"]
+        # The reader when there is something to read, the dashboard otherwise.
+        p["work_href"] = f"/read/{card['id']}" if card["has_alignments"] else f"/project/{card['id']}"
+        p["badges"] = card_badges(card, review_types_selected)
+        view.append(p)
+    # Books that need work first, in the order you would work through them.
+    order = {s: i for i, s in enumerate(_LIBRARY_STATUS_ORDER)}
+    view.sort(key=lambda p: (order.get(p["status"], len(order)), fold(p["display_title"])))
+
     return render_template(
         "reader.html",
         mode="projects",
-        projects=projects,
+        projects=view,
         t=t,
-        lang=_get_ui_lang(),
+        lang=lang,
         reader_ui_version=_get_reader_ui_version(),
+        library_view=_get_library_view(),
         review_types=list(REVIEW_TYPES),
-        review_types_selected=_get_review_types(),
+        review_types_selected=review_types_selected,
         statuses=list(PROJECT_STATUSES),
         statuses_selected=_get_status_filter(),
     )
@@ -2224,6 +2278,66 @@ def serve_project_image(project_id, filename):
     if not images_dir.exists():
         return jsonify({"error": "Images directory not found"}), 404
     return send_from_directory(str(images_dir), filename)
+
+
+# Covers run 1-4.5 MB at print size; the home page shows them ~200px wide, so it
+# fetches them shrunk. Resized in memory and kept in an LRU keyed on the file's
+# (path, mtime, size): nothing is written to disk, which the hosted app forbids
+# outside its sidecar files, and a replaced cover misses the cache by itself.
+_COVER_THUMB_BOX = (420, 630)   # 2x a ~200px tile, 2:3
+_COVER_THUMB_CACHE_SIZE = 64
+
+
+@functools.lru_cache(maxsize=_COVER_THUMB_CACHE_SIZE)
+def _cover_thumb_bytes(path: str, mtime_ns: int, size: int) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(path) as im:
+        im.thumbnail(_COVER_THUMB_BOX)
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            flat = Image.new("RGB", im.size, (255, 255, 255))
+            flat.paste(im, mask=im.getchannel("A"))
+            im = flat
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+        buf = BytesIO()
+        im.save(buf, "JPEG", quality=84, optimize=True)
+    return buf.getvalue()
+
+
+@app.route("/projects/<project_id>/cover-thumb")
+def serve_cover_thumb(project_id):
+    """The book's cover (see :func:`project_cards.find_cover`), resized for the home page."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    cover = find_cover(_resolve_project_dir(project_id))
+    if cover is None:
+        return jsonify({"error": "No cover"}), 404
+    try:
+        st = cover.stat()
+    except OSError:  # removed or swapped since find_cover saw it
+        return jsonify({"error": "No cover"}), 404
+    etag = f"{st.st_mtime_ns:x}-{st.st_size:x}"
+    if request.if_none_match.contains(etag):
+        resp = make_response("", 304)
+    else:
+        from PIL import Image
+
+        try:
+            data = _cover_thumb_bytes(str(cover), st.st_mtime_ns, st.st_size)
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+            # Corrupt, truncated, or past Pillow's pixel limit: fall back to
+            # the generated cover, as for a book with none.
+            return jsonify({"error": "Unreadable cover"}), 404
+        resp = make_response(data)
+        resp.headers["Content-Type"] = "image/jpeg"
+    resp.set_etag(etag)
+    # The page's URL carries ?v=<mtime>, so a long max-age is safe.
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import zlib
 from pathlib import Path
 from typing import Any, Optional
 
@@ -40,8 +41,13 @@ from web_ui.evaluations import REVIEW_JUDGE_TYPES, empty_type_counts, load_proje
 # this and the template loops over it to build the Status picker.
 PROJECT_STATUSES = ("pending", "needs_translation", "needs_review", "complete", "archived")
 
+# How many cloth colors the generated cover cycles through (reader.css
+# .cloth-0 … .cloth-N). A card carries its index, derived from the project id.
+COVER_CLOTHS = 9
+
 # Directories whose contents feed a card, fingerprinted by (count, max mtime, size).
-_WATCHED_DIRS = ("chunks", "evaluations", "alignments")
+# images/ because dropping in a cover.jpg must reach the home page.
+_WATCHED_DIRS = ("chunks", "evaluations", "alignments", "images")
 # Individual files whose contents feed a card.
 _WATCHED_FILES = (
     "annotations.jsonl",
@@ -112,18 +118,108 @@ def _load_json(path: Path) -> Optional[Any]:
         return None
 
 
-def _count_chunks(chunks_dir: Path) -> tuple[int, int]:
-    """``(total_chunks, translated_chunks)`` over ``*_chunk_*.json``."""
+def _count_chunks(chunks_dir: Path) -> tuple[int, int, int, int]:
+    """``(total_chunks, translated_chunks, total_chapters, translated_chapters)``
+    over ``*_chunk_*.json``.
+
+    A chapter is the file stem before ``_chunk_``, and it counts as translated
+    only when every one of its chunks is — the card's "4/15 translated" badge
+    means chapters a reader can finish, not chunks.
+    """
     if not chunks_dir.exists():
-        return (0, 0)
+        return (0, 0, 0, 0)
     total = 0
     translated = 0
+    # chapter id -> (chunks, translated chunks)
+    chapters: dict[str, list[int]] = {}
     for cf in chunks_dir.glob("*_chunk_*.json"):
         total += 1
+        counts = chapters.setdefault(cf.stem.split("_chunk_")[0], [0, 0])
+        counts[0] += 1
         data = _load_json(cf)
         if isinstance(data, dict) and data.get("translated_text"):
             translated += 1
-    return (total, translated)
+            counts[1] += 1
+    done = sum(1 for n, t in chapters.values() if n == t)
+    return (total, translated, len(chapters), done)
+
+
+# A cover is the EPUB's cover (same names and order as
+# src/epub_builder._resolve_cover), else the cover an importer saved from the
+# source. Frontispieces are deliberately not used: they are illustrations, and a
+# generated cover reads as "no cover yet" more honestly than a plate does.
+_COVER_NAMES = ("cover.jpg", "cover.jpeg", "cover.png")
+_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+def find_cover(project_dir: Path) -> Optional[Path]:
+    """The image the home page shows for a book, or ``None``."""
+    images = Path(project_dir) / "images"
+    for name in _COVER_NAMES:
+        if (images / name).is_file():
+            return images / name
+    try:
+        candidates = sorted(p for p in images.iterdir() if p.is_file())
+    except OSError:
+        return None
+    for p in candidates:
+        name = p.name.lower()
+        if p.suffix.lower() in _IMAGE_SUFFIXES and (
+            name.startswith("source_cover") or ".cover." in name
+        ):
+            return p
+    return None
+
+
+# Badge kinds in priority order per status: the facts that explain *why* a book
+# has its status, most actionable first. The page shows a prefix of this list
+# (posters two, cards as many as fit in two rows), so order is the design.
+_BADGE_ORDER = {
+    "pending": (),  # setup badges, built separately below
+    "needs_translation": ("translated", "review", "unread", "footnotes"),
+    "needs_review": ("review", "flags", "unread", "footnotes"),
+}
+
+
+def card_badges(card: dict, review_types_selected) -> list[dict]:
+    """The badges one card shows, in display order.
+
+    Each is ``{"kind", "count"}``; ``count`` is ``None`` for the setup badges
+    (they have no number, so they cannot shorten to icon + number) and a
+    ``"done/total"`` string for ``translated``. The flags badge is the one
+    badge emitted at zero: the category picker re-sums it in the page and must
+    be able to reveal it. Complete and archived books get no badges.
+    """
+    status = card["status"]
+    if status == "pending":
+        out = []
+        if not card["has_style_guide"]:
+            out.append({"kind": "no_style_guide", "count": None})
+        if card["glossary_count"] == 0:
+            out.append({"kind": "no_glossary", "count": None})
+        if card["total_chunks"] == 0:
+            out.append({"kind": "not_chunked", "count": None})
+        return out
+
+    if card["translated_chunks"] == 0:
+        # Nothing translated means nothing to read or review yet; the build
+        # skipped those walks, so the only fact worth a badge is the progress.
+        return [{"kind": "translated",
+                 "count": f'0/{card["chapters_total"]}'}] if status == "needs_translation" else []
+
+    selected = list(review_types_selected) or list(card["flag_counts"])
+    values = {
+        "translated": f'{card["chapters_translated"]}/{card["chapters_total"]}',
+        "review": card["awaiting_review"],
+        "flags": sum(card["flag_counts"].get(t, 0) for t in selected),
+        "unread": card["unread_chapters"],
+        "footnotes": card["empty_footnotes"],
+    }
+    return [
+        {"kind": kind, "count": values[kind]}
+        for kind in _BADGE_ORDER.get(status, ())
+        if kind == "flags" or values[kind]
+    ]
 
 
 def derive_status(
@@ -186,9 +282,11 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         ``glossary_count``, ``total_chunks``, ``translated_chunks``,
         ``fully_translated``, ``has_alignments``), the work-remaining keys
         (``unread_chapters``, ``awaiting_review``, ``empty_footnotes``, and
-        ``flag_counts`` — all six review categories, zero-filled), and the two
+        ``flag_counts`` — all six review categories, zero-filled), the two
         status keys: ``archived`` (the reader's choice) and ``status`` (derived
-        from all of the above by :func:`derive_status`).
+        from all of the above by :func:`derive_status`), and what the library
+        draws: ``chapters_total``/``chapters_translated``, ``cover`` (a file
+        under ``images/``, or ``None``), ``cover_version`` and ``cloth``.
 
         The dict is the cached instance — callers must treat it as read-only.
     """
@@ -222,7 +320,9 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         if isinstance(terms, list):
             glossary_count = len(terms)
 
-    total_chunks, translated_chunks = _count_chunks(project_dir / "chunks")
+    total_chunks, translated_chunks, chapters_total, chapters_translated = _count_chunks(
+        project_dir / "chunks")
+    cover = find_cover(project_dir)
 
     # Nothing translated ⇒ the card hides every work chip anyway, so skip the
     # two expensive walks entirely.
@@ -269,7 +369,15 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
         "glossary_count": glossary_count,
         "total_chunks": total_chunks,
         "translated_chunks": translated_chunks,
+        "chapters_total": chapters_total,
+        "chapters_translated": chapters_translated,
         "fully_translated": fully_translated,
+        # Filename under images/ (served resized by /projects/<id>/cover-thumb),
+        # and its mtime so the thumbnail URL changes when the cover does.
+        "cover": cover.name if cover else None,
+        "cover_version": _file_fingerprint(cover)[0] if cover else 0,
+        # Which cloth color a generated cover gets: stable per book.
+        "cloth": zlib.crc32(project_id.encode("utf-8")) % COVER_CLOTHS,
         "has_alignments": bool(chapter_ids),
         "unread_chapters": unread_chapters,
         "awaiting_review": ann["awaiting_review"],

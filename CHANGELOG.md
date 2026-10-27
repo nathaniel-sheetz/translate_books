@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.81.0.0] - 2026-10-27
+
+### Added
+- **The reader's home page is a library of covers.** Each book shows its cover: the EPUB's `images/cover.*` if there is one (same names and order as the EPUB builder), else the cover an importer saved from the source. A book without one gets a generated cloth cover with its title, in one of nine colors fixed per book. Covers are fetched from `/projects/<id>/cover-thumb`, resized in memory to fit 420×630 and cached by file mtime and size, so nothing is written to disk. A corrupt or oversized cover falls back to 404 instead of a 500. Dropping a new cover into `images/` reaches the home page without a restart.
+- **Two views, Covers and Cards**, switched in place from the filter bar. The choice is remembered per device in a cookie (`POST /api/set-library-view`).
+- **Badges explain each book's status, most actionable first.** Pending books show which setup is missing. Books needing translation show chapters translated (e.g. "4/15 translated") and a progress bar. Books needing review show annotations awaiting review, flags in the selected categories, unread chapters and blank footnote marks. Badges shorten to icon + number, then drop, to fit the tile, and keep their full text for screen readers. Complete and archived books show none.
+
+### Changed
+- Books are ordered by the work they need (Needs review, Needs translation, Pending, Complete, Archived), then by title with accents folded.
+- The whole tile is one link into the book: the reader when there is something to read, else the dashboard. A pending book's setup badges go to the dashboard, and Ctrl/Cmd/Shift-click or middle-click on a badge opens a new tab.
+- Progress counts whole chapters, not chunks: a chapter counts as translated only when every chunk in it is.
+
 ## [0.80.1.0] - 2026-10-27
 
 ### Changed

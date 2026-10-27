@@ -1,9 +1,10 @@
-"""Tests for the reworked reader home-page project cards (``/read/``).
+"""Tests for the reader home-page library (``/read/``).
 
-The card progressively discloses: setup facts only while something is missing,
-chunk progress only while translation is unfinished, and — once any chunk is
-translated — the work that remains (annotations awaiting review, blank footnote
-marks, evaluator/judge flags in the selected categories).
+Each book is a cover (posters or cards — one markup, two views) with its status
+and the badges that explain it, most actionable first (``card_badges``): setup
+gaps while pending, chapters translated while translating, then the work that
+remains (annotations awaiting review, flags in the selected categories, unread
+chapters, blank footnote marks). Complete and archived books carry no badges.
 """
 
 from __future__ import annotations
@@ -14,7 +15,13 @@ import pytest
 
 from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocation
 from web_ui.app import app
-from web_ui.project_cards import build_project_card, clear_card_cache, derive_status
+from web_ui.project_cards import (
+    build_project_card,
+    card_badges,
+    clear_card_cache,
+    derive_status,
+    find_cover,
+)
 from web_ui.evaluations import (
     REVIEW_TYPES,
     append_feedback,
@@ -95,6 +102,11 @@ def _blacklist_finding(proj_dir, chunk_id="chapter_01_chunk_000"):
                           normalized_issues=[issue])
 
 
+def _flag_badge(n, label):
+    """The flags badge's count and label as the template renders them."""
+    return f'<b class="chip-count">{n}</b><span class="chip-label">{label}</span>'
+
+
 def _dialogue_finding(proj_dir, chunk_id="chapter_01_chunk_000"):
     merge_judge_result(proj_dir, chunk_id, "dialogue", {
         "eval_name": "dialogue",
@@ -160,19 +172,27 @@ def test_home_page_ships_archive_error_i18n(client, card_project):
 
 def test_progress_hidden_when_fully_translated(client, card_project):
     html = client.get("/read/").data.decode("utf-8")
-    assert "project-progress" not in html
-    assert "1/1 chunks" not in html
+    assert "card-progress" not in html
+    assert " translated" not in html
 
 
-def test_progress_shown_while_partially_translated(client, card_project):
+def test_progress_counts_whole_chapters(client, card_project):
+    # chapter_01 has a second, untranslated chunk; chapter_02 is done.
     (card_project / "chunks" / "chapter_01_chunk_001.json").write_text(
         json.dumps({"id": "chapter_01_chunk_001", "translated_text": ""}), encoding="utf-8"
     )
+    (card_project / "chunks" / "chapter_02_chunk_000.json").write_text(
+        json.dumps({"id": "chapter_02_chunk_000", "translated_text": "Hecho."}), encoding="utf-8"
+    )
     clear_card_cache()
 
+    card = build_project_card(card_project, "cardproj")
+    assert (card["chapters_translated"], card["chapters_total"]) == (1, 2)
+    assert (card["translated_chunks"], card["total_chunks"]) == (2, 3)
+
     html = client.get("/read/").data.decode("utf-8")
-    assert "project-progress" in html
-    assert "1/2 chunks" in html
+    assert "card-progress" in html
+    assert 'title="1/2 translated"' in html
 
 
 def test_not_chunked_chip_when_no_chunks(client, card_project):
@@ -181,7 +201,7 @@ def test_not_chunked_chip_when_no_chunks(client, card_project):
 
     html = client.get("/read/").data.decode("utf-8")
     assert "Not chunked" in html
-    assert "project-progress" not in html
+    assert "card-progress" not in html
 
 
 # ── 3. Awaiting review ───────────────────────────────────────────────────────
@@ -234,7 +254,7 @@ def test_empty_footnote_chip_rendered(client, card_project):
     clear_card_cache()
 
     html = client.get("/read/").data.decode("utf-8")
-    assert "1 empty notes" in html
+    assert 'title="1 empty note"' in html   # singular for one
 
 
 # ── 5. Flag counts ───────────────────────────────────────────────────────────
@@ -332,7 +352,7 @@ def test_flag_chip_counts_all_categories_by_default(client, card_project):
     clear_card_cache()
 
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
+    assert _flag_badge(2, "flags") in html
 
 
 def test_flag_chip_respects_category_cookie(client, card_project):
@@ -343,10 +363,10 @@ def test_flag_chip_respects_category_cookie(client, card_project):
     client.set_cookie("reader_review_types_off",
                       ",".join(t for t in REVIEW_TYPES if t != "dialogue"))
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
+    assert _flag_badge(1, "flag") in html
     # Only the selected category is ticked in the picker. Scoped to that popup:
     # the Status picker beside it has ticked boxes of its own.
-    popup = html.split('id="review-types-popup"')[1].split('class="project-grid"')[0]
+    popup = html.split('id="review-types-popup"')[1].split('class="project-grid ')[0]
     assert popup.count('class="review-type-cb"') == len(REVIEW_TYPES)
     assert popup.count("checked") == 1
 
@@ -358,7 +378,7 @@ def test_unknown_cookie_categories_fall_back_to_all(client, card_project):
 
     client.set_cookie("reader_review_types_off", "nonsense")
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
+    assert _flag_badge(2, "flags") in html
 
 
 def test_legacy_selection_cookie_does_not_hide_categories(client, card_project):
@@ -374,8 +394,8 @@ def test_legacy_selection_cookie_does_not_hide_categories(client, card_project):
 
     client.set_cookie("reader_review_types", "dialogue")
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">2</span> <span class="chip-flag-label">flags</span>' in html
-    popup = html.split('id="review-types-popup"')[1].split('class="project-grid"')[0]
+    assert _flag_badge(2, "flags") in html
+    popup = html.split('id="review-types-popup"')[1].split('class="project-grid ')[0]
     assert popup.count("checked") == len(REVIEW_TYPES)
 
 
@@ -429,20 +449,31 @@ def test_untranslated_project_renders_no_work_chips(client, card_project):
     assert sum(card["flag_counts"].values()) == 0
 
     html = client.get("/read/").data.decode("utf-8")
-    assert "project-work-chips" not in html
-    assert "0/1 chunks" in html
+    # Only the progress badge: the alignment left over from the fixture must
+    # not surface as an unread chapter in a book with nothing translated.
+    assert 'title="0/1 translated"' in html
+    assert "unread" not in _grid(html)
+    assert "project-chip-flags" not in html
 
 
-def test_clean_chip_when_nothing_is_pending(client, card_project):
+def test_complete_book_shows_no_badges(client, card_project):
     _reviewed(card_project, ["chapter_01"])
     clear_card_cache()
 
     html = client.get("/read/").data.decode("utf-8")
-    assert "Nothing pending" in html
-    assert "project-chip-flags" in html   # present but hidden, for the JS to re-sum
+    assert 'data-status="complete"' in html
+    assert 'class="chip ' not in html
+    assert "Nothing pending" not in html
 
 
-def test_no_clean_chip_when_work_remains(client, card_project):
+def test_flags_badge_ships_at_zero_for_the_picker_to_reveal(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    flags = html.split("project-chip-flags")[1].split("</span></span>")[0] + "</span>"
+    assert "data-zero hidden" in flags
+    assert _flag_badge(0, "flags") in flags
+
+
+def test_review_badge_when_work_remains(client, card_project):
     _reviewed(card_project, ["chapter_01"])
     _annotations(card_project, [
         {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice", "content": "a"},
@@ -489,34 +520,43 @@ def test_marking_a_chapter_reviewed_busts_the_card_cache(card_project):
     assert build_project_card(card_project, "cardproj")["unread_chapters"] == 0
 
 
-def test_unread_chip_renders_first_and_suppresses_the_clean_chip(client, card_project):
-    html = client.get("/read/").data.decode("utf-8")
-    assert "1 unread" in html
-    # A book you have not read through has work outstanding: the read-through.
-    assert "Nothing pending" not in html
-    chips = html.split('class="project-chips project-work-chips"')[1]
-    assert chips.index("1 unread") < chips.index("project-chip-flags")
+def test_badges_follow_priority_order(client, card_project):
+    # Review notes, then flags, then unread: what to act on first comes first,
+    # so a poster that only has room for two keeps the right two.
+    _annotations(card_project, [
+        {"chapter_id": "chapter_01", "es_idx": 0, "type": "word_choice", "content": "a"},
+    ])
+    _dialogue_finding(card_project)
+    clear_card_cache()
+
+    chips = _grid(client.get("/read/").data.decode("utf-8")).split('class="chips"')[1]
+    assert chips.index("1 to review") < chips.index("project-chip-flags") < chips.index("1 unread")
 
 
-# ── 9. Card navigation (title link, ⋮ menu) ──────────────────────────────────
+# ── 9. Card navigation (tile link, ⋮ menu) ───────────────────────────────────
+
+def _grid(html):
+    """The library grid: the cards, without the header's pickers."""
+    return html.split('id="project-grid"')[1].split('id="new-project-modal"')[0]
+
 
 def _header(html):
-    """The card header, up to the ⋮ menu that shares the row with the title."""
-    return html.split('class="project-card-header"')[1].split('class="card-menu"')[0]
+    """The first card, up to its ⋮ menu."""
+    return html.split('<article class="project-card')[1].split('class="card-menu"')[0]
 
 
 def _menu(html):
-    """The card's ⋮ menu: button plus popup, up to wherever the card body starts."""
-    return html.split('class="card-menu"')[1].split('class="project-chips')[0]
+    """The first card's ⋮ menu: button plus popup."""
+    return html.split('class="card-menu"')[1].split("</article>")[0]
 
 
 def test_card_title_links_to_the_reader(client, card_project):
     header = _header(client.get("/read/").data.decode("utf-8"))
-    assert 'href="/read/cardproj"' in header
+    assert 'class="card-stretch" href="/read/cardproj"' in header
     assert "Card Project" in header
 
 
-def test_card_title_and_subtitle_share_one_link(client, card_project):
+def test_card_shows_one_title_in_the_ui_language(client, card_project):
     (card_project / "project.json").write_text(
         json.dumps({"title": "Card Project", "spanish_title": "Proyecto"}),
         encoding="utf-8",
@@ -524,10 +564,20 @@ def test_card_title_and_subtitle_share_one_link(client, card_project):
     clear_card_cache()
 
     header = _header(client.get("/read/").data.decode("utf-8"))
-    # One anchor wrapping both, so clicking either navigates.
+    assert "Card Project" in header and "Proyecto" not in header
+
+    client.set_cookie("reader_lang", "es")
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    assert "Proyecto" in header and "Card Project" not in header
+    # One link for the whole tile, named for the book.
     assert header.count("<a ") == 1
-    link = header.split("<a ")[1]
-    assert "nav-title" in link and "nav-subtitle" in link
+    assert 'aria-label="Proyecto"' in header
+
+
+def test_spanish_ui_falls_back_to_the_english_title(client, card_project):
+    client.set_cookie("reader_lang", "es")
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    assert '<h2 class="card-title">Card Project</h2>' in header
 
 
 def test_card_title_falls_back_to_the_dashboard_without_alignments(client, card_project):
@@ -537,6 +587,23 @@ def test_card_title_falls_back_to_the_dashboard_without_alignments(client, card_
     header = _header(client.get("/read/").data.decode("utf-8"))
     assert 'href="/project/cardproj"' in header
     assert "/read/cardproj" not in header
+
+
+def test_badges_go_where_the_tile_goes(client, card_project):
+    # Needs review (its one chapter is unread): the badges open the reader too.
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    assert 'class="chips" data-href="/read/cardproj"' in header
+
+
+def test_a_pending_books_badges_go_to_the_dashboard(client, card_project):
+    # Pending with alignments: the tile opens the reader, but "No style guide"
+    # is fixed on the dashboard.
+    (card_project / "style.json").unlink()
+    clear_card_cache()
+
+    header = _header(client.get("/read/").data.decode("utf-8"))
+    assert 'class="card-stretch" href="/read/cardproj"' in header
+    assert 'class="chips" data-href="/project/cardproj"' in header
 
 
 def test_card_menu_holds_the_dashboard_link_and_the_archive_toggle(client, card_project):
@@ -578,7 +645,7 @@ def test_set_review_types_round_trips(client, card_project):
     _dialogue_finding(card_project)
     clear_card_cache()
     html = client.get("/read/").data.decode("utf-8")
-    assert '<span class="chip-flag-count">1</span> <span class="chip-flag-label">flag</span>' in html
+    assert _flag_badge(1, "flag") in html
 
 
 def test_set_review_types_rejects_unknown_categories(client):
@@ -804,3 +871,224 @@ def test_set_status_filter_rejects_unknown_statuses(client):
 
 def test_set_status_filter_rejects_non_list(client):
     assert client.post("/api/set-status-filter", json={"statuses": "pending"}).status_code == 400
+
+
+# ── 13. Badges per status (card_badges) ──────────────────────────────────────
+
+def _badge_card(**over):
+    card = {
+        "status": "needs_review",
+        "has_style_guide": True,
+        "glossary_count": 3,
+        "total_chunks": 10,
+        "translated_chunks": 10,
+        "chapters_total": 5,
+        "chapters_translated": 5,
+        "awaiting_review": 0,
+        "unread_chapters": 0,
+        "empty_footnotes": 0,
+        "flag_counts": {t: 0 for t in REVIEW_TYPES},
+    }
+    card.update(over)
+    return card
+
+
+def _kinds(card, selected=REVIEW_TYPES):
+    return [b["kind"] for b in card_badges(card, selected)]
+
+
+def test_review_badges_in_priority_order():
+    card = _badge_card(awaiting_review=4, unread_chapters=2, empty_footnotes=1,
+                       flag_counts={**{t: 0 for t in REVIEW_TYPES}, "dialogue": 3})
+    assert _kinds(card) == ["review", "flags", "unread", "footnotes"]
+    assert card_badges(card, REVIEW_TYPES)[1]["count"] == 3
+
+
+def test_flags_badge_is_kept_at_zero_and_others_are_dropped():
+    assert card_badges(_badge_card(unread_chapters=1), REVIEW_TYPES) == [
+        {"kind": "flags", "count": 0},
+        {"kind": "unread", "count": 1},
+    ]
+
+
+def test_flags_badge_sums_only_the_selected_categories():
+    card = _badge_card(flag_counts={**{t: 0 for t in REVIEW_TYPES},
+                                    "dialogue": 2, "dictionary": 5})
+    flags = card_badges(card, ["dialogue"])[0]
+    assert flags == {"kind": "flags", "count": 2}
+    # Nothing selected reads as everything, the same as the picker.
+    assert card_badges(card, [])[0]["count"] == 7
+
+
+def test_translation_badges_lead_with_chapters_translated():
+    card = _badge_card(status="needs_translation", translated_chunks=4,
+                       chapters_translated=4, chapters_total=15, unread_chapters=4)
+    badges = card_badges(card, REVIEW_TYPES)
+    assert badges[0] == {"kind": "translated", "count": "4/15"}
+    assert [b["kind"] for b in badges] == ["translated", "unread"]
+
+
+def test_pending_badges_name_the_missing_setup():
+    card = _badge_card(status="pending", has_style_guide=False, glossary_count=0,
+                       total_chunks=0, translated_chunks=0)
+    assert card_badges(card, REVIEW_TYPES) == [
+        {"kind": "no_style_guide", "count": None},
+        {"kind": "no_glossary", "count": None},
+        {"kind": "not_chunked", "count": None},
+    ]
+
+
+@pytest.mark.parametrize("status", ["complete", "archived"])
+def test_finished_books_have_no_badges(status):
+    assert card_badges(_badge_card(status=status, unread_chapters=3), REVIEW_TYPES) == []
+
+
+# ── 14. Covers ───────────────────────────────────────────────────────────────
+
+def _image(path, size=(900, 1350), mode="RGB"):
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new(mode, size, (120, 60, 30) if mode == "RGB" else (120, 60, 30, 128)).save(path)
+
+
+def test_cover_prefers_the_epub_cover_then_the_source_cover(card_project):
+    images = card_project / "images"
+    assert find_cover(card_project) is None
+
+    _image(images / "frontispiece.jpg")
+    assert find_cover(card_project) is None   # an illustration is not a cover
+
+    _image(images / "pg2770.cover.medium.jpg")
+    assert find_cover(card_project).name == "pg2770.cover.medium.jpg"
+
+    _image(images / "cover.png")
+    assert find_cover(card_project).name == "cover.png"
+
+
+def test_adding_a_cover_busts_the_card_cache(card_project):
+    clear_card_cache()
+    assert build_project_card(card_project, "cardproj")["cover"] is None
+    _image(card_project / "images" / "cover.jpg")
+    card = build_project_card(card_project, "cardproj")
+    assert card["cover"] == "cover.jpg"
+    assert card["cover_version"] > 0
+
+
+def test_card_renders_the_thumbnail_or_a_generated_cover(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    assert "cover-gen cloth-" in html
+    assert "cover-thumb" not in html
+
+    _image(card_project / "images" / "cover.jpg")
+    clear_card_cache()
+    html = client.get("/read/").data.decode("utf-8")
+    assert 'src="/projects/cardproj/cover-thumb?v=' in html
+    assert "cover-gen" not in _grid(html)
+
+
+def test_cover_thumb_is_a_small_jpeg(client, card_project):
+    from io import BytesIO
+
+    from PIL import Image
+
+    _image(card_project / "images" / "cover.png", size=(1600, 2400), mode="RGBA")
+    rv = client.get("/projects/cardproj/cover-thumb")
+    assert rv.status_code == 200
+    assert rv.mimetype == "image/jpeg"
+    with Image.open(BytesIO(rv.data)) as im:
+        assert im.size[0] <= 420 and im.size[1] <= 630
+        assert im.mode == "RGB"
+    assert "max-age" in rv.headers["Cache-Control"]
+
+    again = client.get("/projects/cardproj/cover-thumb",
+                       headers={"If-None-Match": rv.headers["ETag"]})
+    assert again.status_code == 304
+
+
+def test_cover_thumb_404s_without_a_cover(client, card_project):
+    assert client.get("/projects/cardproj/cover-thumb").status_code == 404
+
+
+def test_cover_thumb_rejects_a_bad_id(client, card_project):
+    assert client.get("/projects/..%2Fx/cover-thumb").status_code in (400, 404)
+
+
+def test_a_corrupt_cover_404s_rather_than_500s(client, card_project):
+    images = card_project / "images"
+    images.mkdir()
+    (images / "cover.jpg").write_bytes(b"not a jpeg at all")
+    assert client.get("/projects/cardproj/cover-thumb").status_code == 404
+
+
+def test_an_oversized_cover_404s_rather_than_500s(client, card_project, monkeypatch):
+    from PIL import Image
+
+    _image(card_project / "images" / "cover.png", size=(1600, 2400))
+    # Past twice the limit, Pillow raises DecompressionBombError.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    assert client.get("/projects/cardproj/cover-thumb").status_code == 404
+
+
+# ── 15. Library view (posters / cards) ───────────────────────────────────────
+
+def test_library_defaults_to_posters(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    assert 'class="project-grid library-posters"' in html
+    assert 'data-view="posters"' in html
+    posters_btn = html.split('data-view="posters"')[1].split(">")[0]
+    assert 'aria-pressed="true"' in posters_btn
+
+
+def test_set_library_view_round_trips(client, card_project):
+    rv = client.post("/api/set-library-view", json={"view": "cards"})
+    assert rv.status_code == 200
+    assert rv.get_json() == {"ok": True, "view": "cards"}
+    html = client.get("/read/").data.decode("utf-8")
+    assert 'class="project-grid library-cards"' in html
+
+
+def test_set_library_view_rejects_unknown_views(client):
+    assert client.post("/api/set-library-view", json={"view": "shelves"}).status_code == 400
+
+
+def test_unknown_library_view_cookie_falls_back_to_posters(client, card_project):
+    client.set_cookie("reader_library_view", "shelves")
+    html = client.get("/read/").data.decode("utf-8")
+    assert 'class="project-grid library-posters"' in html
+
+
+# ── 16. Order ────────────────────────────────────────────────────────────────
+
+def _sibling(card_project, pid, title, translated=True, reviewed=False):
+    proj = card_project.parent / pid
+    (proj / "chunks").mkdir(parents=True)
+    (proj / "alignments").mkdir()
+    (proj / "chunks" / "chapter_01_chunk_000.json").write_text(
+        json.dumps({"id": "chapter_01_chunk_000", "translated_text": "Hola." if translated else ""}),
+        encoding="utf-8")
+    (proj / "alignments" / "chapter_01.json").write_text(
+        json.dumps({"chapter_id": "chapter_01", "alignments": []}), encoding="utf-8")
+    (proj / "style.json").write_text("{}", encoding="utf-8")
+    (proj / "glossary.json").write_text(json.dumps({"terms": [{"english": "a"}]}), encoding="utf-8")
+    (proj / "project.json").write_text(json.dumps({"title": title}), encoding="utf-8")
+    if reviewed:
+        _reviewed(proj, ["chapter_01"])
+    return proj
+
+
+def test_books_needing_work_come_first_then_by_title(client, card_project):
+    # cardproj ("Card Project") needs review: its one chapter is unread.
+    _sibling(card_project, "done", "Aardvark", reviewed=True)           # complete
+    _sibling(card_project, "wip", "Zebra", translated=False)            # needs translation
+    _sibling(card_project, "other", "Ábaco")                            # needs review
+    import web_ui.app as app_module
+    app_module._NESTED_PROJECT_CACHE.clear()
+    clear_card_cache()
+
+    grid = _grid(client.get("/read/").data.decode("utf-8"))
+    order = [chunk.split('"')[0] for chunk in grid.split('data-status="')[1:]]
+    titles = [h.split("<")[0] for h in grid.split('<h2 class="card-title">')[1:]]
+    assert order == ["needs_review", "needs_review", "needs_translation", "complete"]
+    # Accents fold for sorting: "Ábaco" files under A, ahead of "Card Project".
+    assert titles == ["Ábaco", "Card Project", "Zebra", "Aardvark"]
