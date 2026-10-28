@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.81.1.0] - 2026-10-27
+
+### Fixed
+- **Every EPUB build is named after the Spanish title.** The harness `epub` step, `scripts/build_epub.py` and the rebuild after applying corrections or judge fixes used to write `<project slug>.epub`, the English-derived folder name. The web UI's Export tab wrote `<title>.epub`. They now all write `<spanish_title>.epub`, so a rebuild replaces the Export build instead of sitting beside it. Reserved characters such as `:` become `-`, and a title that is empty after cleanup falls back to the slug. The filename sanitizer moved from the web UI to `src.epub_builder.epub_filename` so every path shares it. An older `<slug>.epub` already in a project folder is left alone, and the newest build is still the one served.
+- **The Export tab's Title saves to `spanish_title`, not `title`.** Before, building from the Export form overwrote the English `title` the reader shows. The form pre-fills the English title when no Spanish title is set; building with that pre-fill unchanged no longer records the English title as the Spanish one.
+
 ## [0.81.0.0] - 2026-10-27
 
 ### Added

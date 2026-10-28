@@ -200,9 +200,30 @@ class TestBuildEpubDublinCorePersistence:
         assert cfg["description"] == "Same"
 
     def test_author_and_title_also_persisted(self, client, project):
-        """The route also persists author and title via the second persistence
-        block — verify both land in project.json."""
-        self._post_build(client, {"title": "My Book", "author": "Author Name"})
+        """The form's Title is the EPUB's Spanish title: it lands in
+        spanish_title and the English ``title`` the reader shows is untouched."""
+        _write_project_json(project, {"title": "Bambi: A Life in the Woods"})
+        self._post_build(client, {"title": "Bambi: Una vida en el bosque", "author": "Author Name"})
         cfg = _read_project_json(project)
-        assert cfg["title"] == "My Book"
+        assert cfg["spanish_title"] == "Bambi: Una vida en el bosque"
+        assert cfg["title"] == "Bambi: A Life in the Woods"
         assert cfg["author"] == "Author Name"
+
+    def test_english_prefill_not_copied_into_spanish_title(self, client, project):
+        """With no spanish_title the form pre-fills the English title; building
+        as-is must not record that English title as the Spanish one."""
+        _write_project_json(project, {"title": "Five Little Peppers"})
+        self._post_build(client, {"title": "Five Little Peppers"})
+        cfg = _read_project_json(project)
+        assert "spanish_title" not in cfg
+        assert cfg["title"] == "Five Little Peppers"
+
+    def test_existing_spanish_title_is_updated(self, client, project):
+        """Retitling in the form replaces a spanish_title already on disk; the
+        English ``title`` stays put."""
+        _write_project_json(project, {"title": "Bambi: A Life in the Woods",
+                                      "spanish_title": "Bambi"})
+        self._post_build(client, {"title": "Bambi: Una vida en el bosque"})
+        cfg = _read_project_json(project)
+        assert cfg["spanish_title"] == "Bambi: Una vida en el bosque"
+        assert cfg["title"] == "Bambi: A Life in the Woods"

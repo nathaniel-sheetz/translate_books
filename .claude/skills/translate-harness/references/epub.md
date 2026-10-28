@@ -59,7 +59,9 @@ python scripts/harness.py epub --project projects/<slug>
 # Title/author/language resolve from project.json (spanish_title first), then setup; pass them to override.
 ```
 Report the included/skipped chapter lists so a partial translation is never mistaken for a complete
-book. Confirm the EPUB landed:
+book. The file is named after the resolved title (`<spanish_title>.epub`, `:` and other reserved
+characters become `-`) — the same name the web UI's Export tab writes, so a rebuild replaces it.
+Confirm the EPUB landed:
 ```bash
 ls projects/<slug>/*.epub
 ```

@@ -838,6 +838,23 @@ class TestBuildEpub:
         assert output == custom_output
         assert output.exists()
 
+    def test_default_output_named_after_title(self, tmp_path):
+        """No output_path: the file is the (Spanish) title, sanitized -- the same
+        name the web UI's Export writes -- not the English-derived slug."""
+        project = self._make_project(tmp_path)
+        output = build_epub(
+            project_path=project,
+            title="Bambi: Una vida en el bosque",
+            author="Felix Salten",
+        )
+        assert output == project / "Bambi- Una vida en el bosque.epub"
+        assert [p.name for p in project.glob("*.epub")] == [output.name]
+
+    def test_default_output_falls_back_to_slug(self, tmp_path):
+        project = self._make_project(tmp_path)
+        output = build_epub(project_path=project, title="...", author="A")
+        assert output == project / f"{project.name}.epub"
+
     def test_dublin_core_metadata(self, tmp_path):
         """Optional translator/description/rights/source_title/publisher metadata
         is written to the OPF and blank fields are omitted."""

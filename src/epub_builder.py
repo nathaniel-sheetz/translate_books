@@ -43,6 +43,35 @@ _ENDNOTE_SUP = (
     r'<a id="enref-\1" href="endnotes.xhtml#en-\1">\1</a></sup>'
 )
 
+# Characters Windows reserves in a filename. ':' is the dangerous one here --
+# NTFS reads it as the alternate-data-stream separator, so a title like
+# "Bambi: Una vida en el bosque" writes the EPUB into a hidden stream on a
+# 0-byte file named "Bambi", where the glob("*.epub") in epub_status /
+# download_epub can never see it and the UI keeps serving the previous build.
+_UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def epub_filename(title: str, fallback: str) -> str:
+    """Derive a filesystem-safe ``<name>.epub`` from a book title.
+
+    Reserved characters collapse to ``-`` FIRST, before any pathlib call. Order
+    matters on Windows: ``Path("R: The Movie").name`` is ``" The Movie"``,
+    because pathlib reads a leading ``<letter>:`` as a drive spec and discards
+    it -- so sanitizing after ``.name`` would silently eat the first character of
+    such a title. Trailing dots and spaces are stripped because Windows would
+    strip them from a stem that ended that way (the appended ``.epub`` already
+    prevents the *written* name from ending in ``.`` or space). Falls back to
+    *fallback* (the project slug) only when the stem is empty after that (e.g.
+    ``""``, ``"..."``, whitespace) -- a reserved-only title like ``"???"``
+    becomes ``---.epub``.
+    """
+    stem = _UNSAFE_FILENAME_RE.sub("-", title or "")
+    # No separator or drive spec survives the substitution above, so ``.name``
+    # cannot truncate a real title here -- it stays as a belt-and-braces
+    # guarantee that the result is a single path component and nothing more.
+    stem = Path(stem).name.rstrip(". ")
+    return f"{stem or fallback}.epub"
+
 # Default configuration for synthesizing a chapter heading when the chapter
 # text does not begin with a recognizable numeral line. Override per project
 # via the "chapter_heading" key in project.json, e.g.:
@@ -1007,7 +1036,8 @@ def build_epub(
         language: EPUB language code (dc:language, the target language).
         cover_image: Path to cover image (absolute or relative to project_path).
                      Auto-detects images/cover.jpg or .png if not provided.
-        output_path: Where to write the EPUB. Defaults to project_path/{name}.epub.
+        output_path: Where to write the EPUB. Defaults to
+                     project_path/<title>.epub (see ``epub_filename``).
         chapters_dir: Directory containing chapter_*.txt files.
                       Defaults to project_path/chapters/.
         chapter_heading_config: Optional override for synthesized chapter
@@ -1330,9 +1360,10 @@ def build_epub(
     nav_item.add_link(href='style.css', rel='stylesheet', type='text/css')
     book.add_item(nav_item)
 
-    # Write EPUB
+    # Write EPUB. Named after the (Spanish) title so every build path -- web UI,
+    # harness, corrections rebuild -- lands on the same file.
     if output_path is None:
-        output_path = project_path / f'{project_path.name}.epub'
+        output_path = project_path / epub_filename(title, project_path.name)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
