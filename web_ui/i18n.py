@@ -70,6 +70,70 @@ STRINGS = {
         "badge_gap_title": "characters of source text with no translation",
         "badge_unread": "unread",
 
+        # Book page header (/read/<id>): the pipeline strip, the two tabs and
+        # the flag chip. Phase keys follow web_ui.book_phases.PHASE_KEYS.
+        "book_read_count": "{n}/{total} read",
+        "book_tab_chapters": "Chapters",
+        "book_tab_process": "Process",
+        "book_strip_label": "Show the process",
+        "chapter_prefix_short": "Ch.",
+        "resume_reading": "Continue reading",
+        "last_opened": "Last time here",
+        "phases_count": "{n} of {total} phases",
+        "phases_missing": "Missing",
+        "phases_all_done": "All done",
+        "phase_chapters": "{n} of {total} chapters",
+        "phase_images_count": "{n} images in the book",
+        "phase_names": {
+            "translation": "Translation",
+            "checks": "Automated checks",
+            "triage": "Triage",
+            "dialogue": "Dialogue judge",
+            "address": "Address judge",
+            "editorial": "Editorial judge",
+            "book_review": "Book review",
+            "images": "Images",
+            "epub": "EPUB",
+        },
+        "phase_short": {
+            "translation": "Transl.",
+            "checks": "Checks",
+            "triage": "Triage",
+            "dialogue": "Dialogue",
+            "address": "Address",
+            "editorial": "Editorial",
+            "book_review": "Book review",
+            "images": "Images",
+            "epub": "EPUB",
+        },
+        "phase_groups": {
+            "translation": "Translation",
+            "checks": "Automated checks",
+            "judges": "Judges",
+            "book": "Whole book",
+        },
+        "phase_states": {
+            "done": "Done",
+            "none": "Not done",
+            "na": "No images",
+            "unknown": "Checking…",
+        },
+        "months_short": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        # A pattern rather than a fixed order, so each language keeps its own.
+        "short_date": "{m} {d}",
+        # The flag chip beside "N/M read", and its type picker.
+        "flags_hidden": "Flags hidden",
+        "flags_none": "No flags",
+        "flags_hidden_types": "Hidden: {types}",
+        "flags_all_types": "All flag types",
+        "flag_picker_title": "Flags",
+        "flag_picker_all": "All",
+        "flag_picker_none": "None",
+        "flag_picker_hint": "Ticked types are counted here and on the home page, and "
+                            "highlighted while reading. Applies to every book.",
+        "theme_label": "Dark mode",
+
         # Review inbox (/review-inbox) — the cross-book annotation funnel.
         # `inbox_summary` is filled by three `| replace` calls in the template
         # rather than `str.format`, so a translator can reorder the clauses
@@ -475,10 +539,7 @@ STRINGS = {
             "flag": "Other",
         },
 
-        # Review mode (chapter-list controls; type labels shared with the reader)
-        "review_mode_label": "Review mode",
-        "review_options_label": "Review error types",
-        "review_types_label": "Show errors",
+        # Flag types: the book page's and the home page's pickers, and the reader
         "review_types": {
             "blacklist": "Blacklist",
             "grammar": "Grammar",
@@ -823,6 +884,67 @@ STRINGS = {
         "badge_gap": "hueco",
         "badge_gap_title": "caracteres del texto original sin traducción",
         "badge_unread": "sin leer",
+
+        # Cabecera del libro (/read/<id>)
+        "book_read_count": "{n}/{total} leídos",
+        "book_tab_chapters": "Capítulos",
+        "book_tab_process": "Proceso",
+        "book_strip_label": "Ver el proceso",
+        "chapter_prefix_short": "Cap.",
+        "resume_reading": "Seguir leyendo",
+        "last_opened": "Última vez aquí",
+        "phases_count": "{n} de {total} fases",
+        "phases_missing": "Falta",
+        "phases_all_done": "Todo hecho",
+        "phase_chapters": "{n} de {total} capítulos",
+        "phase_images_count": "{n} imágenes en el libro",
+        "phase_names": {
+            "translation": "Traducción",
+            "checks": "Comprobaciones",
+            "triage": "Triaje",
+            "dialogue": "Juez de diálogo",
+            "address": "Juez de tratamiento",
+            "editorial": "Juez editorial",
+            "book_review": "Revisión del libro",
+            "images": "Imágenes",
+            "epub": "EPUB",
+        },
+        "phase_short": {
+            "translation": "Trad.",
+            "checks": "Compr.",
+            "triage": "Triaje",
+            "dialogue": "Diálogo",
+            "address": "Trato",
+            "editorial": "Editorial",
+            "book_review": "Rev. libro",
+            "images": "Imágenes",
+            "epub": "EPUB",
+        },
+        "phase_groups": {
+            "translation": "Traducción",
+            "checks": "Comprobaciones automáticas",
+            "judges": "Jueces",
+            "book": "Libro entero",
+        },
+        "phase_states": {
+            "done": "Hecho",
+            "none": "Sin hacer",
+            "na": "Sin imágenes",
+            "unknown": "Comprobando…",
+        },
+        "months_short": ["ene", "feb", "mar", "abr", "may", "jun",
+                         "jul", "ago", "sep", "oct", "nov", "dic"],
+        "short_date": "{d} {m}",
+        "flags_hidden": "Marcas ocultas",
+        "flags_none": "Sin marcas",
+        "flags_hidden_types": "Ocultas: {types}",
+        "flags_all_types": "Todas las marcas",
+        "flag_picker_title": "Marcas",
+        "flag_picker_all": "Todas",
+        "flag_picker_none": "Ninguna",
+        "flag_picker_hint": "Las marcas marcadas se cuentan aquí y en la portada, y se "
+                            "resaltan al leer. Se aplica a todos los libros.",
+        "theme_label": "Modo oscuro",
 
         # Bandeja de revisi\u00f3n (/review-inbox)
         "inbox_title": "Bandeja de revisi\u00f3n",
@@ -1186,10 +1308,7 @@ STRINGS = {
             "flag": "Otro",
         },
 
-        # Review mode (chapter-list controls; type labels shared with the reader)
-        "review_mode_label": "Modo revisión",
-        "review_options_label": "Tipos de error",
-        "review_types_label": "Mostrar errores",
+        # Flag types: the book page's and the home page's pickers, and the reader
         "review_types": {
             "blacklist": "Lista negra",
             "grammar": "Gramática",

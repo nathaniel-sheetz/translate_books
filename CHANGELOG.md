@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.82.0.0] - 2026-10-28
+
+### Added
+- **The book page has a header showing where the book stands.** `/read/<id>` opens with the book's cover, title, a chapters-read count and a strip of nine segments, one per harness phase: translation, coded checks, triage, the dialogue/address/editorial judges, the book review, the image pass and the EPUB. Each segment is done, partial, not run, or not applicable. A **Proceso** tab beside **Capítulos** lists the same phases in four groups, each with its last-run date, "n of N chapters" and chips for the chapters that still owe it (capped at 24, plus a "+N" count). Everything is read off files the harness already writes (`web_ui/book_phases.py`), and results are cached by a stat-only fingerprint.
+- **Triage is computed only when it's asked for.** Working out "nothing left to triage" anchors every dictionary and grammar finding to its sentence, which takes seconds on a long book. The page draws triage as unknown, and opening the Proceso tab fetches `/api/book-phases/<id>/triage`, which swaps in the computed strip and panel. The next page load draws it from the cache.
+- **A flag chip replaces the review toggles.** The header's chip counts the book's flags in the ticked types. It says "No flags" for a clean book, "Flags hidden" when nothing is ticked, and shows an eye-off icon when some types are hidden. It opens the type picker, which lists the judges first, then the coded checkers, with each type's total for this book and All/None shortcuts.
+- **Coming back from a chapter marks where you were.** The reader's back link carries `?from=<chapter>`, and the chapter list highlights that row as "Last time here". Ids that aren't chapters are ignored. A resume link points to the bookmark.
+
+### Changed
+- **Review mode is on whenever at least one flag type is ticked.** The per-book on/off switch (kept in localStorage) is gone, and the reader clears its leftover `reader_review:*` keys. The ticked types, kept in a global cookie, are the whole setting, and ticking none gives a clean reading. On the home page, ticking no types now counts zero flags instead of falling back to all of them.
+- The review on/off and options buttons are gone from the chapter list header. The dark-mode toggle is now a moon/sun icon button in the top bar.
+- **In the chapter list, a row's badges wrap before its title does.** "Capítulo 8" stays on one line and its badges move to a second row.
+- **On a phone the "+ Proyecto" button shows just "+"**, so the top-bar actions stay on the title's line. The full label stays on as its tooltip and accessible name.
+
 ## [0.81.2.0] - 2026-10-28
 
 ### Added

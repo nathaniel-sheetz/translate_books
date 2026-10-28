@@ -1,6 +1,6 @@
 /* Reader home page (`/read/`, mode == "projects").
  *
- * The header's language menu, the new-project modal, the status filter, the
+ * The header's language menu and theme button, the new-project modal, the status filter, the
  * review-category picker, the posters/cards toggle, badge fitting, and each
  * card's ⋮ menu. Lifted out of the template's
  * inline <script> when the picker landed; strings arrive via
@@ -192,6 +192,29 @@
         });
     })();
 
+    /* ── Light/dark theme ──
+     *
+     * Written to localStorage.reader_theme, which the head script of every
+     * reader template (the book page, the reader, the boards) applies before
+     * first paint. The button shows a moon in light mode and a sun in dark;
+     * CSS picks which from data-theme.
+     */
+    (function () {
+        var btn = document.getElementById('theme-btn');
+        if (!btn) return;
+        function sync() {
+            btn.setAttribute('aria-pressed',
+                document.documentElement.dataset.theme === 'dark' ? 'true' : 'false');
+        }
+        sync();
+        btn.addEventListener('click', function () {
+            var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+            document.documentElement.dataset.theme = next;
+            try { localStorage.setItem('reader_theme', next); } catch (e) { /* this page only */ }
+            sync();
+        });
+    })();
+
     /* ── New project modal ── */
     (function () {
         var overlay = document.getElementById('new-project-modal');
@@ -378,11 +401,14 @@
                           .map(function (cb) { return cb.value; });
         }
 
+        var eyeOff = optionsBtn.querySelector('.filter-eyeoff');
+
         function resum() {
-            // Nothing ticked reads as "no category filter" — the same convention
-            // the status filter uses, and what the server falls back to.
+            // Nothing ticked means nothing counted: the ticked types are the
+            // whole review setting, here, on the book page and in the reader.
             var chosen = selectedTypes();
-            if (!chosen.length) chosen = typeCbs.map(function (cb) { return cb.value; });
+            // An <svg> has no `hidden` property; toggle the attribute the CSS keys on.
+            if (eyeOff) eyeOff.toggleAttribute('hidden', chosen.length === typeCbs.length);
 
             document.querySelectorAll('.project-card[data-flags]').forEach(function (card) {
                 var chip = card.querySelector('.project-chip-flags');

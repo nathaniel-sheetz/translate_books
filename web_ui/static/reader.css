@@ -82,6 +82,13 @@
     --sheet-edit-hover: #e6e0d8;
     --disabled-nav: #ddd;
     --btn-disabled-color: #aaa;
+    /* Book page pipeline phases: one hue. Dark green done, light green
+       partial, grey not done. */
+    --phase-done: #2e7a47;
+    --phase-part: #9fd0ab;
+    --phase-part-bg: rgba(0, 0, 0, 0.08);
+    --phase-none: #b3ada5;
+    --phase-none-bg: rgba(0, 0, 0, 0.07);
 }
 
 [data-theme="dark"] {
@@ -157,6 +164,12 @@
     --sheet-edit-hover: #3a3a3a;
     --disabled-nav: #555;
     --btn-disabled-color: #555;
+    /* On a dark page "more done" reads as brighter, so the pair inverts. */
+    --phase-done: #6cc287;
+    --phase-part: #355f43;
+    --phase-part-bg: rgba(255, 255, 255, 0.08);
+    --phase-none: #6a6560;
+    --phase-none-bg: rgba(255, 255, 255, 0.07);
 }
 
 body {
@@ -255,6 +268,7 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
     padding: 16px 4px;
     text-decoration: none;
     color: inherit;
@@ -269,7 +283,12 @@ body {
     color: var(--text-heading);
 }
 
+/* The badges wrap before the title does: the meta column starts at zero and
+   takes only what the title leaves, so "Capítulo 8" stays on one line while
+   its three badges go to two rows. A title longer than the row still wraps,
+   down to the widest single badge. */
 .nav-meta {
+    flex: 1 1 0;
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
@@ -981,6 +1000,18 @@ body {
     }
 
     .inbox-link-text {
+        display: none;
+    }
+
+    /* "+ Proyecto" pushed the actions under the title on a phone; the plus
+       alone keeps them on the title's line. */
+    #btn-new-project {
+        padding: 6px 12px;
+        font-size: 18px;
+        line-height: 1;
+    }
+
+    .new-project-text {
         display: none;
     }
 }
@@ -2098,41 +2129,35 @@ body {
     border-color: var(--accent-border);
 }
 
-/* Dark mode toggle */
-
-.theme-toggle {
-    background: var(--bg-btn);
-    border: 1px solid var(--border-light);
-    border-radius: 6px;
-    padding: 5px 10px;
-    font-size: 16px;
-    cursor: pointer;
-    line-height: 1;
-    display: inline-flex;
-    align-items: center;
+/* Library header: light/dark. Moon in light mode, sun in dark. */
+.theme-btn {
     justify-content: center;
-    color: var(--text-muted2);
+    min-width: 44px;
+    min-height: 44px;
+    margin-left: 0;
 }
 
-/* `display: inline-flex` above otherwise wins over the UA `[hidden]` rule. */
-.theme-toggle[hidden] {
+.theme-btn .theme-icon-sun,
+[data-theme="dark"] .theme-btn .theme-icon-moon {
     display: none;
 }
 
-.theme-toggle.review-mode-toggle.review-on {
-    color: var(--accent);
-    border-color: var(--accent-border, var(--accent));
-    background: var(--accent-bg, rgba(59, 130, 246, 0.08));
+[data-theme="dark"] .theme-btn .theme-icon-sun {
+    display: inline;
 }
 
-.topbar-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+/* Home page "Flag types" chip: shown while any type is unticked. */
+.filter-eyeoff {
+    margin-left: 3px;
+    vertical-align: -2px;
 }
 
-/* Bookmark + ⋮ beside the book title. Pushed to the row's far end so the menu's
-   right-anchored popup opens inward however short the title is. */
+.filter-eyeoff[hidden] {
+    display: none;
+}
+
+/* The book's ⋮ menu. Pushed to the row's far end so the menu's right-anchored
+   popup opens inward. */
 .chapter-title-actions {
     display: flex;
     align-items: center;
@@ -2141,8 +2166,10 @@ body {
     margin-left: auto;
 }
 
-.bookmark-goto {
-    color: var(--accent);
+/* The card's menu is pinned to a tile's corner; here it sits in the row, so it
+   takes space and the page cannot scroll sideways past it. */
+.chapter-title-actions .card-menu {
+    position: relative;
 }
 
 .review-topbar-group {
@@ -2152,17 +2179,564 @@ body {
     gap: 2px;
 }
 
-.theme-toggle.review-options-btn {
-    padding: 5px 6px;
+/* ── Book page (/read/<id>) ──
+   Cover, title, status and the flag chip; the pipeline strip; sticky tabs
+   (Capítulos | Proceso) with the resume link; the chapter rows; the Proceso
+   list. Phase colours are one hue (--phase-*): dark green done, light green
+   partial, grey not done — inverted on the dark theme, where "more done"
+   reads as brighter. */
+
+.book-page {
+    --page-x: 24px;
+    max-width: 680px;
+    padding-top: 16px;
+}
+
+.book-topline {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 44px;
+}
+
+.book-topline .back-link {
+    margin-bottom: 0;
+    padding: 10px 0;
+}
+
+.book-head {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    margin-top: 6px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.book-cover {
+    flex: none;
+    width: 56px;
+}
+
+.book-cover .cover-gen {
+    gap: 6%;
+    padding: 12% 10%;
+}
+
+.book-cover .cover-gen::before {
+    inset: 5%;
+}
+
+.book-cover .cover-gen-title {
+    font-size: 8px;
+    line-height: 1.15;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    overflow: hidden;
+}
+
+.book-head-text {
+    flex: 1;
     min-width: 0;
 }
 
-.theme-toggle.review-options-btn.popup-open svg {
+.nav-page .book-title {
+    margin: 0;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 24px;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+}
+
+.book-head-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    margin-top: 6px;
+    font-size: 13px;
+    color: var(--text-muted3);
+}
+
+.flag-filter {
+    position: relative;
+}
+
+.flag-chip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 8px 0 9px;
+    border: 0;
+    border-radius: 13px;
+    background: var(--badge-warn-bg);
+    color: var(--badge-warn-color);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+/* 44px hit area around a 26px chip. */
+.flag-chip::before {
+    content: "";
+    position: absolute;
+    inset: -9px -2px;
+}
+
+.flag-chip:focus-visible,
+.phase-strip:focus-visible,
+.book-tab:focus-visible,
+.book-resume:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* No type ticked, or a zero that only exists because the flagged types are
+   hidden: grey, never green. */
+.flag-chip.is-hidden,
+.flag-chip.is-zero {
+    background: var(--bg-filter);
+    color: var(--text-muted3);
+}
+
+/* No flags in any type. */
+.flag-chip.is-clean {
+    background: transparent;
+    color: var(--phase-done);
+    box-shadow: inset 0 0 0 1.5px var(--phase-done);
+}
+
+.flag-chip-icon {
+    flex: none;
+}
+
+.flag-chip .flag-chip-icon-caret {
+    opacity: 0.7;
+    transition: transform 0.15s ease;
+}
+
+.flag-chip.popup-open .flag-chip-icon-caret {
     transform: rotate(180deg);
 }
 
-.theme-toggle.review-options-btn svg {
-    transition: transform 0.15s ease;
+/* The chip sits at the left of the row, so its picker hangs off the left. */
+.review-types-popup.flag-picker {
+    left: 0;
+    right: auto;
+    width: 264px;
+    max-width: calc(100vw - 32px);
+}
+
+/* On a narrow screen the chip can sit anywhere along the row, and a picker
+   hung off it would run past the edge: hang it off the header instead. */
+@media (max-width: 639px) {
+    .book-head {
+        position: relative;
+    }
+
+    .flag-filter {
+        position: static;
+    }
+
+    .review-types-popup.flag-picker {
+        top: calc(100% + 6px);
+    }
+}
+
+.flag-picker-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.flag-picker-head .review-types-popup-title {
+    margin-bottom: 0;
+}
+
+.flag-picker-shortcuts {
+    font-size: 12.5px;
+    color: var(--text-muted2);
+}
+
+.flag-picker-shortcuts button {
+    min-height: 44px;
+    padding: 0 4px;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--ann-word-choice-color);
+    cursor: pointer;
+}
+
+.flag-picker .review-type-checks {
+    gap: 0;
+}
+
+.flag-picker .review-type-check {
+    min-height: 44px;
+    gap: 8px;
+    color: var(--text);
+}
+
+.flag-picker .review-type-check.is-zero {
+    color: var(--text-muted2);
+}
+
+.flag-picker-n {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted3);
+}
+
+.is-zero .flag-picker-n {
+    font-weight: 400;
+}
+
+.flag-picker-sep {
+    height: 1px;
+    margin: 4px 0;
+    background: var(--border);
+}
+
+.flag-picker-hint {
+    margin: 6px 0 2px;
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--text-muted2);
+}
+
+/* Pipeline strip: one segment per phase, a partial one filled to n/N. The
+   whole strip is one button that opens Proceso. */
+.phase-strip-wrap {
+    margin-top: 12px;
+}
+
+.phase-strip {
+    display: block;
+    width: 100%;
+    min-height: 44px;
+    padding: 6px 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.phase-segs {
+    display: flex;
+    gap: 3px;
+}
+
+.phase-seg {
+    flex: 1;
+    height: 7px;
+    border-radius: 4px;
+    background: var(--phase-none-bg);
+    box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.phase-seg.ph-done {
+    background: var(--phase-done);
+    box-shadow: none;
+}
+
+.phase-seg.ph-partial {
+    background: linear-gradient(90deg, var(--phase-part) var(--pct), var(--phase-part-bg) var(--pct));
+    box-shadow: none;
+}
+
+.phase-seg.ph-na {
+    background: transparent;
+}
+
+/* Triage before it has been worked out: neither done nor owed. */
+.phase-seg.ph-unknown {
+    background: repeating-linear-gradient(90deg, var(--phase-none-bg) 0 4px, transparent 4px 8px);
+}
+
+.phase-cap {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 7px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12.5px;
+    color: var(--text-muted3);
+}
+
+.phase-missing {
+    font-weight: 600;
+    text-align: right;
+}
+
+/* Tabs, sticky under the header as the list scrolls. Bleeds to the page edge
+   so its rule spans the width. */
+.book-tabs {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 8px calc(-1 * var(--page-x)) 0;
+    padding: 0 var(--page-x);
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.book-tab {
+    min-height: 44px;
+    margin-bottom: -1px;
+    padding: 12px 12px 10px;
+    border: 0;
+    border-bottom: 2.5px solid transparent;
+    background: transparent;
+    color: var(--text-muted3);
+    font: inherit;
+    font-size: 14.5px;
+    cursor: pointer;
+}
+
+.book-tab[aria-selected="true"] {
+    color: var(--text-heading);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+}
+
+.book-tab-count {
+    margin-left: 5px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--phase-none-bg);
+    color: var(--text-muted3);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.book-tab-count[hidden] {
+    display: none;
+}
+
+.book-tabs-spacer {
+    flex: 1;
+}
+
+.book-resume {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 14px 0 12px;
+    border-radius: 16px;
+    background: var(--accent-dark);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+/* 44px hit area around a 32px pill. */
+.book-resume::before {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
+}
+
+.book-resume[hidden] {
+    display: none;
+}
+
+.book-panel[hidden] {
+    display: none;
+}
+
+.book-panel .nav-list li:first-child {
+    border-top: 0;
+}
+
+/* The row you came back from. Clear of the sticky tabs when scrolled to. */
+.nav-list li {
+    scroll-margin-top: 56px;
+}
+
+.nav-list li.last-opened a {
+    background: var(--ann-word-choice);
+    box-shadow: inset 3px 0 0 var(--ann-word-choice-color);
+}
+
+.last-opened-label {
+    display: block;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ann-word-choice-color);
+}
+
+/* Proceso: read-only, one row per phase under four group headings. */
+.phase-list {
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.phase-group {
+    padding: 16px 4px 4px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted2);
+}
+
+.phase-row {
+    --c: var(--phase-none);
+    display: grid;
+    grid-template-columns: 26px 1fr auto;
+    gap: 4px 10px;
+    align-items: start;
+    padding: 12px 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.phase-row.ph-done,
+.phase-row.ph-partial {
+    --c: var(--phase-done);
+}
+
+.phase-dot {
+    box-sizing: border-box;
+    display: inline-grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+    border: 2px solid var(--c);
+    border-radius: 50%;
+    color: var(--bg);
+}
+
+.ph-done .phase-dot {
+    background: var(--c);
+}
+
+.ph-partial .phase-dot {
+    background: var(--phase-part);
+    border-color: var(--phase-part);
+}
+
+.ph-na .phase-dot {
+    border-style: dashed;
+}
+
+.ph-unknown .phase-dot {
+    border-style: dotted;
+}
+
+.phase-name {
+    font-size: 14.5px;
+    font-weight: 600;
+    color: var(--text-heading);
+}
+
+.phase-state {
+    font-size: 12.5px;
+    font-weight: 600;
+    text-align: right;
+    white-space: nowrap;
+    color: var(--c);
+}
+
+.ph-none .phase-state,
+.ph-na .phase-state,
+.ph-unknown .phase-state {
+    color: var(--text-muted3);
+}
+
+.phase-detail,
+.phase-owed {
+    grid-column: 2 / 4;
+}
+
+.phase-detail {
+    font-size: 13px;
+    color: var(--text-muted3);
+}
+
+.phase-owed {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.phase-owed span {
+    padding: 1px 6px;
+    border-radius: 6px;
+    background: var(--phase-none-bg);
+    color: var(--text-muted3);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+@media (max-width: 480px) {
+    .book-page {
+        --page-x: 16px;
+        padding: 12px var(--page-x) 40px;
+    }
+
+    .book-cover {
+        width: 48px;
+    }
+
+    .nav-page .book-title {
+        font-size: 21px;
+    }
+
+    /* The flag chip tends to wrap under "N/M read" here; a dot leading the
+       second line reads as a stray. */
+    .book-sep {
+        display: none;
+    }
+
+    .book-tab {
+        padding: 12px 10px 10px;
+    }
+
+    .book-resume {
+        height: 28px;
+        gap: 5px;
+        padding: 0 10px 0 8px;
+        font-size: 12.5px;
+    }
+
+    .book-resume::before {
+        inset: -8px 0;
+    }
+
+    .book-resume svg {
+        width: 14px;
+        height: 14px;
+    }
+
+    /* Bookmark icon + "Cap. N" on a phone; the words stay for screen readers. */
+    .book-resume-pre {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
 }
 
 /* Tablet responsiveness */

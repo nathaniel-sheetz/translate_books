@@ -124,32 +124,33 @@
         if (hlType) el.classList.add('ann-' + hlType);
     }
 
-    // --- Review mode (opt-in overlay of evaluator findings) ---
-    // Two halves, deliberately stored differently: the on/off switch is a
-    // per-book reading preference (localStorage, set on the chapter list), the
-    // category selection is global (cookie, rendered into the page by the
-    // server). When off, the reader behaves exactly as before.
+    // --- Review mode (overlay of evaluator findings) ---
+    // The flag types ticked on the book page (or the home page) are the whole
+    // setting: global, in a cookie the server renders into the page. Any type
+    // ticked turns the overlay on with those types; none ticked is a clean
+    // reading, and the reader behaves exactly as it does without findings.
     const REVIEW_TYPES = window.REVIEW_TYPES ||
         ['blacklist', 'grammar', 'dictionary', 'completeness', 'dialogue', 'address', 'editorial'];
 
     function loadReviewConfig() {
-        const types = Array.isArray(window.REVIEW_TYPES_SELECTED) && window.REVIEW_TYPES_SELECTED.length
-            ? window.REVIEW_TYPES_SELECTED
-            : REVIEW_TYPES;
+        // The per-book on/off switch this replaced kept `reader_review:<book>`
+        // keys in localStorage. Nothing reads them now; clear any left behind.
+        try {
+            for (let k = localStorage.length - 1; k >= 0; k--) {
+                const key = localStorage.key(k);
+                if (key && key.indexOf('reader_review:') === 0) localStorage.removeItem(key);
+            }
+        } catch (e) { /* storage unavailable: nothing to clean */ }
         // `?review=<category>` (the dashboard Review tab's finding chips) forces
         // review mode on with just that category, for this page load only.
         // Nothing is written back and the category picker still shows the saved
         // selection, so the reader's own settings survive the visit.
         const forced = window.REVIEW_FORCED_TYPES;
         if (Array.isArray(forced) && forced.length) return { on: true, types: forced };
-        let on = false;
-        try {
-            const raw = localStorage.getItem('reader_review:' + projectId);
-            on = !!((JSON.parse(raw) || {}).on);
-        } catch (e) {
-            on = false;
-        }
-        return { on: on, types: types };
+        const types = Array.isArray(window.REVIEW_TYPES_SELECTED)
+            ? window.REVIEW_TYPES_SELECTED
+            : REVIEW_TYPES;
+        return { on: types.length > 0, types: types };
     }
 
     const reviewConfig = loadReviewConfig();
