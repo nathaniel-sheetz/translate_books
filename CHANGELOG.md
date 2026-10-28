@@ -13,6 +13,8 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **Review mode is on whenever at least one flag type is ticked.** The per-book on/off switch (kept in localStorage) is gone, and the reader clears its leftover `reader_review:*` keys. The ticked types, kept in a global cookie, are the whole setting, and ticking none gives a clean reading. On the home page, ticking no types now counts zero flags instead of falling back to all of them.
 - The review on/off and options buttons are gone from the chapter list header. The dark-mode toggle is now a moon/sun icon button in the top bar.
+- **In the chapter list, a row's badges wrap before its title does.** "Capítulo 8" stays on one line and its badges move to a second row.
+- **On a phone the "+ Proyecto" button shows just "+"**, so the top-bar actions stay on the title's line. The full label stays on as its tooltip and accessible name.
 
 ## [0.81.2.0] - 2026-10-28
 

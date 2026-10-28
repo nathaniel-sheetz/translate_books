@@ -268,6 +268,7 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
     padding: 16px 4px;
     text-decoration: none;
     color: inherit;
@@ -282,7 +283,12 @@ body {
     color: var(--text-heading);
 }
 
+/* The badges wrap before the title does: the meta column starts at zero and
+   takes only what the title leaves, so "Capítulo 8" stays on one line while
+   its three badges go to two rows. A title longer than the row still wraps,
+   down to the widest single badge. */
 .nav-meta {
+    flex: 1 1 0;
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
@@ -994,6 +1000,18 @@ body {
     }
 
     .inbox-link-text {
+        display: none;
+    }
+
+    /* "+ Proyecto" pushed the actions under the title on a phone; the plus
+       alone keeps them on the title's line. */
+    #btn-new-project {
+        padding: 6px 12px;
+        font-size: 18px;
+        line-height: 1;
+    }
+
+    .new-project-text {
         display: none;
     }
 }
