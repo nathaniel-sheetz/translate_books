@@ -217,3 +217,13 @@ class TestBuildEpubDublinCorePersistence:
         cfg = _read_project_json(project)
         assert "spanish_title" not in cfg
         assert cfg["title"] == "Five Little Peppers"
+
+    def test_existing_spanish_title_is_updated(self, client, project):
+        """Retitling in the form replaces a spanish_title already on disk; the
+        English ``title`` stays put."""
+        _write_project_json(project, {"title": "Bambi: A Life in the Woods",
+                                      "spanish_title": "Bambi"})
+        self._post_build(client, {"title": "Bambi: Una vida en el bosque"})
+        cfg = _read_project_json(project)
+        assert cfg["spanish_title"] == "Bambi: Una vida en el bosque"
+        assert cfg["title"] == "Bambi: A Life in the Woods"

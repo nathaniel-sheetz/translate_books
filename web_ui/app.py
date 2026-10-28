@@ -9481,7 +9481,7 @@ def build_epub_route(project_id):
             metadata[key] = val
         else:
             metadata[key] = str(config.get(key, "") or "").strip()
-    # Also persist author/title when supplied so the form is the source of truth.
+    # Also persist author/Spanish title when supplied so the form is the source of truth.
     # Only what the form sent: a resolver fallback must not get written back.
     # The form's Title is the EPUB's (Spanish) title, so it lands in
     # spanish_title; ``title`` is the English one the reader shows and only the
