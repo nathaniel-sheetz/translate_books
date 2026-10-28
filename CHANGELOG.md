@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.81.2.0] - 2026-10-28
+
+### Added
+- **Per-image display widths in the EPUB.** An optional `image_widths` map in a project's `project.json` (`{"p007.jpg": 40}`) gives each named chapter image an inline width as a percentage of the text column. Without it a reader sizes images itself, and Kindle stretches anything large to the full screen, so a tall or murky plate takes a whole page. Keys are bare image filenames. Values outside (0, 100], and values that aren't numbers, are ignored. Images the map doesn't name build exactly as before.
+
 ## [0.81.1.0] - 2026-10-27
 
 ### Fixed
