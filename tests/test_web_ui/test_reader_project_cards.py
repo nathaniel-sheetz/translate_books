@@ -371,6 +371,39 @@ def test_flag_chip_respects_category_cookie(client, card_project):
     assert popup.count("checked") == 1
 
 
+def test_every_category_off_hides_the_flags_badge(client, card_project):
+    """None ticked means none counted, not all: the selection is the whole
+    review setting, so the reader shows no highlights and the card no flags."""
+    _blacklist_finding(card_project)
+    _dialogue_finding(card_project)
+    clear_card_cache()
+
+    client.post("/api/set-review-types", json={"types": []})
+    html = client.get("/read/").data.decode("utf-8")
+    assert _flag_badge(0, "flags") in html
+    assert "data-zero hidden" in html
+    popup = html.split('id="review-types-popup"')[1].split('class="project-grid ')[0]
+    assert "checked" not in popup
+
+
+def test_flag_types_chip_marks_a_partial_selection(client, card_project):
+    def eyeoff_hidden(html):
+        tag = html.split('<svg class="filter-eyeoff"', 1)[1].split(">", 1)[0]
+        return tag.split()[-1] == "hidden"   # the attribute, not aria-hidden
+
+    assert eyeoff_hidden(client.get("/read/").data.decode("utf-8"))   # every type on
+
+    client.post("/api/set-review-types", json={"types": ["dialogue"]})
+    assert not eyeoff_hidden(client.get("/read/").data.decode("utf-8"))
+
+
+def test_library_header_has_the_theme_button(client, card_project):
+    html = client.get("/read/").data.decode("utf-8")
+    header = html.split('id="lang-menu"', 1)[1].split('class="filter-bar"', 1)[0]
+    assert 'id="theme-btn"' in header
+    assert 'aria-pressed="false"' in header
+
+
 def test_unknown_cookie_categories_fall_back_to_all(client, card_project):
     _blacklist_finding(card_project)
     _dialogue_finding(card_project)
@@ -916,8 +949,8 @@ def test_flags_badge_sums_only_the_selected_categories():
                                     "dialogue": 2, "dictionary": 5})
     flags = card_badges(card, ["dialogue"])[0]
     assert flags == {"kind": "flags", "count": 2}
-    # Nothing selected reads as everything, the same as the picker.
-    assert card_badges(card, [])[0]["count"] == 7
+    # Nothing selected counts nothing: the ticked types are the whole setting.
+    assert card_badges(card, [])[0] == {"kind": "flags", "count": 0}
 
 
 def test_translation_badges_lead_with_chapters_translated():

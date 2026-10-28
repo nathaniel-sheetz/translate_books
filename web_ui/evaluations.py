@@ -1729,6 +1729,51 @@ def load_project_type_counts(project_dir: Path) -> dict[str, int]:
     return totals
 
 
+def load_chapter_phase_coverage(project_dir: Path) -> dict[str, dict[str, dict]]:
+    """Which evaluation passes have run on each chunk, for the book page's Proceso tab.
+
+    One walk of ``evaluations/*.json``, reading only the run records — no
+    findings are gated or counted, so this is cheaper than
+    :func:`load_chapter_type_counts` over the same files. A chunk counts as
+    coded when ``enabled_evals`` names at least one evaluator — not when
+    ``results`` is present, because :func:`merge_judge_result` writes an empty
+    ``results`` into the shell it creates for a judge that ran first — and as
+    judged by a tailored judge when ``judges[<name>]`` is a result dict.
+
+    Returns:
+        ``{chapter_id: {chunk_id: {"coded": bool, "evaluated_at": str | None,
+        "judges": {name: executed_at | None}}}}``. Chunks with no evaluation
+        file are absent; the caller knows which chunks exist.
+    """
+    out: dict[str, dict[str, dict]] = {}
+    eval_dir = _eval_results_dir(project_dir)
+    if not eval_dir.exists():
+        return out
+    for path in eval_dir.glob("*.json"):
+        if path.name.startswith("_"):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        chunk_id = payload.get("chunk_id") or path.stem
+        judges = payload.get("judges") if isinstance(payload.get("judges"), dict) else {}
+        coded = bool(payload.get("enabled_evals")) and isinstance(payload.get("results"), list)
+        out.setdefault(chapter_id_from_chunk_id(chunk_id), {})[chunk_id] = {
+            "coded": coded,
+            "evaluated_at": payload.get("evaluated_at") if coded else None,
+            "judges": {
+                name: result.get("executed_at") or payload.get("judges_at")
+                for name, result in judges.items()
+                if isinstance(result, dict)
+            },
+        }
+    return out
+
+
 # ---------------------------------------------------------------------------
 # High-level evaluation runner
 

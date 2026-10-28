@@ -18,7 +18,16 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlencode
 
-from flask import Flask, jsonify, make_response, redirect, render_template, request, send_from_directory
+from flask import (
+    Flask,
+    get_template_attribute,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+)
 
 from web_ui.i18n import get_strings
 
@@ -114,6 +123,7 @@ from web_ui.evaluations import (
     triage_mark,
 )
 from web_ui import favorites as favorites_store
+from web_ui.book_phases import PHASE_GROUPS, book_phases, book_triage_phase
 from web_ui.project_cards import (
     PROJECT_STATUSES,
     build_project_card,
@@ -466,8 +476,8 @@ def set_library_view():
 # Which evaluator/judge categories count as "errors I care about". Global, not
 # per project: a category means the same thing in every book, and the home page
 # needs the selection before you have picked a book. Mirrors the two cookies
-# above. The review-mode *on/off* switch stays per project in localStorage —
-# that one is a per-book reading preference.
+# above. There is no separate on/off switch: review mode is on whenever at
+# least one category is ticked.
 #
 # The cookie records what is *deselected*, not what is selected, so a category
 # added to :data:`REVIEW_TYPES` after the cookie was written is on by default.
@@ -484,13 +494,14 @@ def _get_review_types() -> list[str]:
     """Read the selected review categories from cookie, default to all of them.
 
     Order follows :data:`REVIEW_TYPES`, not the cookie, so the UI is stable.
-    An absent cookie — or one that switches every category off — means "show
-    everything", the same thing the checkboxes show on a first visit.
+    An absent cookie means "show everything", the same thing the checkboxes
+    show on a first visit. One that switches every category off means what it
+    says: the ticked types are the whole review setting (counted on the list
+    pages, highlighted in the reader), so none ticked is a clean reading.
     """
     raw = request.cookies.get(_REVIEW_TYPES_COOKIE, "")
     off = set(raw.split(","))
-    selected = [t for t in REVIEW_TYPES if t not in off]
-    return selected or list(REVIEW_TYPES)
+    return [t for t in REVIEW_TYPES if t not in off]
 
 
 @app.route("/api/set-review-types", methods=["POST"])
@@ -1350,9 +1361,104 @@ def _chapter_annotation_state(project_dir: Path) -> dict[str, dict[str, int]]:
     return out
 
 
+# The Proceso tab lists the chapters a phase is still owed as chips; past this
+# many it says "+N" instead, so a book nobody has judged doesn't print 80 chips.
+_OWED_CHIP_CAP = 24
+
+
+def _short_date(iso: Optional[str], t: dict) -> str:
+    """``'2026-10-24'`` -> ``'24 oct'`` / ``'Oct 24'``, or ``''``."""
+    try:
+        _, month, day = (iso or "").split("-")
+        if not 1 <= int(month) <= 12:
+            return ""
+        return t["short_date"].format(d=int(day), m=t["months_short"][int(month) - 1])
+    except (ValueError, IndexError):
+        return ""
+
+
+def _book_phases_view(bp: dict, manifest: dict, t: dict) -> dict:
+    """:func:`book_phases` with the labels the strip and the Proceso tab draw."""
+    phases = []
+    for p in bp["phases"]:
+        v = dict(p)
+        key, state = p["key"], p["state"]
+        v["name"] = t["phase_names"][key]
+        v["short"] = t["phase_short"][key]
+        v["group"] = PHASE_GROUPS.get(key)
+        v["date_label"] = _short_date(p["date"], t)
+        v["pct"] = round(100 * p["n"] / p["N"]) if p["N"] else 0
+        v["state_label"] = (f'{p["n"]}/{p["N"]}' if state == "partial"
+                            else t["phase_states"].get(state, ""))
+        if p["per_chapter"] and state != "unknown":
+            v["detail"] = t["phase_chapters"].format(n=p["n"], total=p["N"])
+        elif p.get("count"):
+            v["detail"] = t["phase_images_count"].format(n=p["count"])
+        else:
+            v["detail"] = ""
+        owed = p["owed"]
+        # The chip is a chapter's number ("37"), or its label when it has none.
+        v["owed_labels"] = [
+            _chapter_display_label(ch, manifest, "").strip() for ch in owed[:_OWED_CHIP_CAP]
+        ]
+        v["owed_more"] = max(0, len(owed) - _OWED_CHIP_CAP)
+        phases.append(v)
+    return {**bp, "phases": phases,
+            "missing_short": [t["phase_short"][k] for k in bp["missing"]]}
+
+
+def _flag_chip(type_totals: dict[str, int], selected: list[str], t: dict) -> dict:
+    """What the flag chip beside "N/M read" says, for this book and this selection.
+
+    ``state`` is ``count`` (``⚑ N flags``), ``zero`` (the book has flags, but
+    only in hidden types — grey, never green), ``clean`` (no flags in any type)
+    or ``hidden`` (no type ticked). ``filtered`` adds the eye-off icon to a
+    count: some types are hidden, so the number is not the whole book.
+    reader_chapters.js recomputes all of this when the picker changes.
+    """
+    # Picker order (judges first), so the tooltip reads like the list it names.
+    off = [k for k in REVIEW_JUDGE_TYPES + REVIEW_CODED_TYPES if k not in selected]
+    count = sum(type_totals.get(k, 0) for k in selected)
+    if not selected:
+        state = "hidden"
+    elif not any(type_totals.values()):
+        state = "clean"
+    elif count == 0:
+        state = "zero"
+    else:
+        state = "count"
+    title = (t["flags_hidden_types"].format(types=", ".join(t["review_types"][k] for k in off))
+             if off else t["flags_all_types"])
+    return {"state": state, "count": count, "filtered": bool(off and selected), "title": title}
+
+
+@app.route("/api/book-phases/<project_id>/triage")
+def book_phases_triage(project_id):
+    """The book page's strip and Proceso panel with triage computed.
+
+    Triage coverage anchors every dictionary/grammar finding to its sentence,
+    which takes seconds on a long book, so the page renders without it and
+    asks for it here when the Proceso tab is first opened. The result is cached
+    against the same files, so the next page load draws it straight away.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Invalid ID"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not (project_dir / "alignments").exists():
+        return jsonify({"error": "Not found"}), 404
+    t = _reader_strings()
+    view = _book_phases_view(
+        book_triage_phase(project_dir), _load_chapter_manifest_for_project(project_id), t)
+    return jsonify({
+        "strip": str(get_template_attribute("_book_phases.html", "phase_strip")(view, t)),
+        "panel": str(get_template_attribute("_book_phases.html", "phase_panel")(view, t)),
+        "missing": len(view["missing"]),
+    })
+
+
 @app.route("/read/<project_id>")
 def reader_chapters(project_id):
-    """List chapters with alignments for a project."""
+    """List chapters with alignments for a project, under the book's header."""
     if not _safe_id(project_id):
         return "Bad request", 400
     align_dir = _resolve_project_dir(project_id) / "alignments"
@@ -1432,6 +1538,7 @@ def reader_chapters(project_id):
     # to fall back on the sentence number when the text is found nowhere.
     bookmark = _load_bookmark(project_dir)
     bookmark_href = None
+    bookmark_label = None
     if bookmark:
         bookmark_href = f"/read/{project_id}/{bookmark['chapter_id']}?" + urlencode({
             "anchor": bookmark["anchor"],
@@ -1439,15 +1546,41 @@ def reader_chapters(project_id):
             "hl": 1,
             "near": 1,
         })
+        bookmark_label = _chapter_display_label(
+            bookmark["chapter_id"], manifest, t["chapter_prefix_short"])
+
+    # The header: the library tile's cover and status (the card is cached), the
+    # pipeline phases, and the flag chip over the whole book.
+    card = build_project_card(project_dir, project_id)
+    review_types_selected = _get_review_types()
+    type_totals = empty_type_counts()
+    for counts in flag_counts_by_chapter.values():
+        for name, n in counts.items():
+            type_totals[name] += n
+
+    # Coming back from a chapter: the reader's back link names it, and the list
+    # scrolls to that row and marks it.
+    from_chapter = request.args.get("from")
+    if from_chapter not in {ch["id"] for ch in chapters}:
+        from_chapter = None
 
     return render_template(
         "reader.html", mode="chapters",
         project_id=project_id, project_title=_project_title(project_id),
         project_spanish_title=_load_project_config(project_id).get("spanish_title", ""),
-        chapters=chapters, bookmark_href=bookmark_href,
+        chapters=chapters, bookmark_href=bookmark_href, bookmark_label=bookmark_label,
         has_corrections=has_corrections, t=t, lang=_get_ui_lang(),
+        card=card,
+        read_count=sum(1 for ch in chapters if ch["reviewed"]),
+        book_phases=_book_phases_view(book_phases(project_dir), manifest, t),
+        flag_chip=_flag_chip(type_totals, review_types_selected, t),
+        type_totals=type_totals,
+        from_chapter=from_chapter,
+        # Judges first, then the coded checkers: the picker's order.
+        picker_types=list(REVIEW_JUDGE_TYPES) + list(REVIEW_CODED_TYPES),
+        picker_sep_at=len(REVIEW_JUDGE_TYPES),
         review_types=list(REVIEW_TYPES),
-        review_types_selected=_get_review_types(),
+        review_types_selected=review_types_selected,
     )
 
 
@@ -1491,8 +1624,7 @@ def reader_view(project_id, chapter):
 
     # `?review=blacklist,grammar` — the Review tab's finding chips link here.
     # It forces Review Mode on with only those categories lit **for this page
-    # load only**: neither the per-book on/off switch (localStorage) nor the
-    # global category cookie is written, and the category picker still renders
+    # load only**: the global category cookie is not written, and the category picker still renders
     # the reader's own saved selection, so following a deep link cannot quietly
     # reset anything. Unknown names are dropped; a param naming nothing
     # recognizable is ignored entirely.

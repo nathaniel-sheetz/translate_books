@@ -1,0 +1,53 @@
+{#- The book page's pipeline strip and Proceso panel. Macros rather than
+    includes so /api/book-phases/<id>/triage can render the same markup once
+    triage coverage has been computed, and the page swaps it in. `bp` is
+    app._book_phases_view(book_phases(...)). -#}
+
+{% macro phase_strip(bp, t) -%}
+<button type="button" class="phase-strip" id="phase-strip"
+        aria-label="{{ t.book_strip_label }}" aria-controls="tab-process">
+    <span class="phase-segs" aria-hidden="true">
+        {%- for p in bp.phases %}
+        <span class="phase-seg ph-{{ p.state }}" style="--pct: {{ p.pct }}%"
+              title="{{ p.name }} · {{ p.state_label }}{% if p.date_label %} · {{ p.date_label }}{% endif %}"></span>
+        {%- endfor %}
+    </span>
+    <span class="phase-cap">
+        <span>{{ t.phases_count.format(n=bp.done, total=bp.total) }}</span>
+        {%- if bp.missing_short %}
+        <span class="phase-missing">{{ t.phases_missing }}: {{ bp.missing_short | join(', ') }}</span>
+        {%- elif bp.done == bp.total %}
+        <span>{{ t.phases_all_done }}</span>
+        {%- endif %}
+    </span>
+</button>
+{%- endmacro %}
+
+{% macro phase_panel(bp, t) -%}
+<ul class="phase-list">
+    {%- for p in bp.phases %}
+    {%- if p.group %}
+    <li class="phase-group">{{ t.phase_groups[p.group] }}</li>
+    {%- endif %}
+    <li class="phase-row ph-{{ p.state }}" data-phase="{{ p.key }}">
+        <span class="phase-dot" aria-hidden="true">
+            {%- if p.state == 'done' -%}
+            <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+                 stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            {%- endif -%}
+        </span>
+        <span class="phase-name">{{ p.name }}</span>
+        <span class="phase-state">{{ p.state_label }}{% if p.date_label %} · {{ p.date_label }}{% endif %}</span>
+        {%- if p.detail %}
+        <span class="phase-detail">{{ p.detail }}</span>
+        {%- endif %}
+        {%- if p.owed_labels and p.state != 'done' %}
+        <span class="phase-owed">
+            {%- for label in p.owed_labels %}<span>{{ label }}</span>{% endfor -%}
+            {%- if p.owed_more %}<span>+{{ p.owed_more }}</span>{% endif -%}
+        </span>
+        {%- endif %}
+    </li>
+    {%- endfor %}
+</ul>
+{%- endmacro %}

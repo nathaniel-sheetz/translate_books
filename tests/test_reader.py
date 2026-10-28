@@ -313,7 +313,7 @@ class TestReaderChapterList:
         html = client.get("/read/test-project").data.decode("utf-8")
         assert "reader_chapters.js" in html
         assert "window.__reader_chapters" in html
-        assert "reader_review:" not in html   # the localStorage key moved into the script
+        assert "reader_review:" not in html   # the old per-book localStorage switch is gone
 
     def test_coverage_gap_badge_rendered(self, client, project_with_alignment):
         """A chapter with untranslated source runs must be badged.
@@ -408,6 +408,157 @@ class TestReaderChapterList:
         assert "<h1" in html and "English Title" not in html
 
 
+def _flag_chip(html):
+    """The book page's flag chip button, open tag to close."""
+    return html.split('<button class="flag-chip', 1)[1].split("</button>", 1)[0]
+
+
+class TestBookPageHeader:
+    """The chapter list's header: cover, phases strip, tabs, flag chip, scroll restore."""
+
+    def test_header_tabs_strip_and_process_rows_render(self, client, project_with_alignment):
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert 'class="book-head st-' in html
+        assert 'class="card-cover book-cover"' in html
+        assert "0/1 read" in html
+        # Nine strip segments, nine Proceso rows under four groups.
+        assert html.count('class="phase-seg ph-') == 9
+        assert html.count('class="phase-row ph-') == 9
+        assert html.count('class="phase-group"') == 4
+        # Capítulos opens first; Proceso is rendered but hidden.
+        assert 'id="tab-btn-chapters" type="button" role="tab"\n                aria-selected="true"' in html
+        assert 'id="tab-process" role="tabpanel" aria-labelledby="tab-btn-process" hidden' in html
+
+    def test_old_toggles_are_gone(self, client, project_with_alignment):
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert 'id="theme-toggle"' not in html
+        assert 'id="review-mode-toggle"' not in html
+        assert 'id="review-options-btn"' not in html
+
+    def test_triage_waits_for_the_process_tab(self, client, project_with_alignment):
+        # Working triage out can take seconds, so the page leaves it unknown and
+        # the tab asks for it; the endpoint answers with both halves to swap in.
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert 'class="phase-row ph-unknown" data-phase="triage"' in html
+
+        data = client.get("/api/book-phases/test-project/triage").get_json()
+        assert 'class="phase-strip"' in data["strip"]
+        assert 'data-phase="triage"' in data["panel"]
+        assert "ph-unknown" not in data["panel"]
+        # Cached now, so the next page load draws it straight away.
+        html = client.get("/read/test-project").data.decode("utf-8")
+        assert "ph-unknown" not in html
+
+    def test_triage_endpoint_rejects_unknown_books(self, client, project_with_alignment):
+        assert client.get("/api/book-phases/no-such-book/triage").status_code == 404
+
+    def test_triage_endpoint_rejects_unsafe_ids(self, client, project_with_alignment):
+        assert client.get("/api/book-phases/.../triage").status_code == 400
+
+    def test_chip_counts_every_type_by_default(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        chip = _flag_chip(client.get("/read/test-project").data.decode("utf-8"))
+        assert chip.startswith(' is-count"')
+        assert "2 flags" in chip
+        assert "flag-chip-icon-eyeoff" not in chip
+        assert 'title="All flag types"' in chip
+
+    def test_chip_marks_hidden_types(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        client.post("/api/set-review-types",
+                    json={"types": [t for t in REVIEW_TYPES if t != "blacklist"]})
+        chip = _flag_chip(client.get("/read/test-project").data.decode("utf-8"))
+        assert chip.startswith(' is-count"')
+        assert "1 flag<" in chip
+        assert "flag-chip-icon-eyeoff" in chip
+        assert 'title="Hidden: Blacklist"' in chip
+
+    def test_chip_with_nothing_ticked(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        _write_reviewed(project_with_alignment, ["chapter_01"])
+        client.post("/api/set-review-types", json={"types": []})
+        html = client.get("/read/test-project").data.decode("utf-8")
+        chip = _flag_chip(html)
+        assert chip.startswith(' is-hidden"')
+        assert "Flags hidden" in chip
+        # "Clean" is a claim about flags; with no type on it is never made.
+        assert 'chapter-chip-clean" hidden' in html
+
+    def test_chip_for_a_book_with_no_flags(self, client, project_with_alignment):
+        chip = _flag_chip(client.get("/read/test-project").data.decode("utf-8"))
+        assert chip.startswith(' is-clean"')
+        assert "No flags" in chip
+
+    def test_chip_zero_from_hidden_types_is_not_clean(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        client.post("/api/set-review-types", json={"types": ["grammar"]})
+        chip = _flag_chip(client.get("/read/test-project").data.decode("utf-8"))
+        assert chip.startswith(' is-zero"')
+        assert "0 flags" in chip
+        assert "flag-chip-icon-eyeoff" in chip
+
+    def test_picker_lists_judges_first_with_book_totals(self, client, project_with_alignment):
+        _write_findings(project_with_alignment, "chapter_01_chunk_000")
+        html = client.get("/read/test-project").data.decode("utf-8")
+        picker = html.split('id="review-types-popup"', 1)[1].split('id="flag-chip-icons"', 1)[0]
+        order = [picker.index(f'value="{t}"') for t in
+                 ("dialogue", "address", "editorial", "blacklist", "grammar", "dictionary", "completeness")]
+        assert order == sorted(order)
+        dialogue = picker.split('value="dialogue"', 1)[1].split("</label>", 1)[0]
+        assert '<b class="flag-picker-n">1</b>' in dialogue
+        assert 'data-all="1"' in picker and 'data-all="0"' in picker
+
+    def test_picker_separator_sits_between_judges_and_checkers(self, client, project_with_alignment):
+        html = client.get("/read/test-project").data.decode("utf-8")
+        picker = html.split('id="review-types-popup"', 1)[1].split('id="flag-chip-icons"', 1)[0]
+        assert picker.count('class="flag-picker-sep"') == 1
+        sep = picker.index('class="flag-picker-sep"')
+        assert picker.index('value="editorial"') < sep < picker.index('value="blacklist"')
+
+    def test_from_marks_the_row_you_came_back_from(self, client, project_with_alignment):
+        html = client.get("/read/test-project?from=chapter_01").data.decode("utf-8")
+        assert '<li id="ch-chapter_01" class="last-opened"' in html
+        assert "Last time here" in html
+
+    def test_without_from_no_row_is_marked(self, client, project_with_alignment):
+        for url in ("/read/test-project", "/read/test-project?from=chapter_99"):
+            html = client.get(url).data.decode("utf-8")
+            assert '<li id="ch-chapter_01" data-flags=' in html
+            assert "last-opened" not in html.split('class="nav-list"', 1)[1]
+
+    def test_reader_back_link_names_the_chapter(self, client, project_with_alignment):
+        html = client.get("/read/test-project/chapter_01").data.decode("utf-8")
+        assert 'href="/read/test-project?from=chapter_01" class="back-link"' in html
+
+
+class TestBookPhasesView:
+    """The labels the strip and the Proceso tab draw, off :func:`book_phases`."""
+
+    @pytest.mark.parametrize("lang,expected", [("en", "Oct 24"), ("es", "24 oct")])
+    def test_short_date(self, lang, expected):
+        from web_ui.app import _short_date
+        from web_ui.i18n import get_strings
+        assert _short_date("2026-10-24", get_strings(lang)) == expected
+
+    @pytest.mark.parametrize("iso", [None, "", "x", "2026-00-05", "2026-13-01", "2026-ab-01"])
+    def test_short_date_rejects_malformed_stamps(self, iso):
+        from web_ui.app import _short_date
+        from web_ui.i18n import get_strings
+        assert _short_date(iso, get_strings("en")) == ""
+
+    def test_owed_chips_cap_with_an_overflow_count(self):
+        from web_ui.app import _OWED_CHIP_CAP, _book_phases_view
+        from web_ui.i18n import get_strings
+        n = _OWED_CHIP_CAP + 5
+        owed = [f"chapter_{i:02d}" for i in range(1, n + 1)]
+        bp = {"phases": [{"key": "checks", "state": "none", "n": 0, "N": n, "date": None,
+                          "owed": owed, "per_chapter": True}],
+              "missing": ["checks"]}
+        view = _book_phases_view(bp, {}, get_strings("en"))["phases"][0]
+        assert len(view["owed_labels"]) == _OWED_CHIP_CAP
+        assert view["owed_more"] == 5
+
+
 class TestBookmark:
     """One bookmark per book: set from the sentence drawer, followed from the chapter list."""
 
@@ -498,16 +649,21 @@ class TestBookmark:
         assert "hl=1" in link
         assert "near=1" in link
 
-    def test_goto_icon_carries_no_visible_text(self, client, project_with_alignment):
+    def test_resume_link_names_the_bookmarked_chapter(self, client, project_with_alignment):
+        # It moved into the tab bar as "Continue reading · Ch. N" (the phone
+        # keeps the icon and "Ch. N", the words stay for screen readers), so
+        # its visible text is its name: no aria-label overriding it.
         client.post("/api/bookmark/test-project", json=self.MARK)
 
         html = client.get("/read/test-project").data.decode("utf-8")
         tail = html.split('bookmark-goto"', 1)[1]
         tag, inner = tail.split(">", 1)
         inner = inner.split("</a>", 1)[0]
-        assert 'aria-label="Go to bookmark"' in tag
-        assert "title=" not in tag
-        assert inner.split("</svg>", 1)[1].strip() == ""
+        assert "aria-label" not in tag
+        text = inner.split("</svg>", 1)[1]
+        assert '<span class="book-resume-pre">Continue reading · </span>' in text
+        # No manifest here, so the id's own number, as the row title shows it.
+        assert "<span>Ch. 01</span>" in text
 
     def test_goto_icon_disappears_when_the_bookmark_is_cleared(self, client, project_with_alignment):
         client.post("/api/bookmark/test-project", json=self.MARK)

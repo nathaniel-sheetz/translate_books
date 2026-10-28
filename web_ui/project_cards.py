@@ -207,11 +207,12 @@ def card_badges(card: dict, review_types_selected) -> list[dict]:
         return [{"kind": "translated",
                  "count": f'0/{card["chapters_total"]}'}] if status == "needs_translation" else []
 
-    selected = list(review_types_selected) or list(card["flag_counts"])
+    # No type selected counts nothing: the ticked types are the whole review
+    # setting, so the badge sits at zero (and hidden) rather than counting all.
     values = {
         "translated": f'{card["chapters_translated"]}/{card["chapters_total"]}',
         "review": card["awaiting_review"],
-        "flags": sum(card["flag_counts"].get(t, 0) for t in selected),
+        "flags": sum(card["flag_counts"].get(t, 0) for t in review_types_selected),
         "unread": card["unread_chapters"],
         "footnotes": card["empty_footnotes"],
     }
