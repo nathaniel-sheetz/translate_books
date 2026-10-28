@@ -42,6 +42,7 @@ from src.judges.llm_io import (
     render,
 )
 from src.triage import findings as tfindings
+from src.triage.ledger import record_chapters
 
 #: Wave type, for ``state.COMMAND_EFFORT_DEFAULTS`` / ``headless_effort_triage``
 #: and ``profile.USAGE_LOG_RELPATH``.
@@ -145,6 +146,36 @@ def _inside(project_dir: Path, relative: str) -> Path:
     if not path.is_relative_to(root):
         raise ValueError(f"path escapes the triage directory: {relative}")
     return path
+
+
+def _covers_triage(eval_names: Any) -> bool:
+    """Whether a run over ``eval_names`` saw every finding triage owns. A
+    narrower run says nothing about the checkers it left out, so it stamps
+    nothing."""
+    return set(tfindings.TRIAGE_EVAL_NAMES) <= set(eval_names or ())
+
+
+def _clean_chapters(
+    project_dir: Path,
+    chapters: Optional[list[str]],
+    items: list[dict[str, Any]],
+    eval_names: tuple[str, ...],
+) -> list[str]:
+    """Aligned chapters in scope that ``items`` holds nothing for.
+
+    A chapter without an alignment is never clean: nothing in it could be
+    anchored, so an empty collection there says nothing about its findings.
+    """
+    from web_ui.evaluations import chapter_id_from_chunk_id
+
+    if not _covers_triage(eval_names):
+        return []
+
+    aligned = list(tfindings.iter_chapters(project_dir))
+    aligned_set = set(aligned)
+    scope = [ch for ch in chapters if ch in aligned_set] if chapters else aligned
+    owed = {chapter_id_from_chunk_id(it["chunk_id"]) for it in items}
+    return [ch for ch in scope if ch not in owed]
 
 
 def _has_draft(path: Path) -> bool:
@@ -547,6 +578,9 @@ _PREPARE_SCHEMA = {
     "'unpinned'. The floor was calibrated on one model, so this is how a wave says "
     "whether it ran on it",
     "preamble_chars": "size of the cacheable preamble every job carries",
+    "stamped": "chapters in scope with nothing left to triage whose stamp in "
+    ".harness/triage/state.json this run wrote or moved forward (also on the "
+    "nothing_to_triage error)",
     "instructions": "next step",
 }
 
@@ -600,10 +634,18 @@ def prepare(
         project_dir, cfg, cli=cli, worker_model=worker_model, effort=effort
     )
 
+    # Taken before collecting, so the stamp predates anything a checker writes
+    # while this run is in flight.
+    collected_at = datetime.now().isoformat()
     items, skips = tfindings.collect_book(
         project_dir, chapters=chapters, eval_names=eval_names
     )
+    clean = _clean_chapters(project_dir, chapters, items, eval_names)
+    # Only a whole-book run accounts for every chapter, so only it makes the
+    # ledger the book page's source of truth.
+    whole_book = not chapters and _covers_triage(eval_names)
     if not items:
+        stamped = record_chapters(project_dir, clean, collected_at, complete=whole_book)
         # A clean scope is a normal outcome, and a caller chaining this after the
         # checkers must be able to tell it from a real failure without matching
         # on the message. The status stays `error` and the CLI still exits 1:
@@ -614,6 +656,7 @@ def prepare(
             _PREPARE_SCHEMA,
             reason="nothing_to_triage",
             skipped=skips,
+            stamped=stamped,
         )
     items.sort(key=lambda it: it["id"])
 
@@ -679,6 +722,7 @@ def prepare(
 
     manifest = {
         "prepared_at": datetime.now().isoformat(timespec="seconds"),
+        "collected_at": collected_at,
         "run_id": run_id,
         "template": TEMPLATE,
         "prompt_version": prompt_version(TEMPLATE),
@@ -697,12 +741,14 @@ def prepare(
     _manifest_path(project_dir).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    stamped = record_chapters(project_dir, clean, collected_at, complete=whole_book)
 
     return {
         "status": "ok",
         "run_dir": str(run_dir),
         "run_id": run_id,
         "items": len(item_meta),
+        "stamped": stamped,
         "jobs": len(jobs),
         "items_per_job": items_per_job,
         "by_eval": by_eval,
@@ -952,6 +998,8 @@ _COMMIT_SCHEMA = {
     "failed": "list of {job, problem}. The draft was renamed to <job>.rejected.json, so "
     "re-running fanout re-runs the job",
     "missing": "job ids with no draft yet",
+    "stamped": "chapters whose findings now all carry a verdict and whose stamp in "
+    ".harness/triage/state.json this commit wrote or moved forward",
     "report_path": "report.md: what was suppressed, what was kept, and the usage",
     "instructions": "next step",
 }
@@ -1092,6 +1140,7 @@ def commit(project_dir: Path | str) -> dict[str, Any]:
         TRIAGE_CONFIDENCE_FLOOR,
         append_triage,
         build_triaged,
+        chapter_id_from_chunk_id,
         load_all_triage_by_chunk,
     )
 
@@ -1119,6 +1168,7 @@ def commit(project_dir: Path | str) -> dict[str, Any]:
     failed: list[dict[str, str]] = []
     missing: list[str] = []
     decided: list[dict[str, Any]] = []
+    has_verdict: set[str] = set()
 
     for job in jobs:
         draft = _draft_path(project_dir, model, job["id"])
@@ -1167,6 +1217,7 @@ def commit(project_dir: Path | str) -> dict[str, Any]:
                 run_id=run_id,
             )
             written += 1
+            has_verdict.add(verdict["id"])
             hides = (
                 verdict["verdict"] == "suppress"
                 and verdict["confidence"] >= TRIAGE_CONFIDENCE_FLOOR
@@ -1186,10 +1237,31 @@ def commit(project_dir: Path | str) -> dict[str, Any]:
         encoding="utf-8",
     )
 
+    # A chapter is finished once every finding the manifest sent from it has a
+    # verdict, from this commit or an earlier one. The stamp is the collection
+    # time, so a checker run since `prepare` still leaves the chapter owed.
+    def has_one(item_id: str, item: dict[str, Any]) -> bool:
+        if item_id in has_verdict:
+            return True
+        prior = by_chunk_key.get(item["chunk_id"], {})
+        return prior.get((item.get("eval_name"), item.get("issue_key"))) is not None
+
+    by_chapter: dict[str, list[bool]] = {}
+    for item_id, item in items.items():
+        if isinstance(item, dict) and item.get("chunk_id"):
+            chapter = chapter_id_from_chunk_id(item["chunk_id"])
+            by_chapter.setdefault(chapter, []).append(has_one(item_id, item))
+    finished = [ch for ch, flags in by_chapter.items() if all(flags)]
+    if not _covers_triage(manifest.get("eval_names", tfindings.TRIAGE_EVAL_NAMES)):
+        finished = []
+    stamp = manifest.get("collected_at") or manifest.get("prepared_at")
+    stamped = record_chapters(project_dir, finished, stamp) if isinstance(stamp, str) else 0
+
     return {
         "status": "ok",
         "written": written,
         "already_recorded": already,
+        "stamped": stamped,
         "suppressed": suppressed,
         "kept": kept,
         "floor": TRIAGE_CONFIDENCE_FLOOR,
