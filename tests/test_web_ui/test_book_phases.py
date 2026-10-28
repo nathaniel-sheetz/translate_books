@@ -1,9 +1,10 @@
 """Tests for the book page's pipeline phases (``web_ui.book_phases``).
 
 Each phase is read off files the harness already writes: chunks for
-translation, ``evaluations/`` for the checks and the judges, triage derived as
-"nothing left to triage", the book review's state file (or its report), the
-image-pass ledger and the EPUB in the project directory.
+translation, ``evaluations/`` for the checks and the judges, triage from the
+pass's ledger (or derived as "nothing left to triage" without one), the book
+review's state file (or its report), the image-pass ledger and the EPUB in the
+project directory.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import os
 import pytest
 
 from src.evaluators.location_normalizer import NormalizedIssue, NormalizedLocation
+from src.triage.ledger import record_chapters
 from web_ui.book_phases import (
     PHASE_KEYS,
     book_phases,
@@ -250,3 +252,63 @@ def test_epub_date_is_its_mtime(book):
     epub_phase = _phase(book_phases(book), "epub")
     assert epub_phase["state"] == "done"
     assert epub_phase["date"].startswith("2026-10-")
+
+
+# --- triage from the pass's own ledger ---------------------------------------
+
+def _no_derivation(monkeypatch):
+    def refuse(*a, **kw):
+        raise AssertionError("a book with a triage ledger must not derive triage")
+    monkeypatch.setattr("src.triage.findings.collect_chapter", refuse)
+
+
+def test_triage_reads_the_ledger_without_deriving_it(book, monkeypatch):
+    _no_derivation(monkeypatch)
+    for ch in SENTENCES:
+        _code(book, ch)
+    record_chapters(book, ["chapter_01", "chapter_02"], "2099-01-01T00:00:00", complete=True)
+    result = book_phases(book)
+    triage = _phase(result, "triage")
+    assert triage["state"] == "partial"
+    assert triage["owed"] == ["chapter_03"]
+    assert triage["date"] == "2099-01-01"
+    assert "triage" in result["missing"]
+    # The Proceso tab's fetch answers the same thing, just as cheaply.
+    assert _phase(book_triage_phase(book), "triage") == triage
+
+
+def test_a_checker_run_after_the_stamp_makes_the_chapter_owed(book, monkeypatch):
+    _no_derivation(monkeypatch)
+    for ch in SENTENCES:
+        _code(book, ch)
+    record_chapters(book, list(SENTENCES), "2099-01-01T00:00:00", complete=True)
+    assert _phase(book_phases(book), "triage")["state"] == "done"
+
+    # Stamped before the checkers last ran (the evaluations are dated now).
+    (book / ".harness" / "triage" / "state.json").write_text(json.dumps({"complete": True, "chapters": {
+        ch: "2000-01-01T00:00:00" for ch in SENTENCES}}), encoding="utf-8")
+    triage = _phase(book_phases(book), "triage")
+    assert triage["state"] == "none"
+    assert triage["owed"] == list(SENTENCES)
+
+
+def test_a_stamped_chapter_never_coded_is_still_owed(book, monkeypatch):
+    _no_derivation(monkeypatch)
+    record_chapters(book, ["chapter_01"], "2099-01-01T00:00:00", complete=True)
+    assert _phase(book_phases(book), "triage")["state"] == "none"
+
+
+def test_without_a_ledger_triage_is_still_derived(book):
+    for ch in SENTENCES:
+        _code(book, ch)
+    assert _phase(book_phases(book), "triage")["state"] == "unknown"
+    assert _phase(book_triage_phase(book), "triage")["state"] == "done"
+
+
+def test_an_incomplete_ledger_is_not_read(book):
+    """Stamps from a chapter-scoped run alone leave the book on the derived check."""
+    for ch in SENTENCES:
+        _code(book, ch)
+    record_chapters(book, ["chapter_01"], "2099-01-01T00:00:00")
+    assert _phase(book_phases(book), "triage")["state"] == "unknown"
+    assert _phase(book_triage_phase(book), "triage")["state"] == "done"

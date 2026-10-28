@@ -46,9 +46,16 @@ and prints one JSON object carrying a `_schema` block.
 | verb | spend | what it does |
 |---|---|---|
 | `status` | none, and **writes nothing** | findings in scope, jobs, the model, whether the CLI can start |
-| `prepare` | none | renders batched prompts + a manifest under `.harness/triage/` |
+| `prepare` | none | renders batched prompts + a manifest under `.harness/triage/`; stamps chapters with nothing left to triage |
 | `fanout` | subscription | runs one headless wave over those jobs |
-| `commit` | none | parses the drafts, appends verdicts to `evaluations/_triage.jsonl` |
+| `commit` | none | parses the drafts, appends verdicts to `evaluations/_triage.jsonl`; stamps chapters whose findings all have a verdict |
+
+`prepare` and `commit` record each finished chapter in `.harness/triage/state.json`,
+which is where the book page's Triage segment reads from — once a whole-book `prepare`
+has marked the file `complete`. Until then (a book triaged before the file existed, or
+one only ever triaged with `--chapters`) the page derives triage the slow way; a
+whole-book `prepare` is free when it comes back `nothing_to_triage`, and it completes
+the file.
 
 **Open with `status`.** It is the only command that answers "is there anything to
 do here, on what model, and can the CLI even start" without touching disk —

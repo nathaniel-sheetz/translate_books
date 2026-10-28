@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.82.1.0] - 2026-10-28
+
+### Changed
+- **The book page reads triage from a record the triage pass now keeps, instead of working it out.** `prepare` and `commit` stamp every chapter they leave with nothing to triage in `.harness/triage/state.json` (`src/triage/ledger.py`). The stamp is when the findings were collected, so a checker run after it makes the chapter owed again. With that record, the Triage segment draws with its date on first load and the Proceso tab no longer fetches anything. On fabre2 that is 0.13 s, where the derived check took 8.4 s, and both give 80 of 80 chapters. The record becomes the page's source only once a whole-book `prepare` has written it. A run narrowed to some chapters, as "rerun checks" on one chapter does, adds its stamps but leaves the book on the derived check. A book triaged before this, then, keeps the derived check until its next whole-book `prepare`, which is free when nothing is left to triage. A `prepare` narrowed to one checker stamps nothing, and the record is now replaced in one step, so a crash mid-write can't wipe the stamps.
+
 ## [0.82.0.0] - 2026-10-28
 
 ### Added

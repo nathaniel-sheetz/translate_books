@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from src.triage import pass_ as tp
+from src.triage.ledger import chapter_stamps, load_state, record_chapters, state_path
 from web_ui.evaluations import (
     TRIAGE_CONFIDENCE_FLOOR,
     build_triaged,
@@ -518,3 +519,122 @@ def test_commit_writes_a_report_listing_what_it_suppressed(book: Path):
     assert "Sigfridos" in report
     assert "2 suppressed" in report
     assert "Nothing was deleted" in report
+
+
+# --- the triage ledger -------------------------------------------------------
+
+def _add_clean_chapter(book: Path, chapter: str = "chapter_02") -> None:
+    """An aligned, coded chapter with no findings: nothing to triage in it."""
+    chunk = f"{chapter}_chunk_000"
+    (book / "chunks" / f"{chunk}.json").write_text(
+        json.dumps({"id": chunk, "chunk_id": chunk, "translated_text": "El rio corre.",
+                    "source_text": "The river runs."}),
+        encoding="utf-8",
+    )
+    (book / "alignments" / f"{chapter}.json").write_text(
+        json.dumps({"alignments": [
+            {"es_idx": 0, "en_idx": 0, "es": "El rio corre.", "en": "", "chunk_id": chunk},
+        ]}),
+        encoding="utf-8",
+    )
+    (book / "evaluations" / f"{chunk}.json").write_text(
+        json.dumps({"chunk_id": chunk, "normalized_issues": []}), encoding="utf-8",
+    )
+
+
+def test_prepare_stamps_only_the_chapters_with_nothing_left(book: Path):
+    _add_clean_chapter(book)
+    out = tp.prepare(book, worker_model="m", cli="cursor")
+    assert out["status"] == "ok" and out["stamped"] == 1
+    manifest, _ = tp.load_manifest(book)
+    assert chapter_stamps(book) == {"chapter_02": manifest["collected_at"]}
+
+
+def test_nothing_to_triage_still_stamps_the_clean_chapters(book: Path):
+    _run(book)
+    committed = chapter_stamps(book)["chapter_01"]
+    out = tp.prepare(book, worker_model="m", cli="cursor")
+    assert out["reason"] == "nothing_to_triage"
+    assert out["stamped"] == 1
+    assert set(chapter_stamps(book)) == {"chapter_01"}
+    assert chapter_stamps(book)["chapter_01"] > committed
+
+
+def test_commit_stamps_a_chapter_once_every_finding_has_a_verdict(book: Path):
+    out = _run(book)
+    assert out["stamped"] == 1
+    manifest, _ = tp.load_manifest(book)
+    # The collection time, not the commit time: a checker run in between must
+    # still leave the chapter owed.
+    assert chapter_stamps(book) == {"chapter_01": manifest["collected_at"]}
+    assert tp.commit(book)["stamped"] == 0   # re-runnable, and moves nothing
+    assert chapter_stamps(book) == {"chapter_01": manifest["collected_at"]}
+
+
+def test_commit_does_not_stamp_a_chapter_with_a_missing_job(book: Path):
+    tp.prepare(book, worker_model="m", cli="cursor")
+    out = tp.commit(book)
+    assert out["missing"] == ["job-001"] and out["stamped"] == 0
+    assert chapter_stamps(book) == {}
+
+
+def test_a_stamp_never_moves_back_in_time(tmp_path: Path):
+    record_chapters(tmp_path, ["chapter_01"], "2026-10-28T10:00:00")
+    record_chapters(tmp_path, ["chapter_01", "chapter_02"], "2026-10-27T10:00:00")
+    assert chapter_stamps(tmp_path) == {
+        "chapter_01": "2026-10-28T10:00:00", "chapter_02": "2026-10-27T10:00:00",
+    }
+
+
+def test_a_chapter_scoped_prepare_stamps_but_does_not_complete_the_ledger(book: Path):
+    """"Rerun checks" on one chapter must not make the page read 1 of N."""
+    _add_clean_chapter(book)
+    out = tp.prepare(book, chapters=["chapter_02"], worker_model="m", cli="cursor")
+    assert out["reason"] == "nothing_to_triage" and out["stamped"] == 1
+    assert set(chapter_stamps(book)) == {"chapter_02"}
+    assert chapter_stamps(book, complete_only=True) is None
+
+
+def test_a_complete_ledger_stays_complete(book: Path):
+    _add_clean_chapter(book)
+    assert tp.prepare(book, worker_model="m", cli="cursor")["status"] == "ok"
+    assert chapter_stamps(book, complete_only=True) == chapter_stamps(book)
+    tp.prepare(book, chapters=["chapter_02"], worker_model="m", cli="cursor")
+    record_chapters(book, ["chapter_09"], "2099-01-01T00:00:00")
+    assert load_state(book)["complete"] is True
+
+
+def test_a_prepare_narrowed_to_one_checker_stamps_nothing(book: Path):
+    _add_clean_chapter(book)
+    out = tp.prepare(book, eval_names=("dictionary",), worker_model="m", cli="cursor")
+    assert out["status"] == "ok" and out["stamped"] == 0
+    tp.fanout(book, runner=_answering_runner(), concurrency=1)
+    assert tp.commit(book)["stamped"] == 0
+    assert chapter_stamps(book) is None
+
+
+def test_commit_does_not_stamp_a_chapter_split_across_jobs_with_one_missing(book: Path):
+    tp.prepare(book, worker_model="m", cli="cursor", items_per_job=1)
+    _write_draft(book, [{"item": 1, "verdict": "suppress", "confidence": 0.99, "reason": "x"}])
+    out = tp.commit(book)
+    assert out["written"] == 1 and out["missing"] == ["job-002"]
+    assert out["stamped"] == 0
+    assert chapter_stamps(book) == {}
+
+
+def test_commit_of_a_manifest_without_collected_at_stamps_prepared_at(book: Path):
+    tp.prepare(book, worker_model="m", cli="cursor")
+    manifest, _ = tp.load_manifest(book)
+    del manifest["collected_at"]
+    tp._manifest_path(book).write_text(json.dumps(manifest), encoding="utf-8")
+    tp.fanout(book, runner=_answering_runner(), concurrency=1)
+    assert tp.commit(book)["stamped"] == 1
+    assert chapter_stamps(book) == {"chapter_01": manifest["prepared_at"]}
+
+
+def test_re_stamping_the_same_time_writes_nothing(tmp_path: Path):
+    assert record_chapters(tmp_path, ["chapter_01"], "2026-10-28T10:00:00") == 1
+    before = state_path(tmp_path).stat().st_mtime_ns
+    assert record_chapters(tmp_path, ["chapter_01"], "2026-10-28T10:00:00") == 0
+    assert state_path(tmp_path).stat().st_mtime_ns == before
+    assert [p.name for p in state_path(tmp_path).parent.iterdir()] == ["state.json"]

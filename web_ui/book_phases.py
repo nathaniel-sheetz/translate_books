@@ -16,12 +16,17 @@ reports:
 Everything here is read off files the harness already writes; nothing is
 recorded for the page's sake.
 
-**Triage is the expensive one.** "Nothing left to triage" is derived by
-:func:`src.triage.findings.collect_chapter`, which anchors every dictionary
-and grammar finding to its sentence — about 8 s for fabre2's 80 chapters when
-nothing is cached. So :func:`book_phases` reports triage as ``unknown`` unless
-a previous :func:`book_triage_phase` call cached it for the same files, and
-the page fetches it when the Proceso tab is first opened.
+**Triage** is read off ``.harness/triage/state.json``
+(:mod:`src.triage.ledger`), where the pass stamps each chapter it leaves
+nothing to triage in. A chapter counts once its stamp is at least as new as its
+coded results. Until a whole-book ``prepare`` has made the ledger complete --
+a book triaged before it existed, or one only ever triaged chapter by chapter --
+"nothing left to triage" is derived by
+:func:`src.triage.findings.collect_chapter` instead, which anchors every
+dictionary and grammar finding to its sentence — about 8 s for fabre2's 80
+chapters when nothing is cached. There :func:`book_phases` reports triage as
+``unknown`` unless a previous :func:`book_triage_phase` call cached it for the
+same files, and the page fetches it when the Proceso tab is first opened.
 
 Both results are cached the way ``project_cards`` caches a card: by a
 stat-only fingerprint of the directories and files they read.
@@ -68,7 +73,7 @@ _WATCHED_DIRS = (
     ".harness/images",
 )
 # ignored_terms.json changes what is left to triage without touching evaluations/.
-_WATCHED_FILES = ("ignored_terms.json",)
+_WATCHED_FILES = ("ignored_terms.json", ".harness/triage/state.json")
 
 # `book_review_2026-10-24.md`, `book_review_signals_2026-10-20.md`: the reports
 # a review wrote before .harness/book_review/state.json existed.
@@ -223,6 +228,24 @@ def _epub(project_dir: Path) -> dict:
     return _book_level("epub", "done" if epubs else "none", date)
 
 
+def _ledger_triage(
+    chapters: list[str], coded: set[str], coverage: dict, stamps: dict[str, str],
+) -> dict:
+    """Triage from the pass's own stamps: a coded chapter whose stamp is no
+    older than its newest coded run. Re-running the checkers makes it owed."""
+    def triaged(ch: str) -> bool:
+        stamp = stamps.get(ch)
+        if ch not in coded or stamp is None:
+            return False
+        runs = [r["evaluated_at"] for r in coverage.get(ch, {}).values()
+                if r["coded"] and isinstance(r["evaluated_at"], str)]
+        return not runs or stamp >= max(runs)
+
+    done = {ch for ch in chapters if triaged(ch)}
+    return _coverage("triage", chapters, done,
+                     _newest(stamps.get(ch) for ch in chapters))
+
+
 def _unknown_triage(chapters: list[str]) -> dict:
     return {"key": "triage", "state": "unknown", "n": 0, "N": len(chapters),
             "date": None, "owed": [], "per_chapter": True}
@@ -241,7 +264,12 @@ def _summarize(phases: list[dict]) -> dict:
 
 
 def _compute(project_dir: Path) -> tuple[list[str], set[str], dict]:
-    """Every phase but triage. Returns ``(chapters, coded chapters, phases by key)``."""
+    """Every phase, triage only when the book's triage ledger is complete.
+
+    Returns ``(chapters, coded chapters, phases by key)``.
+    """
+    from src.triage.ledger import chapter_stamps
+
     chunks, translated, stamps = _read_chunks(project_dir)
     chapters = sorted(chunks)
     coverage = load_chapter_phase_coverage(project_dir)
@@ -268,6 +296,9 @@ def _compute(project_dir: Path) -> tuple[list[str], set[str], dict]:
         has = {ch for ch in chapters if judged(ch, lambda r, n=name: n in r["judges"])}
         date = _newest(r["judges"].get(name) for r in all_recs)
         phases[name] = _coverage(name, chapters, has, date)
+    stamps = chapter_stamps(project_dir, complete_only=True)
+    if stamps is not None:
+        phases["triage"] = _ledger_triage(chapters, coded, coverage, stamps)
     phases["book_review"] = _book_review(project_dir)
     phases["images"] = _images(project_dir)
     phases["epub"] = _epub(project_dir)
@@ -275,7 +306,8 @@ def _compute(project_dir: Path) -> tuple[list[str], set[str], dict]:
 
 
 def _phases_entry(project_dir: Path, fingerprint: tuple) -> dict:
-    """The cached non-triage result for ``fingerprint``, computing it on a miss."""
+    """The cached phases for ``fingerprint`` (triage only from a ledger),
+    computing them on a miss."""
     key = _cache_key(project_dir)
     cached = _PHASE_CACHE.get(key)
     if cached is not None and cached[0] == fingerprint:
@@ -292,11 +324,12 @@ def _assemble(entry: dict, triage: dict) -> dict:
 
 
 def book_phases(project_dir: Path) -> dict:
-    """Every phase for one book, triage only when it is already cached.
+    """Every phase for one book, triage only when it is cheap to know.
 
     Returns ``{"chapters", "phases", "done", "total", "missing"}``: the
     chapter ids (from ``chunks/``), the nine phase dicts in :data:`PHASE_KEYS`
-    order, how many are done of how many apply, and the keys still owed. A
+    order, how many are done of how many apply, and the keys still owed.
+    Triage comes from the ledger once it is complete, else from the cache; a
     triage phase not computed yet is ``unknown`` and counts toward ``total``
     but not ``missing``.
 
@@ -305,26 +338,31 @@ def book_phases(project_dir: Path) -> dict:
     project_dir = Path(project_dir)
     fingerprint = _fingerprint(project_dir)
     entry = _phases_entry(project_dir, fingerprint)
-    cached = _TRIAGE_CACHE.get(_cache_key(project_dir))
-    triage = cached[1] if cached is not None and cached[0] == fingerprint else None
+    triage = entry["phases"].get("triage")
+    if triage is None:
+        cached = _TRIAGE_CACHE.get(_cache_key(project_dir))
+        triage = cached[1] if cached is not None and cached[0] == fingerprint else None
     return _assemble(entry, triage or _unknown_triage(entry["chapters"]))
 
 
 def book_triage_phase(project_dir: Path) -> dict:
     """:func:`book_phases` with triage computed, which can take seconds.
 
-    A chapter has been triaged when it has coded results **and** nothing is
-    left to triage in it: every dictionary and grammar finding is dismissed,
-    ignored, already ruled on, or cannot be anchored. That is derived rather
-    than read off ``_triage.jsonl``, which only has rows for chapters whose
-    findings needed a verdict — a complete triage of a book with clean chapters
-    would otherwise read as partial.
+    A book with a complete triage ledger returns what :func:`book_phases` does.
+    For one without, a chapter has been triaged when it has coded results **and**
+    nothing is left to triage in it: every dictionary and grammar finding is
+    dismissed, ignored, already ruled on, or cannot be anchored. That is derived
+    rather than read off ``_triage.jsonl``, which only has rows for chapters
+    whose findings needed a verdict — a complete triage of a book with clean
+    chapters would otherwise read as partial.
     """
     from src.triage.findings import collect_chapter
 
     project_dir = Path(project_dir)
     fingerprint = _fingerprint(project_dir)
     entry = _phases_entry(project_dir, fingerprint)
+    if "triage" in entry["phases"]:
+        return _assemble(entry, entry["phases"]["triage"])
     key = _cache_key(project_dir)
     cached = _TRIAGE_CACHE.get(key)
     if cached is not None and cached[0] == fingerprint:
