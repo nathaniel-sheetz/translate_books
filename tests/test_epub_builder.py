@@ -14,6 +14,7 @@ from src.epub_builder import (
     _first_nonempty_line,
     _int_to_roman,
     _load_chapter_manifest,
+    _load_image_widths,
     _load_toc_format,
     _apply_language_default_label,
     _normalize_allcaps_title,
@@ -717,6 +718,71 @@ class TestBuildEpub:
             assert any('fig01.png' in n for n in names)
             # Should contain stylesheet
             assert any('style.css' in n for n in names)
+
+    def _chapter_xhtml(self, output, name="chapter_01"):
+        with zipfile.ZipFile(output) as zf:
+            path = next(n for n in zf.namelist() if name in n and n.endswith('.xhtml'))
+            return zf.read(path).decode('utf-8')
+
+    def test_image_widths_from_project_json(self, tmp_path):
+        project = self._make_project(tmp_path)
+        (project / "chapters" / "chapter_02.txt").write_text(
+            "CHAPTER II\n\nThe Middle\n\n[IMAGE:images/fig02.png:A dog]\n\n"
+            "[CAPTION] A DOG.\n\nMore content.",
+            encoding='utf-8',
+        )
+        (project / "images" / "fig02.png").write_bytes(
+            (project / "images" / "fig01.png").read_bytes()
+        )
+        (project / "project.json").write_text(
+            json.dumps({"image_widths": {"fig02.png": 45}}), encoding='utf-8',
+        )
+        output = build_epub(project_path=project, title="T", author="A")
+        assert '<img src="images/fig02.png" style="width: 45%" alt="A dog"/>' \
+            in self._chapter_xhtml(output, "chapter_02")
+        # An image the map does not name keeps the reader's own sizing.
+        assert 'style=' not in self._chapter_xhtml(output, "chapter_01")
+
+    def test_image_widths_ignores_bad_values(self, tmp_path):
+        project = self._make_project(tmp_path)
+        (project / "project.json").write_text(
+            json.dumps({"image_widths": {"fig01.png": 0, "x.png": "50", "y.png": 150}}),
+            encoding='utf-8',
+        )
+        assert _load_image_widths(project) == {}
+        output = build_epub(project_path=project, title="T", author="A")
+        assert 'style=' not in self._chapter_xhtml(output)
+
+    def test_image_widths_malformed_map_or_json(self, tmp_path):
+        project = self._make_project(tmp_path)
+        (project / "project.json").write_text(
+            json.dumps({"image_widths": [["fig01.png", 50]]}), encoding='utf-8',
+        )
+        assert _load_image_widths(project) == {}
+        (project / "project.json").write_text("{not json", encoding='utf-8')
+        assert _load_image_widths(project) == {}
+
+    def test_image_widths_matches_escaped_filename(self, tmp_path):
+        project = self._make_project(tmp_path)
+        (project / "chapters" / "chapter_02.txt").write_text(
+            "CHAPTER II\n\nThe Middle\n\n[IMAGE:images/a&b.png:Plate]\n\nMore content.",
+            encoding='utf-8',
+        )
+        (project / "images" / "a&b.png").write_bytes(
+            (project / "images" / "fig01.png").read_bytes()
+        )
+        (project / "project.json").write_text(
+            json.dumps({"image_widths": {"a&b.png": 30}}), encoding='utf-8',
+        )
+        output = build_epub(project_path=project, title="T", author="A")
+        assert '<img src="images/a&amp;b.png" style="width: 30%"' \
+            in self._chapter_xhtml(output, "chapter_02")
+
+    def test_no_image_widths_key_builds_as_before(self, tmp_path):
+        project = self._make_project(tmp_path)
+        assert _load_image_widths(project) == {}
+        output = build_epub(project_path=project, title="T", author="A")
+        assert '<img src="images/fig01.png" alt=""/>' in self._chapter_xhtml(output)
 
     def test_missing_image_warns(self, tmp_path):
         """Build succeeds even when a referenced image is missing."""

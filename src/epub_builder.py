@@ -12,7 +12,7 @@ import mimetypes
 import re
 import shutil
 import tempfile
-from html import escape
+from html import escape, unescape
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
@@ -893,6 +893,44 @@ def _load_toc_format(project_path: Path) -> Optional[str]:
     return val if isinstance(val, str) else None
 
 
+def _load_image_widths(project_path: Path) -> Dict[str, float]:
+    """Read the optional 'image_widths' map from project.json.
+
+    ``{"p007.jpg": 40, ...}``: the display width of that image as a percentage
+    of the text column. Without it a reader sizes an image as it likes (Kindle
+    stretches anything large to the full screen), so a tall or murky plate
+    takes a whole page. Entries outside (0, 100] are ignored.
+    """
+    project_json = project_path / 'project.json'
+    if not project_json.exists():
+        return {}
+    try:
+        data = json.loads(project_json.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    raw = data.get('image_widths')
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(name): float(pct) for name, pct in raw.items()
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool) and 0 < pct <= 100
+    }
+
+
+def _apply_image_widths(xhtml: str, widths: Dict[str, float]) -> str:
+    """Give each ``<img>`` named in *widths* an inline percentage width."""
+    if not widths:
+        return xhtml
+
+    def repl(m: re.Match) -> str:
+        pct = widths.get(unescape(m.group(1)))
+        if pct is None:
+            return m.group(0)
+        return f'{m.group(0)} style="width: {pct:g}%"'
+
+    return re.sub(r'<img src="images/([^"]+)"', repl, xhtml)
+
+
 def _load_chapter_manifest(project_path: Path) -> Dict[str, Dict[str, Any]]:
     """Read the optional 'chapter_manifest' from project.json.
 
@@ -1085,6 +1123,7 @@ def build_epub(
 
     chapter_manifest = _load_chapter_manifest(project_path)
     toc_format = _load_toc_format(project_path)
+    image_widths = _load_image_widths(project_path)
 
     # Discover chapter files
     chapter_files = list(chapters_dir.glob('chapter_*.txt'))
@@ -1299,6 +1338,7 @@ def build_epub(
             file_name=file_name,
             lang=language,
         )
+        xhtml_content = _apply_image_widths(xhtml_content, image_widths)
         chapter_item.set_content(xhtml_content.encode('utf-8'))
         chapter_item.add_item(css_item)
         book.add_item(chapter_item)
