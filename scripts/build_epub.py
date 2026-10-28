@@ -81,7 +81,7 @@ Examples:
         '--output',
         type=Path,
         default=None,
-        help='Output EPUB path. Defaults to {project_dir}/{name}.epub'
+        help='Output EPUB path. Defaults to {project_dir}/{title}.epub (the Spanish title)'
     )
     parser.add_argument(
         '--chapters-dir',

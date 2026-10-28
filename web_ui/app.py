@@ -9435,33 +9435,9 @@ def save_translator_note(project_id):
     return jsonify({"ok": True})
 
 
-# Characters Windows reserves in a filename. ':' is the dangerous one here --
-# NTFS reads it as the alternate-data-stream separator, so a title like
-# "Bambi: Una vida en el bosque" writes the EPUB into a hidden stream on a
-# 0-byte file named "Bambi", where the glob("*.epub") in epub_status /
-# download_epub can never see it and the UI keeps serving the previous build.
-_UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def _epub_filename(title: str, project_id: str) -> str:
-    """Derive a filesystem-safe ``<name>.epub`` from a book title.
-
-    Reserved characters collapse to ``-`` FIRST, before any pathlib call. Order
-    matters on Windows: ``Path("R: The Movie").name`` is ``" The Movie"``,
-    because pathlib reads a leading ``<letter>:`` as a drive spec and discards
-    it -- so sanitizing after ``.name`` would silently eat the first character of
-    such a title. Trailing dots and spaces are stripped because Windows would
-    strip them from a stem that ended that way (the appended ``.epub`` already
-    prevents the *written* name from ending in ``.`` or space). Falls back to
-    *project_id* only when the stem is empty after that (e.g. ``""``, ``"..."``,
-    whitespace) -- a reserved-only title like ``"???"`` becomes ``---.epub``.
-    """
-    stem = _UNSAFE_FILENAME_RE.sub("-", title)
-    # No separator or drive spec survives the substitution above, so ``.name``
-    # cannot truncate a real title here -- it stays as a belt-and-braces
-    # guarantee that the result is a single path component and nothing more.
-    stem = Path(stem).name.rstrip(". ")
-    return f"{stem or project_id}.epub"
+# Shared with src.epub_builder's default output path, so the CLI builds and
+# this route write the same <Spanish title>.epub.
+from src.epub_builder import epub_filename as _epub_filename  # noqa: E402
 
 
 @app.route("/api/project/<project_id>/build-epub", methods=["POST"])
@@ -9507,7 +9483,14 @@ def build_epub_route(project_id):
             metadata[key] = str(config.get(key, "") or "").strip()
     # Also persist author/title when supplied so the form is the source of truth.
     # Only what the form sent: a resolver fallback must not get written back.
-    for key, val in (("author", data.get("author") or ""), ("title", data.get("title") or "")):
+    # The form's Title is the EPUB's (Spanish) title, so it lands in
+    # spanish_title; ``title`` is the English one the reader shows and only the
+    # dashboard's Save Title edits it. An untranslated pre-fill (the form falls
+    # back to ``title`` when spanish_title is unset) is not copied across.
+    form_title = data.get("title") or ""
+    if form_title and not config.get("spanish_title") and form_title == config.get("title"):
+        form_title = ""
+    for key, val in (("author", data.get("author") or ""), ("spanish_title", form_title)):
         if val and config.get(key, "") != val:
             config[key] = val
             config_dirty = True
