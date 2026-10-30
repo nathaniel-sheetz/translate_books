@@ -155,7 +155,7 @@
 
     /* --- one card ------------------------------------------------------------ */
 
-    function setChoice(card, change) {
+    function setChoice(card, change, keepCards) {
         var c = JSON.parse(JSON.stringify(choiceOf(card)));
         Object.keys(change).forEach(function (k) { c[k] = change[k]; });
         /* Applying a card with nothing ticked would do nothing: tick its change. */
@@ -165,7 +165,26 @@
         }
         if (c.ask) c.state = 'pending';
         pending[card.key] = c;
-        scheduleSave();
+        scheduleSave(keepCards);
+    }
+
+    /* A save rebuilds the whole board on the server and redraws every card, so
+       the text boxes save when they lose focus, never per keystroke. Focus leaves
+       on the mouse press, so the cards stay put until the save's reply: redrawing
+       here would replace the control being clicked and swallow the click. */
+    function textBox(card, field) {
+        var area = document.createElement('textarea');
+        var saved = choiceOf(card)[field] || '';
+        area.rows = 2;
+        area.value = saved;
+        area.addEventListener('blur', function () {
+            if (area.value === saved) return;
+            saved = area.value;
+            var change = {};
+            change[field] = saved;
+            setChoice(card, change, true);
+        });
+        return area;
     }
 
     function checkbox(label, checked, disabled, onChange) {
@@ -305,11 +324,7 @@
             var label = el('label', 'qb-paste');
             label.appendChild(el('span', 'qb-label', S.paste_label));
             label.appendChild(el('span', 'qb-current', card.es_span));
-            var area = document.createElement('textarea');
-            area.rows = 2;
-            area.value = choice.paste || '';
-            area.addEventListener('input', function () { setChoice(card, { paste: area.value }); });
-            label.appendChild(area);
+            label.appendChild(textBox(card, 'paste'));
             node.appendChild(label);
         }
 
@@ -336,11 +351,7 @@
         if (!locked && NO_SCRIPTURE.indexOf(card.status) < 0) {
             var ask = el('label', 'qb-paste qb-ask');
             ask.appendChild(el('span', 'qb-label', S.ask_label));
-            var askArea = document.createElement('textarea');
-            askArea.rows = 2;
-            askArea.value = choice.ask || '';
-            askArea.addEventListener('input', function () { setChoice(card, { ask: askArea.value }); });
-            ask.appendChild(askArea);
+            ask.appendChild(textBox(card, 'ask'));
             node.appendChild(ask);
         }
         return node;
@@ -456,8 +467,10 @@
     /* --- talking to the server ---------------------------------------------- */
 
     function post(path, body) {
+        /* keepalive: a save sent as the page goes away still arrives. */
         return fetch(API + path, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+            keepalive: true
         }).then(function (response) {
             return response.json().then(function (json) { return { ok: response.ok, json: json }; });
         });
@@ -475,12 +488,12 @@
         updateBar();
     }
 
-    function scheduleSave() {
+    function scheduleSave(keepCards) {
         approveBtn.disabled = true;
         barSave.textContent = S.saving;
         clearTimeout(saveTimer);
         saveTimer = setTimeout(save, SAVE_DELAY);
-        redrawCards();
+        if (!keepCards) redrawCards();
     }
 
     function save() {
@@ -549,6 +562,15 @@
         if (!e.persisted) return;
         focusFromHash();
         scrollToFocus();
+    });
+    /* Leaving the page: a box still being typed in has not lost focus, and the
+       save timer would die with the page. */
+    window.addEventListener('pagehide', function () {
+        var active = document.activeElement;
+        if (active && active.tagName === 'TEXTAREA') active.blur();
+        if (!Object.keys(pending).length) return;
+        clearTimeout(saveTimer);
+        save();
     });
     focusFromHash();
     load();
