@@ -63,6 +63,7 @@ web_ui/
 | `/recommendations/<id>` | recommendations.html | One book's findings and notes, to read and to flag for later |
 | `/image-pass/<id>` | image_board.html | One book's images through an image pass, and your requests and picks |
 | `/book-review/<id>` | book_review_board.html | One book's review recommendations: pick, read the diffs, approve |
+| `/quotations/<id>` | quotations_board.html | One book's Bible quotations against the NBLA: a recommendation per card, set each to apply / not yet / reject, read the diffs in context, edit the sentence in the book or ask for other wording, filter by decision, approve |
 
 ## API surface
 

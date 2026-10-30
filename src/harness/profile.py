@@ -82,6 +82,11 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
     "decisions_scan": (".harness", "decisions", "scan.usage.jsonl"),
     "decisions_consolidate": (".harness", "decisions", "consolidate.usage.jsonl"),
     "book_review": (".harness", "book_review", "usage.jsonl"),
+    # The quotation pass keeps one directory and a log per wave: a scan job is a
+    # chapter of aligned rows, a map job adds the verses and asks for verbatim
+    # spans back, and a baseline averaged over both would describe neither.
+    "quotations_scan": (".harness", "quotations", "scan.usage.jsonl"),
+    "quotations_map": (".harness", "quotations", "map.usage.jsonl"),
 }
 
 # How the resolved effort actually reaches the model.

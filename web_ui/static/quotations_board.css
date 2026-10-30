@@ -1,0 +1,332 @@
+/* Quotation board (/quotations/<id>). Sits on reader.css for the chrome and
+   theme variables and on book_review_board.css for the shared page pieces
+   (.br-page, .br-warn, .br-muted, the diff colours); the cards are here. */
+
+.qb-page {
+    padding-bottom: 96px;
+}
+
+/* Filter chips: one line per axis, each chip a checkbox with its count. */
+.qb-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 16px;
+}
+
+.qb-axis {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+}
+
+.qb-axis-label {
+    font-size: 13px;
+    color: var(--text-muted);
+    min-width: 96px;
+}
+
+.qb-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.qb-chip input {
+    margin: 0;
+}
+
+.qb-chip-count {
+    color: var(--text-muted);
+}
+
+.qb-reason {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin: 0 0 6px;
+    overflow-wrap: anywhere;
+}
+
+.qb-badge.qb-rec-approve {
+    color: var(--br-add-fg);
+    border-color: var(--br-add-fg);
+}
+
+.qb-badge.qb-rec-unsure {
+    color: var(--br-warn);
+    border-color: var(--br-warn);
+}
+
+.qb-badge.qb-badge-asked {
+    color: var(--br-picked);
+    border-color: var(--br-picked);
+}
+
+/* The state: what the final approve does with this card. */
+.qb-state {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.qb-state .qb-label {
+    margin-right: 2px;
+}
+
+.qb-state-btn {
+    font: inherit;
+    font-size: 13px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 12px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.qb-state-btn[aria-pressed="true"] {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+}
+
+.qb-state-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.qb-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 16px;
+    margin-top: 8px;
+}
+
+.qb-tools .qb-check {
+    margin: 0;
+}
+
+.qb-edit-link {
+    font-size: 14px;
+    color: var(--br-picked);
+}
+
+.qb-phase-pending {
+    border-left: 3px solid var(--br-warn);
+}
+
+.qb-phase-reject {
+    opacity: 0.8;
+}
+
+.qb-chapter-title {
+    font-size: 15px;
+    color: var(--text-muted);
+    margin: 24px 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.qb-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin: 0 0 12px;
+    background: var(--bg);
+    min-width: 0;
+}
+
+.qb-card.qb-applied {
+    opacity: 0.7;
+}
+
+.qb-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.qb-kind {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+.qb-ref {
+    font-weight: 600;
+}
+
+.qb-badge {
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 1px 8px;
+    color: var(--text-muted);
+}
+
+.qb-badge-low {
+    color: var(--br-warn);
+    border-color: var(--br-warn);
+}
+
+.qb-badge-done {
+    color: var(--br-add-fg);
+    border-color: var(--br-add-fg);
+}
+
+.qb-status-proposed .qb-badge:first-of-type {
+    color: var(--br-picked);
+    border-color: var(--br-picked);
+}
+
+.qb-en {
+    font-size: 14px;
+    margin: 0 0 8px;
+    overflow-wrap: anywhere;
+}
+
+.qb-label {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.qb-small {
+    font-size: 13px;
+    margin: 6px 0;
+}
+
+.qb-check {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 8px 0 4px;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+.qb-check input {
+    margin-top: 3px;
+    flex: none;
+}
+
+.qb-diff {
+    margin: 4px 0 8px 24px;
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+.qb-diff-row {
+    display: flex;
+    gap: 8px;
+}
+
+.qb-diff-label {
+    flex: none;
+    width: 64px;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding-top: 3px;
+}
+
+.qb-diff-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    /* The context can span a paragraph break; keep it visible. */
+    white-space: pre-line;
+}
+
+.qb-diff-row + .qb-diff-row {
+    margin-top: 4px;
+}
+
+.qb-del {
+    background: var(--br-del-bg);
+    color: var(--br-del-fg);
+}
+
+.qb-ins {
+    background: var(--br-add-bg);
+    color: var(--br-add-fg);
+    text-decoration: none;
+}
+
+.qb-echo {
+    border-left: 3px solid var(--border);
+    padding-left: 10px;
+    margin: 8px 0 0;
+}
+
+.qb-echo-title {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+.qb-paste {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.qb-current {
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+.qb-paste textarea {
+    font: inherit;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.qb-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    padding: 10px 16px;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    font-size: 14px;
+}
+
+.qb-bar-gate {
+    color: var(--text-muted);
+    flex: 1 1 200px;
+}
+
+.qb-btn {
+    font: inherit;
+    border-radius: 6px;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+}
+
+.qb-btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.qb-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}

@@ -195,3 +195,71 @@ def test_authorship_measures_drafts_and_saves(tmp_path):
     assert record["changed_words"] == 1 and record["changed_fraction"] == 0.1
     assert record["reader_saves_typed"] == 2 and record["reader_saves_from_finding"] == 1
     assert record["model_fixes"] == 1
+
+
+# ── the quotation pass's record ────────────────────────────────────────────────
+
+_NOTICE_DEFAULTS = {
+    "translator": "Ana Perez", "publisher": "Libros",
+    "edition_notice": {"heading": "Créditos", "lines": [
+        "Título original: {source_title}", "{scripture_notice}", "{publisher}"]},
+    "_source": "test",
+}
+
+
+def _record(project: Path, **over) -> None:
+    doc = {
+        "version": "nbla", "version_name": "Nueva Biblia de las Américas",
+        "notice": "Escrituras tomadas de la NBLA.", "verses_unique": 12,
+        "verse_occurrences": 14, "quoted_words": 300, "book_words": 20000, "share": 0.015,
+        "limits": {"verses": 500, "share": 0.25, "whole_book": False},
+        "within_limits": True, "whole_book_quoted": False, "adapted": 1,
+        "rows": [{"key": "chapter_01|43 3:16|abc"}],
+    }
+    doc.update(over)
+    (project / "quotations.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_gather_reads_quotations_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_NOTICE_DEFAULTS))
+    project = _project(tmp_path)
+    _record(project)
+    facts = kdp_facts.gather(project, today=TODAY, fetch=False)
+    q = facts["quotations"]
+    assert (q["version"], q["verses_unique"], q["verse_occurrences"], q["within_limits"]) == ("nbla", 12, 14, True)
+    assert q["quotations"] == 1
+    assert "quoted_text_over_limit" not in {f["code"] for f in facts["rights_flags"]}
+    assert facts["edition"]["notice_draft"]["body"].split("\n\n") == [
+        "Título original: Bambi", "Escrituras tomadas de la NBLA.", "Libros"]
+    assert "quotations" not in {n["field"] for n in facts["needs_input"]}
+
+
+def test_gather_flags_quotations_over_the_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_NOTICE_DEFAULTS))
+    project = _project(tmp_path)
+    _record(project, verses_unique=480, verse_occurrences=520, within_limits=False)
+    facts = kdp_facts.gather(project, today=TODAY, fetch=False)
+    flag = next(f for f in facts["rights_flags"] if f["code"] == "quoted_text_over_limit")
+    assert "480 verses (520 with repeats) against 500" in flag["detail"]
+
+
+def test_gather_asks_when_bible_refs_have_no_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_NOTICE_DEFAULTS))
+    project = _project(tmp_path)
+    facts = kdp_facts.gather(project, today=TODAY, fetch=False)
+    assert facts["quotations"] is None
+    assert "quotations" not in {n["field"] for n in facts["needs_input"]}
+    # The notice line is dropped when there is nothing to credit.
+    assert facts["edition"]["notice_draft"]["body"].split("\n\n") == ["Título original: Bambi", "Libros"]
+
+    (project / "source.txt").write_text("He that cometh to God must believe.—Heb. 11:6\n", encoding="utf-8")
+    facts = kdp_facts.gather(project, today=TODAY, fetch=False)
+    assert "quotations" in {n["field"] for n in facts["needs_input"]}
+
+
+def test_record_with_no_rows_carries_no_notice(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_NOTICE_DEFAULTS))
+    project = _project(tmp_path)
+    _record(project, rows=[], verses_unique=0, verse_occurrences=0)
+    facts = kdp_facts.gather(project, today=TODAY, fetch=False)
+    assert "Escrituras" not in facts["edition"]["notice_draft"]["body"]

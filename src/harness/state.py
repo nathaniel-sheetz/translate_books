@@ -150,6 +150,16 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # Judgment over evidence rather than detection, so high, not the medium the
     # detection waves above use. Unmeasured; re-measure and move the row.
     "book_review": "high",
+    # The quotation pass's detection wave: one aligned chapter read for Bible
+    # quotations, allusions and references. Detection, the same shape as
+    # footnote_scan, and named medium for the same reason. Unmeasured; re-measure
+    # and move the row.
+    "quotations_scan": "medium",
+    # The quotation pass's mapping wave: per chapter, which words of each verse
+    # the author quotes and which nearby prose echoes it, with every string
+    # copied verbatim. Close reading against two languages rather than
+    # detection, so high. Unmeasured; re-measure and move the row.
+    "quotations_map": "high",
 }
 
 

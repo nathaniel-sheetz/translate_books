@@ -2208,6 +2208,9 @@
                 anchor_idx: String(activeIdx),
                 anchor: anchor,
             });
+            // Opened from the quotation board: the editor returns there after a save.
+            const returnTo = new URLSearchParams(window.location.search).get('return_to');
+            if (returnTo) params.set('return_to', returnTo);
             window.location.href =
                 `/read/${projectId}/${chapter}/chunk/${a.chunk_id}/edit?` + params.toString();
         });

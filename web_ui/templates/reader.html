@@ -384,6 +384,16 @@
                         </svg>
                         <span>{{ t.bookreview_link }}</span>
                     </a>
+                    {#- The book's Bible quotations against the NBLA, from the
+                        quotation pass: tick, read the diffs, approve. -#}
+                    <a class="card-menu-item" href="/quotations/{{ project_id }}">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.76-2-2-2H4c-1.25 0-2 .75-2 1.97V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .01-1 1.03V20c0 1 0 1 1 1z"/>
+                            <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.76-2-2-2h-4c-1.25 0-2 .75-2 1.97V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+                        </svg>
+                        <span>{{ t.quotations_link }}</span>
+                    </a>
                     <a class="card-menu-item" href="/project/{{ project_id }}">
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -602,7 +612,11 @@
 >
     <!-- Top bar -->
     <div class="reader-topbar">
+        {%- if return_to %}
+        <a href="{{ return_to }}" class="back-link" title="{{ t.quotations_link }}" aria-label="{{ t.quotations_link }}">&larr;</a>
+        {%- else %}
         <a href="/read/{{ project_id }}?from={{ chapter | urlencode }}" class="back-link">&larr;</a>
+        {%- endif %}
         <div class="reader-nav">
             {% if prev_chapter %}
             <a href="/read/{{ project_id }}/{{ prev_chapter }}" class="nav-chevron">&lsaquo;</a>
@@ -1058,7 +1072,7 @@
 <script>window.REVIEW_TYPES = {{ review_types | tojson }};
 window.REVIEW_TYPES_SELECTED = {{ review_types_selected | tojson }};
 window.REVIEW_FORCED_TYPES = {{ review_forced_types | default([]) | tojson }};</script>
-<script src="{{ url_for('static', filename='reader.js') }}?v=40"></script>
+<script src="{{ url_for('static', filename='reader.js') }}?v=41"></script>
 <script src="{{ url_for('static', filename='concordance.js') }}?v=2"></script>
 {% if reader_ui_version == "v2" %}
 <script src="{{ url_for('static', filename='reader_sheet_v2.js') }}?v=16"></script>

@@ -23,6 +23,7 @@
       "Publicado originalmente en {original_year}.",
       "Traducción al español: {translator}.",
       "{edition_additions}",
+      "{scripture_notice}",
       "Traducción © {year} {translator}. La obra original es de dominio público.",
       "{publisher}"
     ]

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.83.0.0] - 2026-10-28
+
+### Added
+- **quotation-pass puts the NBLA into a finished translation's Bible quotations** (`src/quotations/`, `scripts/quotation_pass.py`, skill `quotation-pass`). It is an optional post-translation pass for books that quote Scripture, and it replaces the ad-hoc short-sermons run (a hand-built quotation table, direct chunk edits and a follow-up audit).
+  - `index --epub` reads your own NBLA EPUB into `prompts/bible/nbla.json`: gitignored, no tracked twin, and refused if missing or if its EPUB has changed. Poetry line starts are kept as markers. The EPUB's small caps (all-caps Old Testament quotations, `red-sm` in the words of Jesus) come out in their real sentence case, and the `dijo*` asterisks are dropped.
+  - Detection runs one headless wave per aligned chapter (`scan-*`, worker `quotation-scan-worker`) over the English and the Spanish together. English the alignment left out is put back as `[-] EN-only` rows. Every reference written in the English gets a card, by the wave or by code. On short-sermons, scored against the hand-made 222-row table (`scripts/quotation_gold.py`), it found 94 of 94 written references and 193 of 193 quotations and epigraphs, in 81 s.
+  - `resolve` looks the verses up and works out each reference fix: the standard Spanish abbreviation only (`Jn 10:5`), with the Spanish's own numbers and the book's range dash.
+  - A second wave (`map-*`, worker `quotation-map-worker`) picks the NBLA words the author quotes, the Spanish they replace, nearby prose that should echo the verse, and adaptations and meaning drift. Code checks every string verbatim and builds the Spanish itself. It keeps SEÑOR/DIOS and the reverential capitals, lowers line-initial capitals only in inline quotations, keeps names, follows the book's own line capitals in set-off blocks, keeps the book's « » and `_…_` marks, and settles end punctuation and ¿/¡.
+  - A board at `/quotations/<id>` shows every card with two controls, **Fix the reference** and **Use the NBLA wording**. Echo edits get their own ticks and not-Scripture cards get a paste box. Each change is shown in place, with the sentence before and after it (cut at 500 characters each side), and diffs are computed on in-memory copies of the current chunks. Approval is on the page, and the book page's ⋮ menu links to the board as **Bible quotations**.
+  - Each card's **Edit in book** link opens the reader at its sentence and carries the way back. The reader's ← arrow, the browser's Back and a save in the chunk editor all return to that card. A typed **ask** holds a card until `revise` rebuilds it, and **Fixed by hand** records a card edited in the book without writing anything.
+  - `apply` writes an approved board through the judge-apply path (snapshot, apply, archive with `source: "quotation-pass"`, recombine, realign, annotation re-anchor). It never touches `corrections.jsonl`, and it is resumable. Decisions go to `.harness/quotations/decisions.jsonl`. `verify` checks that every applied quotation is still in its chunk.
+- **`projects/<slug>/quotations.json` records exactly what the book quotes**: verses counted once and with repeats, quoted words, share of the book, the NBLA's limits (500 verses, 25%, no whole book) and `within_limits`, with one accounting row per accepted card. Every card with NBLA wording counts, edited or not; adapted ones are labelled.
+- **kdp-publish reads it.** `facts.quotations` carries the numbers, `rights_flags` gains `quoted_text_over_limit`, and a book whose English cites verses but has no record gets a `needs_input` item. The edition-notice template has a `{scripture_notice}` line, which is dropped when there is nothing to credit.
+- Two wave types with their own effort rows and usage logs: `quotations_scan` (medium) and `quotations_map` (high).
+
 ## [0.82.1.0] - 2026-10-28
 
 ### Changed

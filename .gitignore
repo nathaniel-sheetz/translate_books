@@ -134,3 +134,7 @@ CLAUDE.md
 !.claude/skills/
 !.claude/agents/
 .gstack/
+
+# Per-user Bible indexes built by scripts/quotation_pass.py index (never tracked:
+# the Bible text is the user's licensed copy, and there is no .example twin)
+prompts/bible/

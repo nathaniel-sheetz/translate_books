@@ -1584,6 +1584,16 @@ def reader_chapters(project_id):
     )
 
 
+def _board_return_to(project_id: str, value: str) -> str:
+    """``value`` when it is this book's quotation board (the only page the reader
+    and the chunk editor send the user back to), else ``""``."""
+    board = f"/quotations/{project_id}"
+    if (value.startswith(board) and value[len(board):len(board) + 1] in ("", "#", "?")
+            and "//" not in value and "\\" not in value and "\n" not in value):
+        return value
+    return ""
+
+
 @app.route("/read/<project_id>/<chapter>")
 def reader_view(project_id, chapter):
     """Render the reader view for a chapter."""
@@ -1644,6 +1654,8 @@ def reader_view(project_id, chapter):
         review_types=list(REVIEW_TYPES),
         review_types_selected=_get_review_types(),
         review_forced_types=review_forced,
+        # Opened from the quotation board: the top bar's arrow goes back there.
+        return_to=_board_return_to(project_id, request.args.get("return_to", "")),
     ))
     if ui_override is not None:
         resp.set_cookie(
@@ -2785,6 +2797,77 @@ def book_review_approve(project_id):
         if done["status"] != "ok":
             return jsonify({"error": "; ".join(done["problems"]), "problems": done["problems"]}), 400
     return jsonify(review_board.build(project_dir))
+
+
+# ---------------------------------------------------------------------------
+# Quotation board (/quotations/<id>): every Bible quotation the quotation pass
+# found, with its proposed NBLA wording, reference fix and echo edits. The
+# state, the live diff (on in-memory chunk copies) and the one file the page
+# writes (board.json) belong to src.quotations.board; nothing here edits the
+# book. Applying an approved board stays with `quotation_pass.py apply`.
+# ---------------------------------------------------------------------------
+
+@app.route("/quotations/<project_id>")
+def quotations_page(project_id):
+    """One book's Bible quotations: tick the changes, read the diffs, approve."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    if not _resolve_project_dir(project_id).exists():
+        return "Project not found", 404
+    return render_template(
+        "quotations_board.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        project_id=project_id,
+        project_title=_project_title(project_id),
+    )
+
+
+@app.route("/api/project/<project_id>/quotations", methods=["GET"])
+def quotations_state(project_id):
+    from src.quotations import board as quotation_board
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    return jsonify(quotation_board.build(project_dir))
+
+
+@app.route("/api/project/<project_id>/quotations/choices", methods=["POST"])
+def quotations_choices(project_id):
+    """Save the choices for the cards named (``{choices: {key: choice}}``); reply with the rebuilt state."""
+    from src.quotations import board as quotation_board
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("choices"), dict):
+        return jsonify({"error": "Missing required fields"}), 400
+    saved = quotation_board.save(project_dir, data["choices"])
+    if saved["status"] != "ok":
+        return jsonify({"error": "; ".join(saved["problems"]), "problems": saved["problems"]}), 400
+    return jsonify(quotation_board.build(project_dir))
+
+
+@app.route("/api/project/<project_id>/quotations/approve", methods=["POST"])
+def quotations_approve(project_id):
+    """Approve the board as it stands, or withdraw it (``{withdraw: true}``)."""
+    from src.quotations import board as quotation_board
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Missing required fields"}), 400
+    if data.get("withdraw"):
+        quotation_board.unapprove(project_dir)
+    else:
+        done = quotation_board.approve(project_dir)
+        if done["status"] != "ok":
+            return jsonify({"error": "; ".join(done["problems"]), "problems": done["problems"]}), 400
+    return jsonify(quotation_board.build(project_dir))
 
 
 _FROM_FINDING_TEXT_KEYS = ("eval_name", "chunk_id", "issue_key", "category", "suggestion")
@@ -9334,6 +9417,10 @@ def chunk_editor_view(project_id, chapter, chunk_id):
 
     anchor_idx = request.args.get("anchor_idx", "")
     anchor_text = request.args.get("anchor", "")
+    # The quotation board opens the editor at a card's sentence and wants the
+    # user back on that card afterwards. Only that page, of this book, is a
+    # place to return to: anything else falls back to the reader.
+    return_to = _board_return_to(project_id, request.args.get("return_to", ""))
     pending = _chapter_has_pending_corrections(project_dir, chapter)
 
     try:
@@ -9355,6 +9442,7 @@ def chunk_editor_view(project_id, chapter, chunk_id):
         mtime=mtime,
         anchor_idx=anchor_idx,
         anchor_text=anchor_text,
+        return_to=return_to,
         pending_corrections=pending,
         t=t,
         lang=_get_ui_lang(),
