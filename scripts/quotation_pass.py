@@ -25,6 +25,7 @@ to ``projects/<slug>/.harness/quotations/last_output.json`` when a project is na
     apply          apply the approved board through the judge path     (no spend)
     verify         check every applied quotation is still in the text  (no spend)
     record         rewrite quotations.json from the ledger             (no spend)
+    footnotes      a reference endnote on every marked quotation       (no spend)
 
     python -X utf8 scripts/quotation_pass.py index --epub "C:/path/NBLA.epub" --version nbla
     python -X utf8 scripts/quotation_pass.py scan-prepare --project short-sermons-to-little-children
@@ -52,6 +53,7 @@ from src.harness import state as hstate  # noqa: E402
 from src.quotations import quotations_dir  # noqa: E402
 from src.quotations import apply as qapply  # noqa: E402
 from src.quotations import board as qboard  # noqa: E402
+from src.quotations import footnotes as qfootnotes  # noqa: E402
 from src.quotations import judge as qjudge  # noqa: E402
 from src.quotations import map as qmap  # noqa: E402
 from src.quotations import record as qrecord  # noqa: E402
@@ -383,6 +385,14 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+def _cmd_footnotes(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = qfootnotes.write(project_dir, dry_run=args.dry_run)
+    url = f"{args.base_url.rstrip('/')}/quotations/{project_dir.name}/footnotes"
+    _emit(project_dir, {**out, "url": url, "counts": qfootnotes.build(project_dir)["counts"]})
+    return 0 if out.get("status") == "ok" else 1
+
+
 def _cmd_record(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     doc = qrecord.write_record(project_dir)
@@ -417,6 +427,7 @@ _DISPATCH = {
     "apply": _cmd_apply,
     "verify": _cmd_verify,
     "record": _cmd_record,
+    "footnotes": _cmd_footnotes,
 }
 
 
@@ -542,6 +553,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_record = sub.add_parser("record", help="rewrite quotations.json from the ledger")
     p_record.add_argument("--project", required=True, help="project id or path")
+
+    p_notes = sub.add_parser("footnotes", help="write the reference endnotes approved on the footnotes page")
+    p_notes.add_argument("--project", required=True, help="project id or path")
+    p_notes.add_argument("--dry-run", action="store_true", help="say what would be written; write nothing")
+    p_notes.add_argument("--base-url", default="http://localhost:5000", help="where the reader runs")
     return parser
 
 

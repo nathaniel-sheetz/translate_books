@@ -445,6 +445,40 @@ STRINGS = {
 
         # Quotation board (/quotations/<id>). As with bookreview_*, the script's
         # words travel in quotations_js and every key needs its Spanish twin.
+        "quotation_footnotes_title": "Reference footnotes",
+        "quotation_footnotes_link": "Reference footnotes",
+        "quotation_footnotes_subtitle": "One endnote per quotation inside « », holding its "
+                                        "reference, with the marker after the closing » and "
+                                        "any punctuation after it. Untick the ones you don't "
+                                        "want; nothing is written until you approve and the "
+                                        "agent writes them.",
+        "quotation_footnotes_js": {
+            "empty": "No quotations inside « » yet. Run the quotation pass first.",
+            "meta": "{items} quotations inside « », {ticked} ticked. Writing adds {to_add} "
+                    "note(s) and retires {to_retire}.",
+            "filter_label": "Show",
+            "filters": {"ticked": "Ticked", "unticked": "Unticked", "unplaced": "No place",
+                        "ref_written": "Reference already written", "repeat": "Repeat in chapter",
+                        "replaces": "Replaces a note"},
+            "tick": "Add the note",
+            "unplaced": "No place for the note: {reason}",
+            "ref_written": "The author already wrote the reference here.",
+            "repeat": "This verse already has a note earlier in the chapter.",
+            "replaces": "Replaces your note: {content}",
+            "written": "Already in the book",
+            "not_nbla": "The words in the book here are not the NBLA's.",
+            "by_tail": "Found by the quotation's last words: it was edited since. Check the marker's place.",
+            "none_shown": "Nothing matches these filters.",
+            "bar": "{ticked} ticked · adds {to_add} · retires {to_retire}",
+            "approve": "Approve",
+            "withdraw": "Withdraw approval",
+            "approved": "Approved {date}. Tell the agent to write them.",
+            "approved_stale": "Changed since approval: approve again.",
+            "saving": "Saving…",
+            "saved": "Saved",
+            "save_failed": "Not saved: {error}",
+            "back": "Back to the quotations",
+        },
         "quotations_title": "Bible quotations",
         "quotations_link": "Bible quotations",
         "quotations_subtitle": "Every Bible quotation the pass found, with the NBLA "
@@ -1334,6 +1368,41 @@ STRINGS = {
             "save_failed": "No se guardó: {error}",
             "no_action_title": "Patrones que no requieren nada ({count})",
             "rejected_title": "Propuestas que no pasaron la validación ({count})",
+        },
+
+        "quotation_footnotes_title": "Notas de referencia",
+        "quotation_footnotes_link": "Notas de referencia",
+        "quotation_footnotes_subtitle": "Una nota final por cada cita entre « », con su "
+                                        "referencia, y la llamada después del » de cierre y "
+                                        "de la puntuación que lo siga. Desmarque las que no "
+                                        "quiera; no se escribe nada hasta que apruebe y el "
+                                        "agente las escriba.",
+        "quotation_footnotes_js": {
+            "empty": "Todavía no hay citas entre « ». Primero ejecute el pase de citas.",
+            "meta": "{items} citas entre « », {ticked} marcadas. Al escribir se añaden {to_add} "
+                    "nota(s) y se retiran {to_retire}.",
+            "filter_label": "Mostrar",
+            "filters": {"ticked": "Marcadas", "unticked": "Sin marcar", "unplaced": "Sin lugar",
+                        "ref_written": "Referencia ya escrita", "repeat": "Repetida en el capítulo",
+                        "replaces": "Reemplaza una nota"},
+            "tick": "Añadir la nota",
+            "unplaced": "No hay lugar para la nota: {reason}",
+            "ref_written": "El autor ya escribió aquí la referencia.",
+            "repeat": "Este versículo ya tiene una nota antes en el capítulo.",
+            "replaces": "Reemplaza su nota: {content}",
+            "written": "Ya está en el libro",
+            "not_nbla": "Las palabras del libro aquí no son las de la NBLA.",
+            "by_tail": "Encontrada por sus últimas palabras: se editó después. Revise dónde queda la llamada.",
+            "none_shown": "Nada coincide con estos filtros.",
+            "bar": "{ticked} marcadas · añade {to_add} · retira {to_retire}",
+            "approve": "Aprobar",
+            "withdraw": "Retirar la aprobación",
+            "approved": "Aprobado {date}. Pida al agente que las escriba.",
+            "approved_stale": "Cambió desde la aprobación: vuelva a aprobar.",
+            "saving": "Guardando…",
+            "saved": "Guardado",
+            "save_failed": "No se guardó: {error}",
+            "back": "Volver a las citas",
         },
 
         # Citas bíblicas (/quotations/<id>)

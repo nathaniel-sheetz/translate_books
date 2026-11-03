@@ -248,6 +248,38 @@ included and labelled. Relay those numbers; kdp-publish reads the file.
 `verify` checks that every applied quotation is still in its chunk. Run it again
 before publishing if the book was edited after the pass.
 
+## 6. Reference footnotes (last)
+
+An optional endnote on every quotation inside « », holding only its reference in the
+book's abbreviations (`Sal 116:11`, `2 R 4:8-37`). The marker goes after the closing
+», past any stacked closing marks and the punctuation that follows, and stops at a
+space or a raya. Quotations woven into the prose without « », allusions and replaced
+cards get none. No wave, no spend; nothing touches the chunk text.
+
+```bash
+python -X utf8 scripts/quotation_pass.py footnotes --project <slug> --dry-run
+```
+
+Give the user the `url` (`/quotations/<slug>/footnotes`, also linked from the board).
+Every note is ticked except where the author already wrote the reference beside the
+quotation; a verse quoted again in the chapter is ticked and flagged as a repeat. A
+quotation whose words are no longer in the text (edited by hand since) shows as having
+no place. When the user says it is approved:
+
+```bash
+python -X utf8 scripts/quotation_pass.py footnotes --project <slug>
+python -X utf8 scripts/footnote_pass.py verify --project <slug>
+```
+
+- The notes carry `origin: "quotation_refs"`. A re-run adds and retires only those.
+- **Other notes are never touched**, except one the page says a ticked note
+  replaces: a note whose marker lands on exactly the same spot, or one in the same
+  chapter holding nothing but the same verse's reference.
+- `footnotes` refuses unless the page approved exactly what it would write.
+- **Run it after the last quotation edit.** A note is pinned to an `es_idx`; after
+  a later realign, run `footnote_pass.py verify`. The notes join the book's one
+  endnote numbering at the next `harness.py epub`.
+
 ## Handoff
 
 Relay: cards by status, edits applied, chapters realigned, the record's

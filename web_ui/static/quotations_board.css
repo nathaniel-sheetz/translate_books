@@ -357,3 +357,20 @@
     opacity: 0.5;
     cursor: default;
 }
+
+/* Reference footnotes page: where each marker lands. */
+.qf-preview {
+    margin: 6px 0;
+    line-height: 1.6;
+}
+
+.qf-marker {
+    color: var(--accent);
+    font-weight: 600;
+    margin: 0 1px;
+}
+
+.qf-off .qf-preview,
+.qf-off .qb-ref {
+    opacity: 0.55;
+}

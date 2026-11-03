@@ -2870,6 +2870,72 @@ def quotations_approve(project_id):
     return jsonify(quotation_board.build(project_dir))
 
 
+# Reference footnotes (/quotations/<id>/footnotes): one endnote per marked
+# quotation, holding its reference. The page ticks and approves; the notes are
+# written by `quotation_pass.py footnotes`, never from here.
+
+@app.route("/quotations/<project_id>/footnotes")
+def quotation_footnotes_page(project_id):
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    if not _resolve_project_dir(project_id).exists():
+        return "Project not found", 404
+    return render_template(
+        "quotation_footnotes.html",
+        t=_reader_strings(),
+        lang=_get_ui_lang(),
+        project_id=project_id,
+        project_title=_project_title(project_id),
+    )
+
+
+@app.route("/api/project/<project_id>/quotations/footnotes", methods=["GET"])
+def quotation_footnotes_state(project_id):
+    from src.quotations import footnotes as quotation_footnotes
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    return jsonify(quotation_footnotes.build(project_dir))
+
+
+@app.route("/api/project/<project_id>/quotations/footnotes/choices", methods=["POST"])
+def quotation_footnotes_choices(project_id):
+    """Save ticks (``{choices: {key: bool}}``); reply with the rebuilt state."""
+    from src.quotations import footnotes as quotation_footnotes
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("choices"), dict):
+        return jsonify({"error": "Missing required fields"}), 400
+    saved = quotation_footnotes.save_choices(project_dir, data["choices"])
+    if saved["status"] != "ok":
+        return jsonify({"error": "; ".join(saved["problems"]), "problems": saved["problems"]}), 400
+    return jsonify(quotation_footnotes.build(project_dir))
+
+
+@app.route("/api/project/<project_id>/quotations/footnotes/approve", methods=["POST"])
+def quotation_footnotes_approve(project_id):
+    """Approve what the page would write, or withdraw it (``{withdraw: true}``)."""
+    from src.quotations import footnotes as quotation_footnotes
+
+    project_dir, error = _book_review_dir(project_id)
+    if error:
+        return error
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Missing required fields"}), 400
+    if data.get("withdraw"):
+        quotation_footnotes.unapprove(project_dir)
+    else:
+        done = quotation_footnotes.approve(project_dir)
+        if done["status"] != "ok":
+            return jsonify({"error": "; ".join(done["problems"]), "problems": done["problems"]}), 400
+    return jsonify(quotation_footnotes.build(project_dir))
+
+
 _FROM_FINDING_TEXT_KEYS = ("eval_name", "chunk_id", "issue_key", "category", "suggestion")
 _FROM_FINDING_MODES = frozenset({"apply", "edit"})
 _FROM_FINDING_MAX_CHARS = 2000

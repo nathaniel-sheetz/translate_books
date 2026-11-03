@@ -350,13 +350,15 @@ def _live_contents(project_dir: Path) -> dict[tuple[str, Optional[int], str], Op
     }
 
 
-def build_record(project_dir: Path, proposal: Proposal) -> dict:
+def build_record(project_dir: Path, proposal: Proposal, origin: str = ORIGIN) -> dict:
     """The ``annotations.jsonl`` record for a validated proposal.
 
     Mirrors the wire shape ``web_ui/app.py:save_annotation`` writes — the reader
     has to be able to open, edit and delete this note like any other — plus
     ``origin`` for provenance. ``origin`` is inert downstream: only
-    ``"gutenberg"`` is special-cased (``src/annotations/targets.py``).
+    ``"gutenberg"`` is special-cased (``src/annotations/targets.py``). Another
+    writer (the quotation pass's reference notes) passes its own, so it can tell
+    its notes from the reader's.
     """
     return {
         "project_id": Path(project_dir).name,
@@ -366,7 +368,7 @@ def build_record(project_dir: Path, proposal: Proposal) -> dict:
         "type": FOOTNOTE_TYPE,
         "content": proposal.content,
         "es_text": proposal.es_text,
-        "origin": ORIGIN,
+        "origin": origin,
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -378,6 +380,7 @@ def add(
     dry_run: bool = False,
     report: bool = True,
     decided: bool = False,
+    origin: str = ORIGIN,
 ) -> dict[str, Any]:
     """Validate and append footnote records, and record the decisions.
 
@@ -496,7 +499,7 @@ def add(
             planned.append(row)
             continue
 
-        record = build_record(project_dir, proposal)
+        record = build_record(project_dir, proposal, origin)
         store.append_record(project_dir, record)
         # Keep the in-run dedupe honest: two identical entries in one --json-file
         # must not both land.

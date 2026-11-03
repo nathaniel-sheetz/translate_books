@@ -148,3 +148,20 @@ def test_the_toss_up_tick_round_trips_and_has_its_label(client, book):
     assert choice["state"] == "reject" and choice["toss_up"] is True
     assert client.get("/api/project/qbook/quotations").get_json()["chapters"][0]["cards"][0]["choice"]["toss_up"] is True
     assert "toss_up" in client.get("/quotations/qbook").get_data(as_text=True)
+
+
+def test_the_footnotes_page_and_its_api(client, book):
+    from web_ui.i18n import get_strings
+
+    html = client.get("/quotations/qbook/footnotes").get_data(as_text=True)
+    assert "quotation_footnotes.js" in html and 'id="qf-board"' in html
+    assert "/quotations/qbook/footnotes" in client.get("/quotations/qbook").get_data(as_text=True)
+    state = client.get("/api/project/qbook/quotations/footnotes").get_json()
+    assert state["status"] == "ok" and state["counts"]["items"] == 0
+    r = client.post("/api/project/qbook/quotations/footnotes/choices", json={"choices": {"x": True}})
+    assert r.status_code == 400 and "no such item" in r.get_json()["error"]
+    # Nothing to write is nothing to approve.
+    assert client.post("/api/project/qbook/quotations/footnotes/approve", json={}).status_code == 400
+    assert client.get("/quotations/nope/footnotes").status_code == 404
+    en, es = get_strings("en")["quotation_footnotes_js"], get_strings("es")["quotation_footnotes_js"]
+    assert set(en) == set(es) and set(en["filters"]) == set(es["filters"])
