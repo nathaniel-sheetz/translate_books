@@ -178,6 +178,9 @@ def resolve(project_dir: Path, *, index: Optional[BibleIndex] = None) -> dict[st
         counts[cand["status"]] += 1
         out.append(cand)
 
+    from src.quotations.reref import add_derived
+
+    out = add_derived(project_dir, out, index)
     resolved = {
         "project": project_dir.name,
         "resolved_at": datetime.now().isoformat(),

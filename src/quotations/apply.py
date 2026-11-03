@@ -21,6 +21,10 @@ evaluation; then per chapter :func:`~src.corrections_apply.recombine_chapter` �
   (and never undoes an applied one); a pending card gets nothing. A card the
   user fixed by hand gets an ``applied`` row with ``hand`` and no edits, applied
   card or not, so ``verify`` stops looking for the text an earlier apply wrote.
+- **A card for another verse** (:mod:`src.quotations.reref`) carries ``replaces``.
+  When it is applied, the applied card it replaces gets a ``superseded`` row in
+  the same write: the record stops counting it, ``verify`` stops checking it, and
+  nothing reopens it.
 
 Decisions go to ``.harness/quotations/decisions.jsonl``, append-only, one row per
 card per apply that decides it, keyed as the scan keyed it. A later row for a key supersedes an
@@ -41,6 +45,9 @@ from src.quotations import quotations_dir
 
 ACTION_APPLIED = "applied"
 ACTION_DECLINED = "declined"
+ACTION_SUPERSEDED = "superseded"
+#: A card with nothing left to decide: in the book, or replaced by one that is.
+FINISHED = (ACTION_APPLIED, ACTION_SUPERSEDED)
 
 
 # ── the ledger ────────────────────────────────────────────────────────────────
@@ -84,6 +91,11 @@ def latest_decisions(project_dir: Path) -> dict[str, dict[str, Any]]:
 def applied_cards(project_dir: Path) -> dict[str, dict[str, Any]]:
     """Card key -> its latest ledger row, for cards whose latest row is ``applied``."""
     return {k: r for k, r in latest_decisions(project_dir).items() if r.get("action") == ACTION_APPLIED}
+
+
+def finished_cards(project_dir: Path) -> dict[str, dict[str, Any]]:
+    """Card key -> its latest ledger row, for cards applied or superseded."""
+    return {k: r for k, r in latest_decisions(project_dir).items() if r.get("action") in FINISHED}
 
 
 # ── helpers shared with run_judges' apply ────────────────────────────────────
@@ -153,7 +165,34 @@ def _ledger_row(card: dict[str, Any], choice: dict[str, Any], edits: list[dict[s
         row["hand"] = True
     if recovered:
         row["recovered"] = True
+    if card.get("replaces"):
+        row["replaces"] = card["replaces"]
     return row
+
+
+def _applied_rows(card: dict[str, Any], row: dict[str, Any],
+                  latest: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """``row``, plus a ``superseded`` row for the applied card ``card`` replaces."""
+    rows = [row]
+    old_key = card.get("replaces")
+    old = latest.get(old_key) if old_key else None
+    if row.get("action") == ACTION_APPLIED and old and old.get("action") == ACTION_APPLIED:
+        rows.append({
+            "ts": row["ts"],
+            "key": old_key,
+            "chapter_id": old.get("chapter_id"),
+            "action": ACTION_SUPERSEDED,
+            "kind": old.get("kind"),
+            "ref": old.get("ref"),
+            "superseded_by": card["key"],
+            "superseded_ref": card.get("ref"),
+            "en_span": old.get("en_span"),
+            "verse_keys": [],
+            "nbla_words": 0,
+            # What the old card had put in, for the board's history only.
+            "edits": old.get("edits") or [],
+        })
+    return rows
 
 
 def _verse_words(project_dir: Path) -> dict[str, int]:
@@ -214,7 +253,7 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
         choice = choices[key]
         last = (latest.get(key) or {}).get("action")
         state = choice.get("state", qboard.STATE_APPROVE)
-        if state == qboard.STATE_PENDING:
+        if state == qboard.STATE_PENDING or last == ACTION_SUPERSEDED:
             continue
         if state == qboard.STATE_REJECT:
             # A rejection is recorded once, and cannot take back what is in the book.
@@ -227,8 +266,8 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
             if not (latest.get(key) or {}).get("hand"):
                 if verse_words is None:
                     verse_words = _verse_words(project_dir)
-                ledger.append(_ledger_row(card, choice, [], ACTION_APPLIED, applied_at,
-                                          hand_words=verse_words.get(key, 0)))
+                ledger.extend(_applied_rows(card, _ledger_row(
+                    card, choice, [], ACTION_APPLIED, applied_at, hand_words=verse_words.get(key, 0)), latest))
             continue
         if key in done:
             continue
@@ -236,13 +275,14 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
         if not edits:
             action = ACTION_APPLIED if choice.get("nbla") and card.get("quote_edits") else ACTION_DECLINED
             if action != last:
-                ledger.append(_ledger_row(card, choice, [], action, applied_at))
+                ledger.extend(_applied_rows(card, _ledger_row(card, choice, [], action, applied_at), latest))
             continue
         records = [qboard.locate_edit(book, card["chapter_id"], e) for e in edits]
         # The ledger keeps each edit's chunk, which is what `verify` reads.
         placed[key] = [{**e, "chunk_id": r["chunk_id"]} if r else e for e, r in zip(edits, records)]
         if all(r is None or _already_in(book, r) for r in records) and any(records):
-            ledger.append(_ledger_row(card, choice, placed[key], ACTION_APPLIED, applied_at, recovered=True))
+            ledger.extend(_applied_rows(card, _ledger_row(
+                card, choice, placed[key], ACTION_APPLIED, applied_at, recovered=True), latest))
             continue
         if any(r is None for r in records):
             skipped.append({"key": key, "reason": "an edit's text is no longer in the chapter"})
@@ -299,7 +339,8 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
         # A card is logged once every chunk it touches is saved.
         for key, needed in chunks_of.items():
             if key not in logged and needed <= finished:
-                ledger.append(_ledger_row(cards[key], choices[key], placed[key], ACTION_APPLIED, applied_at))
+                ledger.extend(_applied_rows(cards[key], _ledger_row(
+                    cards[key], choices[key], placed[key], ACTION_APPLIED, applied_at), latest))
                 logged.add(key)
         print(f"[apply] {chunk_id}: {len(landed)} edit(s) written + archived", file=sys.stderr)
         # Write the ledger as we go, so a kill leaves the record of what landed.

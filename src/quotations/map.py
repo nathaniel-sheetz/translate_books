@@ -26,7 +26,7 @@ every string and builds it with :mod:`src.quotations.conventions`:
 ``map-commit`` writes ``mapped.json``: one **card** per candidate the scan kept,
 whatever happened to it, which is what the board shows. A revision the user
 asked for (``revisions.json``) replaces the wave's mapping for its card, and a
-card already applied is carried over as it was.
+card already applied, or replaced by another verse's card, is carried over as it was.
 """
 
 from __future__ import annotations
@@ -405,7 +405,7 @@ def build_card(
         for k in (
             "key", "chapter_id", "kind", "ref", "ref_en", "ref_key", "en_span", "es_span",
             "es_idx", "adapted", "why", "confidence", "origin", "flags", "written_ref",
-            "ref_edit", "ref_ok", "verse_keys", "unresolved_reason",
+            "ref_edit", "ref_ok", "verse_keys", "unresolved_reason", "replaces",
         )
     }
     card["quote_edits"] = []
@@ -623,20 +623,23 @@ def map_commit(project_dir: Path) -> dict[str, Any]:
             if cid in by_id:
                 mappings[key] = by_id[cid]
 
-    from src.quotations.apply import applied_cards
+    from src.quotations.apply import finished_cards
 
     revisions = load_revisions(project_dir)
     # An applied card keeps the card it was applied from: its `old` text is gone
-    # from the chapter, so rebuilding it would only refuse it.
+    # from the chapter, so rebuilding it would only refuse it. So does a card
+    # another verse's card replaced.
     previous = {c["key"]: c for c in (_read_mapped(project_dir) or {}).get("cards") or []}
-    applied = applied_cards(project_dir)
+    finished = finished_cards(project_dir)
+    # A card waiting to be replaced claims nothing: its replacement edits the same words.
+    replaced = {c["replaces"] for c in resolved.get("candidates") or [] if c.get("replaces")}
 
     cards: list[dict[str, Any]] = []
     texts: dict[str, ChapterText] = {}
     claims: dict[str, _Claims] = {}
     for cand in resolved.get("candidates") or []:
         key = cand["key"]
-        if key in applied and key in previous:
+        if key in finished and key in previous:
             cards.append(previous[key])
             continue
         chapter_id = cand["chapter_id"]
@@ -646,7 +649,7 @@ def map_commit(project_dir: Path) -> dict[str, Any]:
         revision = revisions.get(key)
         card = build_card(
             cand, revision["mapping"] if revision else mappings.get(key), texts[chapter_id],
-            claims[chapter_id], index.proper,
+            _Claims() if key in replaced else claims[chapter_id], index.proper,
             fix_caps=not index.doc.get("smallcaps_resolved"), allow_new=revision is not None,
         )
         cards.append(mark_revised(card, revision) if revision else card)

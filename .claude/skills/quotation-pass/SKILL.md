@@ -163,6 +163,27 @@ Two ways to get wording other than the proposed diff:
   the card is back on the board at Not yet, with the new diff. Tell the user to
   review it. Revisions live in `revisions.json` and survive a `map-commit`.
 
+**Another verse.** When the user says a card names the wrong verse (the author
+quotes the KJV of one verse, and the NBLA says it better in another), the
+reference is part of the card's key, so it takes a new card. This works on an
+applied card too:
+
+```bash
+python -X utf8 scripts/quotation_pass.py reref --project <slug> --card "<key>" --ref "Jeremiah 12:3" --why "<the user's words>"
+```
+
+- The new card sits on the same sentence, with `replaces` set to the old key.
+  `in_book` is the text its mapping must replace. Write that mapping and run
+  `revise` on the **new** key, exactly as for an ask.
+- An unapplied old card is set to Reject. An applied one stays as it is until
+  the new card is applied. `apply` then marks the old card `superseded` in the
+  same write: the record drops its verse, `verify` stops checking it, and the
+  board shows "Replaced by …".
+- Asking again before the new card is applied swaps it for the newer verse.
+- A reference the author wrote in the text is not changed; fix it by hand.
+
+The requests live in `rerefs.json`, which `resolve` reads on every run.
+
 ## 5. Apply, verify, record
 
 When the user says the board is approved:

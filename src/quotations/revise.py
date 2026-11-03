@@ -102,7 +102,7 @@ def rebuild_card(project_dir: Path, key: str, mapping: dict[str, Any], revision:
     Every other unapplied card in the chapter claims its spans first, so the
     revision is refused where it would overlap one of them.
     """
-    from src.quotations.apply import applied_cards
+    from src.quotations.apply import finished_cards
     from src.quotations import board as qboard
 
     project_dir = Path(project_dir)
@@ -114,10 +114,12 @@ def rebuild_card(project_dir: Path, key: str, mapping: dict[str, Any], revision:
     index = qmap.load_index(resolved.get("version") or "nbla")
     text = qmap.ChapterText(project_dir, cand["chapter_id"])
     claims = qmap._Claims()
-    applied = applied_cards(project_dir)
+    finished = finished_cards(project_dir)
     for other in doc.get("cards") or []:
-        if other["key"] == key or other["key"] in applied or other["chapter_id"] != cand["chapter_id"]:
+        if other["key"] == key or other["key"] in finished or other["chapter_id"] != cand["chapter_id"]:
             continue
+        if other["key"] == cand.get("replaces"):
+            continue  # the card this one replaces: same words, and it will not be applied
         edits = list(other.get("quote_edits") or []) + list(other.get("echo") or [])
         if other.get("ref_edit"):
             edits.append(other["ref_edit"])
@@ -139,7 +141,7 @@ def revise(project_dir: Path, key: str, mapping: dict[str, Any], *, ask: str | N
     reaches the board.
     """
     from src.quotations import board as qboard
-    from src.quotations.apply import applied_cards
+    from src.quotations.apply import ACTION_SUPERSEDED, finished_cards
 
     project_dir = Path(project_dir)
     doc = qboard.load_mapped(project_dir)
@@ -148,10 +150,15 @@ def revise(project_dir: Path, key: str, mapping: dict[str, Any], *, ask: str | N
     position = next((i for i, c in enumerate(doc.get("cards") or []) if c["key"] == key), None)
     if position is None:
         return {"status": "error", "error": f"no such card: {key}"}
-    if key in applied_cards(project_dir):
+    finished = finished_cards(project_dir).get(key)
+    if finished and finished.get("action") == ACTION_SUPERSEDED:
+        return {"status": "error", "error": (
+            f"this card was replaced by {finished.get('superseded_by')}; revise that one"
+        )}
+    if finished:
         return {"status": "error", "error": (
             "this card is already applied; fix it in the book from the board's link "
-            "and tick 'fixed by hand'"
+            "and tick 'fixed by hand', or give it another verse with `reref`"
         )}
     if not isinstance(mapping, dict) or not (mapping.get("replace") or mapping.get("echo")):
         return {"status": "error", "error": "the mapping needs a `replace` or an `echo` list"}

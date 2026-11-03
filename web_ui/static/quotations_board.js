@@ -129,6 +129,7 @@
     function phaseOf(card) {
         var c = choiceOf(card);
         var h = card.history || {};
+        if (h.action === 'superseded') return 'applied';
         if (h.action === 'applied' && !(c.hand && !h.hand)) return 'applied';
         return c.state;
     }
@@ -253,8 +254,12 @@
                 fill(past.hand ? S.applied_hand : S.applied, { date: day(past.ts) })));
         } else if (past.action === 'declined') {
             head.appendChild(el('span', 'qb-badge', fill(S.declined, { date: day(past.ts) })));
+        } else if (past.action === 'superseded') {
+            head.appendChild(el('span', 'qb-badge qb-badge-done',
+                fill(S.superseded, { ref: past.superseded_ref || '', date: day(past.ts) })));
         }
         node.appendChild(head);
+        if (card.replaces_ref) node.appendChild(el('p', 'br-warn qb-small', fill(S.replaces, { ref: card.replaces_ref })));
 
         node.appendChild(el('p', 'qb-reason',
             fill((S.reasons || {})[verdict.rule] || verdict.rule, { detail: verdict.detail || '' })));

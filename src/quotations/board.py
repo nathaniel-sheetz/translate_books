@@ -532,9 +532,11 @@ def reader_url(book: Book, card: dict[str, Any], decision: Optional[dict[str, An
 
 def phase(card_view: dict[str, Any]) -> str:
     """Where a card stands: ``applied`` once it is in the book with nothing more to
-    record, else its state."""
+    record, or replaced by another verse's card that is, else its state."""
     choice = card_view["choice"]
     history = card_view.get("history") or {}
+    if history.get("action") == "superseded":
+        return "applied"
     if history.get("action") == "applied" and not (choice.get("hand") and not history.get("hand")):
         return "applied"
     return choice["state"]
@@ -550,13 +552,14 @@ def build(project_dir: Path) -> dict[str, Any]:
     decisions = _decisions(project_dir)
     choices = effective_choices(doc, board["choices"], decisions)
     cards = doc.get("cards") or []
-    done = {k: r for k, r in decisions.items() if r.get("action") == "applied"}
+    done = {k: r for k, r in decisions.items() if r.get("action") in ("applied", "superseded")}
     live = preview(project_dir, [c for c in cards if c["key"] not in done], choices)
+    refs = {c["key"]: c.get("ref") for c in cards}
 
     chapters: dict[str, list[dict[str, Any]]] = {}
     counts: dict[str, Any] = {
-        "cards": len(cards), "picked_edits": 0, "not_landing": 0, "applied": 0, "to_record": 0,
-        "by_status": {}, "by_phase": {}, "by_recommendation": {}, "by_kind": {}, "asked": 0,
+        "cards": len(cards), "picked_edits": 0, "not_landing": 0, "applied": 0, "superseded": 0,
+        "to_record": 0, "by_status": {}, "by_phase": {}, "by_recommendation": {}, "by_kind": {}, "asked": 0,
     }
     book = Book(project_dir)
     for card in cards:
@@ -565,8 +568,10 @@ def build(project_dir: Path) -> dict[str, Any]:
         decision = decisions.get(card["key"])
         view["recommendation"] = recommend(card)
         view["reader_url"] = reader_url(book, card, decision)
+        if card.get("replaces"):
+            view["replaces_ref"] = refs.get(card["replaces"]) or card["replaces"]
         if decision:
-            view["history"] = {k: decision.get(k) for k in ("action", "ts", "hand", "edits")}
+            view["history"] = {k: decision.get(k) for k in ("action", "ts", "hand", "edits", "superseded_ref")}
         if card["key"] not in done:
             # Each proposed change carries a few sentences of the chapter around
             # it, so the page can show it in place (`context`: {before, after}).
@@ -586,7 +591,7 @@ def build(project_dir: Path) -> dict[str, Any]:
         if applied:
             view["applied"] = applied
             view["edits"] = []
-            counts["applied"] += 1
+            counts["superseded" if applied["action"] == "superseded" else "applied"] += 1
         else:
             view["edits"] = [{k: v for k, v in e.items() if k != "record"} for e in live.get(card["key"], [])]
             if choice["state"] == STATE_APPROVE and not choice["hand"]:

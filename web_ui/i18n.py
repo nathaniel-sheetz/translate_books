@@ -494,6 +494,8 @@ STRINGS = {
             "revised_note": "You asked: {ask}",
             "declined": "Declined {date}",
             "applied_hand": "Fixed by hand {date}",
+            "superseded": "Replaced by {ref} {date}",
+            "replaces": "Another verse in place of {ref}",
             "was": "Was",
             "kinds": {
                 "quotation": "quotation", "epigraph": "epigraph", "allusion": "allusion",
@@ -1376,6 +1378,8 @@ STRINGS = {
             "revised_note": "Usted pidió: {ask}",
             "declined": "Rechazada {date}",
             "applied_hand": "Corregida a mano {date}",
+            "superseded": "Reemplazada por {ref} {date}",
+            "replaces": "Otro versículo en lugar de {ref}",
             "was": "Antes",
             "kinds": {
                 "quotation": "cita", "epigraph": "epígrafe", "allusion": "alusión",

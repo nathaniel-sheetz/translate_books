@@ -17,6 +17,7 @@ to ``projects/<slug>/.harness/quotations/last_output.json`` when a project is na
     board          the board's URL and what is picked / approved       (no spend)
     asks           the cards where the user asked for other wording    (no spend)
     revise         validate a revised mapping for one card, store it   (no spend)
+    reref          make the card for another verse on a card's sentence (no spend)
     apply          apply the approved board through the judge path     (no spend)
     verify         check every applied quotation is still in the text  (no spend)
     record         rewrite quotations.json from the ledger             (no spend)
@@ -50,6 +51,7 @@ from src.quotations import board as qboard  # noqa: E402
 from src.quotations import map as qmap  # noqa: E402
 from src.quotations import record as qrecord  # noqa: E402
 from src.quotations import resolve as qresolve  # noqa: E402
+from src.quotations import reref as qreref  # noqa: E402
 from src.quotations import revise as qrevise  # noqa: E402
 from src.quotations import scan as qscan  # noqa: E402
 from src.quotations.index import IndexError_, build_index, index_path, load_index, write_index  # noqa: E402
@@ -309,6 +311,13 @@ def _cmd_revise(args: argparse.Namespace) -> int:
     return 0 if out.get("status") == "ok" else 1
 
 
+def _cmd_reref(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = qreref.reref(project_dir, args.card, args.ref, why=args.why or "")
+    _emit(project_dir, out)
+    return 0 if out.get("status") == "ok" else 1
+
+
 def _cmd_apply(args: argparse.Namespace) -> int:
     project_dir = _resolve_project(args.project)
     out = qapply.apply(project_dir, no_realign=args.no_realign)
@@ -349,6 +358,7 @@ _DISPATCH = {
     "board": _cmd_board,
     "asks": _cmd_asks,
     "revise": _cmd_revise,
+    "reref": _cmd_reref,
     "apply": _cmd_apply,
     "verify": _cmd_verify,
     "record": _cmd_record,
@@ -429,6 +439,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_revise.add_argument("--card", required=True, help="the card key, as `asks` prints it")
     p_revise.add_argument("--file", required=True,
                           help="JSON: the mapping (replace/echo/drift/note), or {mapping, ask}")
+
+    p_reref = sub.add_parser("reref", help="make the card for another verse on a card's sentence")
+    p_reref.add_argument("--project", required=True, help="project id or path")
+    p_reref.add_argument("--card", required=True, help="the card naming the wrong verse")
+    p_reref.add_argument("--ref", required=True, help="the verse to use instead, in English ('Jeremiah 12:3')")
+    p_reref.add_argument("--why", default=None, help="why, in the user's words; kept in rerefs.json")
 
     p_apply = sub.add_parser("apply", help="apply the approved board (judge-apply path)")
     p_apply.add_argument("--project", required=True, help="project id or path")
