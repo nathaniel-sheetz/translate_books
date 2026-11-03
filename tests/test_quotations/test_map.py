@@ -195,3 +195,19 @@ def test_missing_draft_leaves_cards_unmapped(project, monkeypatch):
     assert out["status"] == "partial"
     assert out["missing"] == ["chapter_01"]
     assert out["counts"]["by_status"]["unmapped"] == 3
+
+
+@pytest.mark.parametrize("given", [None, 5400.0])
+def test_fanout_hands_the_job_timeout_to_the_wave(project, monkeypatch, given):
+    qresolve.resolve(project, index=INDEX)
+    qmap.map_prepare(project, worker_model="claude-sonnet-5-5", cli="claude")
+    seen = {}
+
+    def fake_wave(jobs, **kwargs):
+        seen.update(kwargs)
+        return {"wrote": [j["id"] for j in jobs], "failed": []}
+
+    monkeypatch.setattr("src.harness.headless.run_headless_wave", fake_wave)
+    out = qmap.map_fanout(project, cli="claude", job_timeout=given)
+    assert out["wrote"] == ["chapter_01"]
+    assert seen["job_timeout"] == given

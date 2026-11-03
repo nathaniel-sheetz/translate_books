@@ -24,18 +24,22 @@
     var SAVE_DELAY = 400;
     var PHASES = ['pending', 'approve', 'reject', 'applied'];
     var VERDICTS = ['approve', 'unsure', 'decline'];
+    var JUDGE_VERDICTS = ['apply', 'partial', 'reject', 'toss_up', 'none'];
     var NO_SCRIPTURE = ['not_scripture', 'unresolved'];
 
     var data = null;
     var filters = {
         phase: { pending: true, approve: true, reject: true, applied: false },
         rec: { approve: true, unsure: true, decline: true },
+        judge: {},
         kind: {},
         onlyChanges: true,
         onlyAsked: false
     };
     var focusKey = null;  /* the card the editor sent us back to: always shown */
+    var goToFocus = false; /* scroll to it once, on the way back, never on a later reload */
     var pending = {};     /* card key -> choice waiting to be saved */
+    var sent = {};        /* card key -> choice saved but not yet in `data` */
     var saveTimer = null;
     var latest = 0;       /* only the newest save's reply is drawn */
 
@@ -122,7 +126,7 @@
     /* --- which cards show ---------------------------------------------------- */
 
     function choiceOf(card) {
-        return pending[card.key] || card.choice;
+        return pending[card.key] || sent[card.key] || card.choice;
     }
 
     /* Mirrors the server's `phase`, on the choice as it stands on this page. */
@@ -140,12 +144,17 @@
         return (card.quote_edits || []).some(function (e) { return e.old !== e.new; });
     }
 
+    function judgeVerdictOf(card) {
+        return card.judge ? card.judge.verdict : 'none';
+    }
+
     function shown(card) {
         if (card.key === focusKey) return true;
         var c = choiceOf(card);
         var ph = phaseOf(card);
         if (!filters.phase[ph]) return false;
         if (filters.rec[card.recommendation.verdict] === false) return false;
+        if (filters.judge[judgeVerdictOf(card)] === false) return false;
         if (filters.kind[card.kind] === false) return false;
         var asked = !!(c.ask || card.revised);
         if (filters.onlyAsked && !asked) return false;
@@ -229,6 +238,34 @@
         return group;
     }
 
+    /* What the judge said, and a partial's fix one click from the ask box. It
+       moves nothing by itself: the ask holds the card until the agent revises it. */
+    function judgeBlock(card, choice, locked) {
+        var j = card.judge;
+        var box = el('div', 'qb-judge qb-judge-' + j.verdict);
+        var line = el('p', 'qb-judge-line');
+        line.appendChild(el('span', 'qb-label', fill(S.judge_says, {
+            verdict: (S.judge_verdicts || {})[j.verdict] || j.verdict,
+            band: (S.judge_bands || {})[j.band] || j.band,
+            confidence: j.confidence.toFixed(2)
+        })));
+        if (j.reason) line.appendChild(el('span', null, ' ' + j.reason));
+        box.appendChild(line);
+        if (j.fix) {
+            var fix = el('p', 'qb-judge-fix');
+            fix.appendChild(el('span', 'qb-label', S.judge_fix + ': '));
+            fix.appendChild(el('span', null, j.fix));
+            box.appendChild(fix);
+            if (!locked && choice.ask !== j.fix) {
+                var use = el('button', 'qb-btn qb-judge-use', S.judge_use_ask);
+                use.type = 'button';
+                use.addEventListener('click', function () { setChoice(card, { ask: j.fix }); });
+                box.appendChild(use);
+            }
+        }
+        return box;
+    }
+
     function renderCard(card) {
         var choice = choiceOf(card);
         var ph = phaseOf(card);
@@ -261,8 +298,13 @@
         node.appendChild(head);
         if (card.replaces_ref) node.appendChild(el('p', 'br-warn qb-small', fill(S.replaces, { ref: card.replaces_ref })));
 
-        node.appendChild(el('p', 'qb-reason',
-            fill((S.reasons || {})[verdict.rule] || verdict.rule, { detail: verdict.detail || '' })));
+        /* A judged card's own block carries the reason; the rule would only repeat it. */
+        if (card.judge) {
+            node.appendChild(judgeBlock(card, choice, locked));
+        } else {
+            node.appendChild(el('p', 'qb-reason',
+                fill((S.reasons || {})[verdict.rule] || verdict.rule, { detail: verdict.detail || '' })));
+        }
 
         var en = el('p', 'qb-en');
         en.appendChild(el('span', 'qb-label', S.english + ': '));
@@ -349,6 +391,9 @@
             tools.appendChild(checkbox(S.hand, choice.hand, false, function (on) {
                 setChoice(card, on ? { hand: true, state: 'approve' } : { hand: false });
             }));
+            tools.appendChild(checkbox(S.toss_up, choice.toss_up, false, function (on) {
+                setChoice(card, { toss_up: on });
+            }));
         }
         node.appendChild(tools);
         if (choice.hand) node.appendChild(el('p', 'br-muted', S.hand_note));
@@ -401,6 +446,10 @@
         panel.appendChild(axis(S.phase_label, PHASES, S.phases || {}, tally(cards, phaseOf), filters.phase));
         panel.appendChild(axis(S.rec_label, VERDICTS, S.verdicts || {},
             tally(cards, function (c) { return c.recommendation.verdict; }), filters.rec));
+        if (cards.some(function (c) { return c.judge; })) {
+            panel.appendChild(axis(S.judge_label, JUDGE_VERDICTS, S.judge_verdicts || {},
+                tally(cards, judgeVerdictOf), filters.judge));
+        }
         var kinds = tally(cards, function (c) { return c.kind; });
         panel.appendChild(axis(S.kind_label, Object.keys(kinds).sort(), S.kinds || {}, kinds, filters.kind));
         var more = el('div', 'qb-axis');
@@ -422,12 +471,40 @@
         return out;
     }
 
+    /* A redraw re-applies the filters, so cards decided since the last one can
+       drop out above the reader. Keep the first card on screen where it was, or
+       the next one still shown if it dropped out itself. */
+    function placeMark() {
+        var nodes = board.querySelectorAll('.qb-card');
+        for (var i = 0; i < nodes.length; i++) {
+            var box = nodes[i].getBoundingClientRect();
+            if (box.bottom <= 0) continue;
+            var keys = [];
+            for (var j = i; j < nodes.length; j++) keys.push(nodes[j].dataset.key);
+            return { keys: keys, top: box.top };
+        }
+        return null;
+    }
+
+    function keepPlace(mark) {
+        if (!mark) return false;
+        for (var i = 0; i < mark.keys.length; i++) {
+            var node = board.querySelector('[data-key="' + CSS.escape(mark.keys[i]) + '"]');
+            if (node) {
+                window.scrollBy(0, node.getBoundingClientRect().top - mark.top);
+                return true;
+            }
+        }
+        return false;
+    }
+
     function render() {
+        var mark = placeMark();
         board.textContent = '';
         if (!data || data.status !== 'ok' || !allCards().length) {
             board.appendChild(el('p', 'br-status', S.empty));
             bar.hidden = true;
-            return;
+            return false;
         }
         board.appendChild(el('p', 'br-meta', fill(S.meta, {
             cards: data.counts.cards, model: data.worker_model || '?',
@@ -447,6 +524,7 @@
         });
         if (!any) board.appendChild(el('p', 'br-status', S.none_shown));
         updateBar();
+        return keepPlace(mark);
     }
 
     function updateBar() {
@@ -504,19 +582,31 @@
     function save() {
         var sending = pending;
         pending = {};
+        /* A save takes about a second; a redraw meanwhile must not show these
+           cards as they were. */
+        Object.keys(sending).forEach(function (k) { sent[k] = sending[k]; });
         var mine = ++latest;
         post('/choices', { choices: sending }).then(function (reply) {
             if (mine !== latest) return;
             if (!reply.ok) {
-                barSave.textContent = fill(S.save_failed, { error: reply.json.error || '?' });
+                failed(fill(S.save_failed, { error: reply.json.error || '?' }));
                 return;
             }
             data = reply.json;
+            sent = {};
             barSave.textContent = S.saved;
             redrawCards();
         }).catch(function (err) {
-            barSave.textContent = fill(S.save_failed, { error: String(err) });
+            failed(fill(S.save_failed, { error: String(err) }));
         });
+    }
+
+    /* Unsaved choices wait for the next save instead of looking saved. */
+    function failed(message) {
+        Object.keys(sent).forEach(function (k) { if (!pending[k]) pending[k] = sent[k]; });
+        sent = {};
+        barSave.textContent = message;
+        updateBar();
     }
 
     approveBtn.addEventListener('click', function () {
@@ -538,21 +628,24 @@
         var hash = window.location.hash || '';
         if (hash.indexOf('#card-') !== 0) return;
         try { focusKey = decodeURIComponent(hash.slice(6)); } catch (e) { focusKey = null; }
+        goToFocus = !!focusKey;
     }
 
     function scrollToFocus() {
         if (!focusKey) return;
         var node = board.querySelector('[data-key="' + CSS.escape(focusKey) + '"]');
-        if (node) node.scrollIntoView({ block: 'center' });
+        if (!node) return;
+        node.scrollIntoView({ block: 'center' });
+        goToFocus = false;
     }
 
     function load() {
         fetch(API).then(function (r) { return r.json(); }).then(function (json) {
             var y = window.scrollY;
             data = json;
-            render();
-            if (focusKey) scrollToFocus();
-            else window.scrollTo(0, y);
+            var placed = render();
+            if (goToFocus) scrollToFocus();
+            else if (!placed) window.scrollTo(0, y);
         }).catch(function (err) {
             board.textContent = '';
             board.appendChild(el('p', 'br-status', String(err)));

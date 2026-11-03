@@ -292,8 +292,13 @@ def map_fanout(
     cli_bin: Optional[str] = None,
     effort: Optional[str] = None,
     runner=None,
+    job_timeout: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Run one headless wave over the prepared mapping jobs."""
+    """Run one headless wave over the prepared mapping jobs.
+
+    ``job_timeout`` (seconds) replaces the per-CLI job ceiling. A Grok job on a
+    chapter with many quotations outlasts Cursor's 900 s.
+    """
     project_dir = Path(project_dir)
     manifest, err = _load_manifest(project_dir)
     if err:
@@ -301,7 +306,7 @@ def map_fanout(
     return run_wave(
         project_dir, manifest, command=COMMAND, job_ids=job_ids, concurrency=concurrency,
         cli=cli, cli_bin=cli_bin, effort=effort, runner=runner,
-        root=quotations_dir(project_dir),
+        root=quotations_dir(project_dir), job_timeout=job_timeout,
     )
 
 
@@ -368,6 +373,10 @@ class _Claims:
         return True
 
 
+def _without_marks(text: str) -> str:
+    return " ".join(re.sub(r"[«»‹›]", "", text).split())
+
+
 def _check_old(text: ChapterText, es_idx: Any, old: str) -> tuple[Optional[int], Optional[str]]:
     try:
         es_idx = int(es_idx)
@@ -399,6 +408,8 @@ def build_card(
     never for the wave: a ``replace`` item may then carry ``new``, the Spanish to
     use as written. Its pieces must still be verbatim NBLA and must all be in
     ``new``; the card is marked adapted, since code no longer built the wording.
+    An item with no pieces is allowed only when ``new`` differs from ``old`` by
+    quotation marks alone: it counts no verses and no NBLA words.
     """
     card = {
         k: cand.get(k)
@@ -454,7 +465,9 @@ def build_card(
         old = str(item.get("old") or "")
         pieces = [str(p) for p in item.get("pieces") or [] if str(p).strip()]
         free = str(item["new"]) if allow_new and item.get("new") is not None else None
-        if not old or not pieces or free == "":
+        # A paraphrase taken out of quotation marks carries no NBLA words at all.
+        marks_only = not pieces and free is not None and old != free and _without_marks(old) == _without_marks(free)
+        if not old or free == "" or not (pieces or marks_only):
             card["refusals"].append({"what": "replace", "es_idx": item.get("es_idx"), "old": old, "reason": REFUSE_EMPTY})
             continue
         es_idx, reason = _check_old(text, item.get("es_idx"), old)
@@ -479,7 +492,7 @@ def build_card(
                 located = []
                 break
             located.append(loc)
-        if not located:
+        if not located and not marks_only:
             continue
         para = text.paragraph(es_idx, old)
         olds_by_para.setdefault(para, []).append(old)

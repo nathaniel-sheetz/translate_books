@@ -49,6 +49,35 @@ def test_a_revision_with_pieces_is_built_by_code(book):  # noqa: F811
     assert qboard.recommend(card)["rule"] == "revised"
 
 
+def test_a_revision_keeps_the_toss_up_tick(book):  # noqa: F811
+    key = _card(book)["key"]
+    qboard.save(book, {key: {**qboard.default_choice(_card(book)), "ask": "otra", "toss_up": True}})
+    out = qrevise.revise(book, key, {"replace": [
+        {"es_idx": 0, "old": "Yo soy la luz del mundo", "pieces": ["Yo soy la luz del camino"]}]})
+    assert out["status"] == "ok", out
+    assert qboard.load(book)["choices"][key]["toss_up"] is True
+
+
+def test_a_revision_may_only_remove_the_marks_and_counts_nothing(book):  # noqa: F811
+    key = _ask(book, "remove the quotation marks")
+    out = qrevise.revise(book, key, {"replace": [
+        {"es_idx": 0, "old": "«Yo soy la luz del mundo»", "new": "Yo soy la luz del mundo", "pieces": []}]})
+    assert out["status"] == "ok", out
+    edit = _card(book)["quote_edits"][0]
+    assert edit["new"] == "Yo soy la luz del mundo"
+    assert edit["pieces"] == [] and edit["verse_keys"] == [] and edit["nbla_words"] == 0
+
+
+def test_a_revision_with_no_pieces_may_change_only_the_marks(book):  # noqa: F811
+    key = _ask(book, "otra")
+    out = qrevise.revise(book, key, {"replace": [
+        {"es_idx": 0, "old": "«Yo soy la luz del mundo»", "new": "Yo soy la luz del camino", "pieces": []}]})
+    assert out["status"] == "refused" and out["refusals"][0]["reason"] == qmap.REFUSE_EMPTY
+    out = qrevise.revise(book, key, {"replace": [
+        {"es_idx": 0, "old": "«Yo soy la luz del mundo»", "pieces": []}]})
+    assert out["status"] == "refused"
+
+
 def test_a_revision_may_use_its_own_words_around_the_nbla(book):  # noqa: F811
     key = _ask(book)
     out = qrevise.revise(book, key, {"replace": [{

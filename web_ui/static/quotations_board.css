@@ -53,6 +53,33 @@
     overflow-wrap: anywhere;
 }
 
+/* What the judge said about this card. */
+.qb-judge {
+    font-size: 13px;
+    margin: 0 0 8px;
+    padding: 6px 10px;
+    border-left: 3px solid var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.qb-judge-apply {
+    border-left-color: var(--br-add-fg);
+}
+
+.qb-judge-partial,
+.qb-judge-toss_up {
+    border-left-color: var(--br-warn);
+}
+
+.qb-judge p {
+    margin: 0 0 4px;
+}
+
+.qb-judge-use {
+    margin-top: 2px;
+    min-height: 44px;
+}
+
 .qb-badge.qb-rec-approve {
     color: var(--br-add-fg);
     border-color: var(--br-add-fg);

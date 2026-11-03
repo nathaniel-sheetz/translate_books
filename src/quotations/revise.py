@@ -11,7 +11,8 @@ A revision's mapping is the worker's (``replace``/``echo``/``drift``/``note``/
 Spanish to use as written, when the user wants words that are not the NBLA's.
 Its ``pieces`` must still be verbatim NBLA and must all appear in ``new``; that
 is what the record counts. Without ``new``, code builds the wording with the
-NBLA's conventions, as for the wave.
+NBLA's conventions, as for the wave. A ``new`` that only removes or moves
+quotation marks may carry no pieces, and then counts nothing in the record.
 
 Revisions live in ``revisions.json`` and win over the wave on every
 ``map-commit``. An applied card cannot be revised: fix it in the book from the
@@ -190,6 +191,7 @@ def revise(project_dir: Path, key: str, mapping: dict[str, Any], *, ask: str | N
         "state": qboard.STATE_PENDING,
         "hand": False,
         "ask": "",
+        "toss_up": bool(old_choice.get("toss_up")),
     }})
     return {
         "status": "ok",

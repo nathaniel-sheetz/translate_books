@@ -102,7 +102,7 @@ def test_defaults_tick_the_reference_and_nbla_but_not_echo(book):
     state = qboard.build(book)
     card = state["chapters"][0]["cards"][0]
     assert card["choice"] == {"ref": True, "nbla": True, "echo": [], "paste": "",
-                              "state": "approve", "hand": False, "ask": ""}
+                              "state": "approve", "hand": False, "ask": "", "toss_up": False}
     assert card["recommendation"]["verdict"] == "approve"
     assert [e["what"] for e in card["edits"]] == ["ref", "quote"]
     assert all(e["lands"] for e in card["edits"])

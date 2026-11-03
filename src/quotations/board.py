@@ -9,7 +9,8 @@ current chunk text, and whether the card was already applied.
 The page writes one file, ``board.json``::
 
     {"choices": {card_key: {"ref": true, "nbla": true, "echo": [0], "paste": "",
-                            "state": "approve", "hand": false, "ask": ""}},
+                            "state": "approve", "hand": false, "ask": "",
+                            "toss_up": false}},
      "saved_at": "...",
      "approved": {"fingerprint": "...", "at": "..."} | null}
 
@@ -24,7 +25,8 @@ leaves it for a later round. It starts from :func:`recommend`, a coded verdict
 with the rule that gave it. ``hand`` says the user fixed the sentence in the
 book themselves: nothing is written, but the card counts as NBLA in the record.
 ``ask`` is the wording the user wants instead; it holds the card at pending
-until the agent revises it (:mod:`src.quotations.revise`).
+until the agent revises it (:mod:`src.quotations.revise`). ``toss_up`` says the
+user could have gone either way; it sits beside the state and writes nothing.
 
 Defaults, when a card has no saved choice: every proposed change is ticked
 except echo edits, and the state follows the recommendation. A choice saved
@@ -33,6 +35,15 @@ before states existed takes its state from the ledger.
 Saving different choices drops the approval. ``apply`` runs an approved board
 only while its fingerprint (``mapped.json`` plus the text of every chunk a card
 touches) still matches, so what is written is what was approved.
+
+``board.json`` holds only the last save, so every change is also appended to
+``board_history.jsonl``: ``{ts, key, before, after}``, where ``before`` is the
+saved choice it replaced, ``null`` when the card was still on its default.
+
+**The judge** (:mod:`src.quotations.judge`) moves defaults only: a card with no
+saved choice starts on Apply when the judge says ``apply`` at
+``JUDGE_APPLY_FLOOR`` or above, and on Not yet otherwise. Every verdict is shown on
+its card, with a partial's fix one click from the ask box.
 
 **The live diff** comes from :func:`src.corrections_apply.apply_to_chunk`, called
 without ``dry_run`` on an in-memory copy of each chunk: ``dry_run=True`` throws
@@ -55,6 +66,7 @@ from src.quotations.map import (
     CARD_MATCHES,
     CARD_NO_MAPPING,
     CARD_NOT_SCRIPTURE,
+    CARD_PROPOSED,
     CARD_REFERENCE,
     CARD_REFUSED,
     CARD_UNMAPPED,
@@ -77,9 +89,22 @@ _STATE_OF_VERDICT = {VERDICT_APPROVE: STATE_APPROVE, VERDICT_DECLINE: STATE_REJE
 #: Longest ask the page may store.
 ASK_CAP = 2000
 
+#: Where a judge's ``apply`` starts a card on Apply. Fixed before the held-out
+#: score of 2026-11-02: 34 applies at this floor, none wrong, on 97 cards from
+#: GPT-6.1 Terra. Rejects at the same floor were 3 wrong of 26, and 14 of the 30
+#: rejects at any confidence were cards the user partly kept, so no verdict but
+#: this one sets a default: everything else starts on Not yet.
+JUDGE_APPLY_FLOOR = 0.90
+#: The bands the page shows; below ``JUDGE_MEDIUM_FLOOR`` is low.
+JUDGE_MEDIUM_FLOOR = 0.70
+
 
 def board_path(project_dir: Path) -> Path:
     return quotations_dir(project_dir) / "board.json"
+
+
+def history_path(project_dir: Path) -> Path:
+    return quotations_dir(project_dir) / "board_history.jsonl"
 
 
 def _read_json(path: Path) -> Optional[Any]:
@@ -123,7 +148,8 @@ def recommend(card: dict[str, Any]) -> dict[str, str]:
 
     The first rule that matches wins. ``rule`` is a key the page words in either
     language; ``detail`` is the card's own text the reason quotes (the drift, the
-    refusal reasons), never NBLA text.
+    refusal reasons), never NBLA text. A card carrying a judge's verdict
+    (:func:`_with_verdicts`) takes it over the coded rules below it.
     """
     status = card.get("status")
     if status == CARD_NOT_SCRIPTURE:
@@ -141,6 +167,11 @@ def recommend(card: dict[str, Any]) -> dict[str, str]:
     reasons = "; ".join(sorted({r.get("reason", "") for r in card.get("refusals") or []}))
     if status == CARD_REFUSED:
         return _verdict(VERDICT_UNSURE, "refused", reasons)
+    judge = card.get("judge")
+    if judge:
+        if judge["verdict"] == "apply" and judge["confidence"] >= JUDGE_APPLY_FLOOR:
+            return _verdict(VERDICT_APPROVE, "judge_apply", judge.get("reason") or "")
+        return _verdict(VERDICT_UNSURE, "judge_hold", judge.get("reason") or "")
     if card.get("revised"):
         return _verdict(VERDICT_UNSURE, "revised", (card["revised"] or {}).get("ask") or "")
     if card.get("drift"):
@@ -170,6 +201,7 @@ def default_choice(card: dict[str, Any]) -> dict[str, Any]:
         "state": _STATE_OF_VERDICT[recommend(card)["verdict"]],
         "hand": False,
         "ask": "",
+        "toss_up": False,
     }
 
 
@@ -207,6 +239,7 @@ def clean_choice(card: dict[str, Any], raw: Any, decision: Optional[dict[str, An
         "state": state,
         "hand": bool(raw.get("hand")) and card.get("status") not in (CARD_NOT_SCRIPTURE, CARD_UNRESOLVED),
         "ask": ask,
+        "toss_up": bool(raw.get("toss_up")),
     }
 
 
@@ -405,6 +438,26 @@ def _decisions(project_dir: Path) -> dict[str, dict[str, Any]]:
     return latest_decisions(project_dir)
 
 
+def _with_verdicts(project_dir: Path, doc: dict[str, Any]) -> dict[str, Any]:
+    """``doc`` with each card's current judge verdict on it, as ``judge``.
+
+    A copy: the verdicts stay in ``judge.json``, and ``mapped.json`` and the
+    fingerprint never see them. They only move the default of a card with no saved
+    choice, and :func:`approve` saves every choice, so a verdict arriving after an
+    approval cannot change what that approval writes.
+    """
+    from src.quotations import judge as qjudge
+
+    verdicts = qjudge.load_verdicts(project_dir)
+    if not verdicts.get("verdicts"):
+        return doc
+    cards = []
+    for card in doc.get("cards") or []:
+        verdict = qjudge.verdict_for(card, verdicts) if card.get("status") == CARD_PROPOSED else None
+        cards.append({**card, "judge": verdict} if verdict else card)
+    return {**doc, "cards": cards}
+
+
 def effective_choices(doc: dict[str, Any], saved: dict[str, dict],
                       decisions: Optional[dict[str, dict]] = None) -> dict[str, dict]:
     decisions = decisions or {}
@@ -418,7 +471,7 @@ def save(project_dir: Path, choices: dict[str, Any]) -> dict[str, Any]:
     doc = load_mapped(project_dir)
     if doc is None:
         return {"status": "error", "problems": ["no mapped.json; run `map-commit` first"]}
-    by_key = {c["key"]: c for c in doc.get("cards") or []}
+    by_key = {c["key"]: c for c in _with_verdicts(project_dir, doc).get("cards") or []}
     unknown = sorted(k for k in choices if k not in by_key)
     if unknown:
         return {"status": "error", "problems": [f"no such card: {k}" for k in unknown[:10]]}
@@ -431,7 +484,68 @@ def save(project_dir: Path, choices: dict[str, Any]) -> dict[str, Any]:
         board["approved"] = None
     board["saved_at"] = datetime.now().isoformat(timespec="seconds")
     _write(project_dir, board)
+    _log_changes(project_dir, by_key, before, board, decisions, list(choices))
     return {"status": "ok"}
+
+
+def _log_changes(project_dir: Path, by_key: dict[str, dict], before: dict[str, dict], board: dict[str, Any],
+                 decisions: dict[str, dict], keys: list[str]) -> None:
+    """Append one history row per card whose choice this save really changed.
+
+    The comparison runs on cleaned choices, so a card saved before a field
+    existed does not read as changed for lacking it.
+    """
+    rows = []
+    for key in keys:
+        was = before.get(key)
+        in_force = clean_choice(by_key[key], was, decisions.get(key)) if key in before else default_choice(by_key[key])
+        if board["choices"][key] != in_force:
+            rows.append({"ts": board["saved_at"], "key": key, "before": was, "after": board["choices"][key]})
+    if rows:
+        with history_path(project_dir).open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _changes_text(card: dict[str, Any]) -> bool:
+    return any(e["old"] != e["new"] for e in card.get("quote_edits") or [])
+
+
+def _is_marked(choice: dict[str, Any]) -> bool:
+    """The user said something about this card; a pending card alone says nothing."""
+    return choice.get("state") != STATE_PENDING or bool(
+        choice.get("ask") or choice.get("toss_up") or choice.get("hand"))
+
+
+def seed_pending(project_dir: Path, chapters: list[str]) -> dict[str, Any]:
+    """Put these chapters' unsaved text-changing cards on pending, and report what is unmarked.
+
+    A card on its default says nothing about whether it was read: a ``clean``
+    card left alone looks the same as one approved. Seeded, every card has to be
+    moved to count, so a held-out set for the judge holds only real marks. Safe
+    to run again: a card with a saved choice is never touched, so a re-run is how
+    to ask which cards are still unmarked.
+    """
+    project_dir = Path(project_dir)
+    doc = load_mapped(project_dir)
+    if doc is None:
+        return {"status": "error", "problems": ["no mapped.json; run `map-commit` first"]}
+    known = {c["chapter_id"] for c in doc.get("cards") or []}
+    unknown = sorted(c for c in chapters if c not in known)
+    if unknown:
+        return {"status": "error", "problems": [f"no cards in {c}" for c in unknown]}
+    saved = load(project_dir)["choices"]
+    cards = [c for c in doc.get("cards") or []
+             if c["chapter_id"] in chapters and c.get("status") == "proposed" and _changes_text(c)]
+    seeds = {c["key"]: {**default_choice(c), "state": STATE_PENDING} for c in cards if c["key"] not in saved}
+    if seeds:
+        out = save(project_dir, seeds)
+        if out["status"] != "ok":
+            return out
+        saved = load(project_dir)["choices"]
+    unmarked = [c["key"] for c in cards if not _is_marked(saved[c["key"]])]
+    return {"status": "ok", "chapters": sorted(chapters), "cards": len(cards), "seeded": len(seeds),
+            "marked": len(cards) - len(unmarked), "unmarked": unmarked}
 
 
 def approve(project_dir: Path) -> dict[str, Any]:
@@ -441,7 +555,7 @@ def approve(project_dir: Path) -> dict[str, Any]:
     if doc is None:
         return {"status": "error", "problems": ["no mapped.json; run `map-commit` first"]}
     board = load(project_dir)
-    choices = effective_choices(doc, board["choices"], _decisions(project_dir))
+    choices = effective_choices(_with_verdicts(project_dir, doc), board["choices"], _decisions(project_dir))
     board["choices"] = choices
     board["approved"] = {
         "fingerprint": fingerprint(project_dir, doc, choices),
@@ -530,6 +644,12 @@ def reader_url(book: Book, card: dict[str, Any], decision: Optional[dict[str, An
     return f"/read/{name}/{card['chapter_id']}?{query}"
 
 
+def judge_band(confidence: float) -> str:
+    if confidence >= JUDGE_APPLY_FLOOR:
+        return "high"
+    return "medium" if confidence >= JUDGE_MEDIUM_FLOOR else "low"
+
+
 def phase(card_view: dict[str, Any]) -> str:
     """Where a card stands: ``applied`` once it is in the book with nothing more to
     record, or replaced by another verse's card that is, else its state."""
@@ -550,8 +670,9 @@ def build(project_dir: Path) -> dict[str, Any]:
         return {"status": "empty", "chapters": [], "counts": {}}
     board = load(project_dir)
     decisions = _decisions(project_dir)
-    choices = effective_choices(doc, board["choices"], decisions)
-    cards = doc.get("cards") or []
+    judged = _with_verdicts(project_dir, doc)
+    choices = effective_choices(judged, board["choices"], decisions)
+    cards = judged.get("cards") or []
     done = {k: r for k, r in decisions.items() if r.get("action") in ("applied", "superseded")}
     live = preview(project_dir, [c for c in cards if c["key"] not in done], choices)
     refs = {c["key"]: c.get("ref") for c in cards}
@@ -567,6 +688,8 @@ def build(project_dir: Path) -> dict[str, Any]:
         view.pop("verses", None)
         decision = decisions.get(card["key"])
         view["recommendation"] = recommend(card)
+        if card.get("judge"):
+            view["judge"] = {**card["judge"], "band": judge_band(card["judge"]["confidence"])}
         view["reader_url"] = reader_url(book, card, decision)
         if card.get("replaces"):
             view["replaces_ref"] = refs.get(card["replaces"]) or card["replaces"]

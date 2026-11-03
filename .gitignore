@@ -91,6 +91,7 @@ prompts/kdp_defaults.json
 prompts/kdp_description_examples.md
 prompts/proposals/
 prompts/decisions_taxonomy.json
+prompts/quotation_judge_examples.json
 prompts/previous/
 
 # Prompt history logs (can be large)

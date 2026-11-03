@@ -87,6 +87,7 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
     # spans back, and a baseline averaged over both would describe neither.
     "quotations_scan": (".harness", "quotations", "scan.usage.jsonl"),
     "quotations_map": (".harness", "quotations", "map.usage.jsonl"),
+    "quotations_judge": (".harness", "quotations", "judge.usage.jsonl"),
 }
 
 # How the resolved effort actually reaches the model.

@@ -113,3 +113,38 @@ def test_choices_carry_state_hand_and_ask(client, book):
     choice = r.get_json()["chapters"][0]["cards"][0]["choice"]
     # The ask holds the card at pending until the agent revises it.
     assert choice["state"] == "pending" and choice["hand"] is True and choice["ask"] == "otra redacción"
+
+
+def test_a_verdict_reaches_the_page_with_its_band_in_both_languages(client, book):
+    from src.quotations import judge as qjudge
+    from web_ui.i18n import get_strings
+
+    edits = [{"es_idx": 0, "old": "a", "new": "b"}]
+    card = {"key": "chapter_01|43 8:12|abc", "chapter_id": "chapter_01", "kind": "quotation",
+            "status": "proposed", "es_idx": [], "refusals": [], "echo": [], "quote_edits": edits}
+    (book / ".harness" / "quotations" / "mapped.json").write_text(
+        json.dumps({"cards": [card]}), encoding="utf-8")
+    qjudge.verdicts_path(book).write_text(json.dumps({"verdicts": {card["key"]: {
+        "hash": qjudge.edits_hash(edits), "verdict": "partial", "confidence": 0.92,
+        "fix": "su, no Su", "fix_kind": "blend", "reason": "Why."}}}), encoding="utf-8")
+    view = client.get("/api/project/qbook/quotations").get_json()["chapters"][0]["cards"][0]
+    assert view["judge"]["band"] == "high" and view["judge"]["fix"] == "su, no Su"
+    assert view["choice"]["state"] == "pending"
+    for lang in ("en", "es"):
+        js = get_strings(lang)["quotations_js"]
+        assert js["judge_use_ask"] and set(js["judge_verdicts"]) == {"apply", "partial", "reject", "toss_up", "none"}
+        assert set(js["judge_bands"]) == {"high", "medium", "low"} and "{confidence}" in js["judge_says"]
+
+
+def test_the_toss_up_tick_round_trips_and_has_its_label(client, book):
+    card = {"key": "chapter_01|43 8:12|abc", "chapter_id": "chapter_01", "kind": "quotation",
+            "status": "proposed", "es_idx": [], "refusals": [], "echo": [],
+            "quote_edits": [{"es_idx": 0, "old": "a", "new": "b"}]}
+    (book / ".harness" / "quotations" / "mapped.json").write_text(
+        json.dumps({"cards": [card]}), encoding="utf-8")
+    r = client.post("/api/project/qbook/quotations/choices", json={"choices": {card["key"]: {
+        "nbla": True, "state": "reject", "toss_up": True}}})
+    choice = r.get_json()["chapters"][0]["cards"][0]["choice"]
+    assert choice["state"] == "reject" and choice["toss_up"] is True
+    assert client.get("/api/project/qbook/quotations").get_json()["chapters"][0]["cards"][0]["choice"]["toss_up"] is True
+    assert "toss_up" in client.get("/quotations/qbook").get_data(as_text=True)

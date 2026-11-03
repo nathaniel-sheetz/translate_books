@@ -15,7 +15,11 @@ to ``projects/<slug>/.harness/quotations/last_output.json`` when a project is na
     map-fanout     run the mapping wave headless                       (no API spend)
     map-commit     validate every mapping, write the board's cards     (no spend)
     board          the board's URL and what is picked / approved       (no spend)
-    asks           the cards where the user asked for other wording    (no spend)
+    judge-seed     hold chapters at pending for marking; list unmarked (no spend)
+    judge-prepare  render the judge's jobs for the unapplied cards     (no spend)
+    judge-fanout   run the judge wave headless                         (no API spend)
+    judge-commit   read the verdicts into judge.json                   (no spend)
+    asks          the cards where the user asked for other wording    (no spend)
     revise         validate a revised mapping for one card, store it   (no spend)
     reref          make the card for another verse on a card's sentence (no spend)
     apply          apply the approved board through the judge path     (no spend)
@@ -48,6 +52,7 @@ from src.harness import state as hstate  # noqa: E402
 from src.quotations import quotations_dir  # noqa: E402
 from src.quotations import apply as qapply  # noqa: E402
 from src.quotations import board as qboard  # noqa: E402
+from src.quotations import judge as qjudge  # noqa: E402
 from src.quotations import map as qmap  # noqa: E402
 from src.quotations import record as qrecord  # noqa: E402
 from src.quotations import resolve as qresolve  # noqa: E402
@@ -256,6 +261,7 @@ def _cmd_map_fanout(args: argparse.Namespace) -> int:
         cli=args.cli,
         cli_bin=args.cli_bin,
         effort=args.effort,
+        job_timeout=args.job_timeout,
     )
     _emit(project_dir, out)
     counts = out.get("counts") or {}
@@ -288,6 +294,51 @@ def _cmd_board(args: argparse.Namespace) -> int:
         ),
     })
     return 0
+
+
+def _cmd_judge_seed(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = qboard.seed_pending(project_dir, _parse_chapters(args.chapters) or [])
+    _emit(project_dir, out)
+    return 0 if out.get("status") == "ok" else 1
+
+
+def _cmd_judge_prepare(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = qjudge.judge_prepare(
+        project_dir,
+        chapters=_parse_chapters(args.chapters),
+        worker_model=args.worker_model,
+        cli=args.cli,
+        items_per_job=args.items_per_job,
+        keep_drafts=args.keep_drafts,
+    )
+    _emit(project_dir, out)
+    return 0 if out.get("status") == "ok" else 1
+
+
+def _cmd_judge_fanout(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    job_ids = [j.strip() for j in args.job_ids.split(",") if j.strip()] if args.job_ids else None
+    out = qjudge.judge_fanout(
+        project_dir,
+        job_ids=job_ids,
+        concurrency=args.concurrency,
+        cli=args.cli,
+        cli_bin=args.cli_bin,
+        effort=args.effort,
+    )
+    _emit(project_dir, out)
+    counts = out.get("counts") or {}
+    all_failed = bool(counts.get("failed")) and not counts.get("wrote")
+    return 1 if out.get("error") or all_failed else 0
+
+
+def _cmd_judge_commit(args: argparse.Namespace) -> int:
+    project_dir = _resolve_project(args.project)
+    out = qjudge.judge_commit(project_dir)
+    _emit(project_dir, out)
+    return 0 if out.get("status") in ("ok", "partial") else 1
 
 
 def _cmd_asks(args: argparse.Namespace) -> int:
@@ -356,6 +407,10 @@ _DISPATCH = {
     "map-fanout": _cmd_map_fanout,
     "map-commit": _cmd_map_commit,
     "board": _cmd_board,
+    "judge-seed": _cmd_judge_seed,
+    "judge-prepare": _cmd_judge_prepare,
+    "judge-fanout": _cmd_judge_fanout,
+    "judge-commit": _cmd_judge_commit,
     "asks": _cmd_asks,
     "revise": _cmd_revise,
     "reref": _cmd_reref,
@@ -423,6 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--effort", default=None, choices=["low", "medium", "high", "xhigh", "default"],
         help="per-run effort (default: config headless_effort_quotations_map, else high)",
     )
+    m_fanout.add_argument(
+        "--job-timeout", dest="job_timeout", type=float, default=None,
+        help="seconds one job may run before it is killed (default: 900 on cursor and codex, "
+             "1800 on claude)",
+    )
 
     m_commit = sub.add_parser("map-commit", help="validate every mapping, write the board's cards")
     m_commit.add_argument("--project", required=True, help="project id or path")
@@ -430,6 +490,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_board = sub.add_parser("board", help="the board's URL and what is picked / approved")
     p_board.add_argument("--project", required=True, help="project id or path")
     p_board.add_argument("--base-url", default="http://localhost:5000", help="where the reader runs")
+
+    p_seed = sub.add_parser("judge-seed", help="hold chapters at pending for marking; list what is unmarked")
+    p_seed.add_argument("--project", required=True, help="project id or path")
+    p_seed.add_argument("--chapters", required=True, help="chapters to hold (1-20, 3,7, chapter_04)")
+
+    j_prepare = sub.add_parser("judge-prepare", help="render the judge's jobs for the unapplied cards")
+    j_prepare.add_argument("--project", required=True, help="project id or path")
+    j_prepare.add_argument("--chapters", help="chapters to judge (1-20, 3,7, chapter_04); default all")
+    j_prepare.add_argument("--worker-model", default=None, help="model pin; default from the profile")
+    j_prepare.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None)
+    j_prepare.add_argument("--items-per-job", type=int, default=qjudge.DEFAULT_ITEMS_PER_JOB)
+    j_prepare.add_argument("--keep-drafts", action="store_true", help="do not clear existing drafts")
+
+    j_fanout = sub.add_parser("judge-fanout", help="run the judge wave (no API spend)")
+    j_fanout.add_argument("--project", required=True, help="project id or path")
+    j_fanout.add_argument("--job-ids", help="comma-separated job ids (default: all undrafted)")
+    j_fanout.add_argument("--concurrency", type=int, default=None, help="max parallel CLI processes")
+    j_fanout.add_argument("--cli", choices=hstate.HEADLESS_CLIS, default=None)
+    j_fanout.add_argument("--cli-bin", default=None, help="path to the CLI binary if not on PATH")
+    j_fanout.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "xhigh", "default"],
+        help="per-run effort (default: config headless_effort_quotations_judge, else medium)",
+    )
+
+    j_commit = sub.add_parser("judge-commit", help="read the verdicts into judge.json")
+    j_commit.add_argument("--project", required=True, help="project id or path")
 
     p_asks = sub.add_parser("asks", help="the cards where the user asked for other wording")
     p_asks.add_argument("--project", required=True, help="project id or path")

@@ -160,6 +160,11 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # copied verbatim. Close reading against two languages rather than
     # detection, so high. Unmeasured; re-measure and move the row.
     "quotations_map": "high",
+    # The quotation judge: a batch of proposed edits, each read in its sentences
+    # for a verdict and a number. Judgment over short text, the same shape as
+    # triage, and named medium for that reason. Unmeasured; re-measure and move
+    # the row.
+    "quotations_judge": "medium",
 }
 
 

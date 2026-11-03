@@ -6,7 +6,7 @@ description: |
   aligned chapters, look each verse up in the user's own NBLA index, map the words the
   author quotes onto the Spanish, propose echo edits to nearby prose, and show every
   change on one web board to tick and approve. Applies through the judge-apply path and
-  records exact verse and word counts in quotations.json for kdp-publish. Two headless
+  records exact verse and word counts in quotations.json for kdp-publish. Three headless
   waves, subscription only, no dollars. Post-translation only.
   Use when asked to "put the NBLA in", "fix the Bible quotes", "map the Scripture
   quotations", "standardize the Bible references", "use the real NBLA text", or
@@ -111,6 +111,37 @@ NBLA, every `old` must occur once in its row, echo edits need English evidence, 
 overlaps are refused. Code, never the worker, builds the Spanish with the NBLA's
 conventions. Read `refusals`; a pattern there is worth a sentence to the user.
 
+## 3b. Judge (wave 3)
+
+A filter over the mapping wave: one verdict and confidence per card that would change
+the text. It writes nothing to the book, `mapped.json` or the fingerprint.
+
+```bash
+python -X utf8 scripts/quotation_pass.py judge-prepare --project <slug> --worker-model gpt-6.1-terra --cli codex
+```
+
+**Usage gate.** Quote `jobs`, `items` and `effective`. Measured on 168 cards in 12 jobs
+at medium, 5 in parallel: **about 42 s and 11k output tokens** on Terra, about 2.5
+minutes sequentially; about 60 s and 20-25k on Sonnet 5.5, about 3.5 minutes
+sequentially. Grok 4.7 took 7 to 16 minutes in parallel for no better result, so don't
+default to it. Then:
+
+```bash
+python -X utf8 scripts/quotation_pass.py judge-fanout --project <slug>
+python -X utf8 scripts/quotation_pass.py judge-commit --project <slug>
+```
+
+- **Run it before the user reviews a chapter.** A verdict moves the default of any card
+  with no saved choice, and a card the user read and left alone has none. On a book
+  already partly reviewed that way, pass `--chapters` for the unreviewed chapters only.
+- **Only a confident apply sets a default:** `apply` at 0.90 or above starts on Apply,
+  and everything else starts on Not yet with its verdict showing. On the held-out score
+  (2026-11-02, 97 cards), applies at that floor were 34 with none wrong. Rejects were 3
+  wrong of 26, and 14 of the 30 rejects at any confidence were cards the user partly kept.
+- **A revised card's verdict goes stale** and it falls back to the coded rules.
+- **Don't tune on a set you've scored.** The replay is
+  `scripts/quotation_judge_gold.py`, and chapters shown with verdicts are no longer blind.
+
 ## 4. Board
 
 ```bash
@@ -127,7 +158,11 @@ predates this branch).
 - **Whether it happens:** each card's state, **Apply / Not yet / Reject**. It starts
   from a coded recommendation (approve, not sure or decline), shown with the rule
   that gave it. Drift, adapted cards, allusions, low confidence, refusals and
-  echo-only cards are "not sure" and start at Not yet.
+  echo-only cards are "not sure" and start at Not yet. A judged card starts from its
+  verdict instead (section 3b).
+- **The judge's verdict** shows on the card with its band and reason, and there is a
+  chip row to filter by it. A verdict with a fix offers **Use as ask**, which copies the
+  fix into the ask box.
 - **The diffs** are computed on the current text and say when an edit no longer
   lands.
 - **Filters:** chips by decision, recommendation and kind. Applied and declined
@@ -153,7 +188,9 @@ Two ways to get wording other than the proposed diff:
   `pieces` are verbatim NBLA, and code builds the Spanish. Add `"new"` to a
   `replace` item only when the user wants words that are not the NBLA's. Every
   piece must still be verbatim NBLA and appear in `new`, and the card is then
-  marked adapted. Then run:
+  marked adapted. A `new` that differs from `old` only by quotation marks may
+  have empty `pieces`, for a paraphrase taken out of the marks; it counts no verses
+  and no NBLA words. Then run:
 
   ```bash
   python -X utf8 scripts/quotation_pass.py revise --project <slug> --card "<key>" --file <mapping.json>
