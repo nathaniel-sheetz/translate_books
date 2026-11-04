@@ -91,6 +91,7 @@ prompts/kdp_defaults.json
 prompts/kdp_description_examples.md
 prompts/proposals/
 prompts/decisions_taxonomy.json
+prompts/quotation_judge_examples.json
 prompts/previous/
 
 # Prompt history logs (can be large)
@@ -134,3 +135,9 @@ CLAUDE.md
 !.claude/skills/
 !.claude/agents/
 .gstack/
+# Per-machine links that point other agent CLIs at .claude/skills (absolute paths)
+.agents/
+
+# Per-user Bible indexes built by scripts/quotation_pass.py index (never tracked:
+# the Bible text is the user's licensed copy, and there is no .example twin)
+prompts/bible/

@@ -87,9 +87,17 @@ Read `.harness/kdp/facts.json` in full. It holds the following:
 - **Catalog:** the Gutenberg catalog record (LCSH subjects, LCC, bookshelves, an
   automatic summary, reading ease, everyone credited with birth and death years).
 - **Edition:** what this edition adds (`footnotes.editorial`, `images.*`), the
-  suggested descriptor, and a draft copyright page (`edition.notice_draft`).
+  suggested descriptor, and a draft copyright page (`edition.notice_draft`). When the
+  book keeps a Bible version's wording, the draft already carries that version's
+  notice (the `{scripture_notice}` line).
+- **Quotations:** `quotations`, read from `projects/<slug>/quotations.json`, which
+  quotation-pass writes after every apply: the version, the exact `verses_unique`
+  and `verse_occurrences` (a repeated verse counted once and each time), the
+  `share` of the book's words, the version's limits and `within_limits`. This is
+  the copyright analysis for quoted Scripture; don't estimate it by hand.
 - **AI:** what was made with AI (`ai`).
-- **Rights:** `rights_flags`.
+- **Rights:** `rights_flags`, including `quoted_text_over_limit` when the book
+  quotes a Bible version beyond its permission-to-quote terms.
 
 Settle every `needs_input` item before drafting:
 - **`original_year`**: first publication of the *original* work. The candidates can
@@ -97,6 +105,9 @@ Settle every `needs_input` item before drafting:
   1923). Research it, then confirm it with the user.
 - **`translator`**: `project.json` and the house default disagree. `apply` writes the
   listing's Translator contributor, which the draft takes from the default. Ask if it isn't obvious.
+- **`quotations`**: the English cites Bible verses but there is no `quotations.json`.
+  Run quotation-pass first, or have the user confirm the book quotes no Bible
+  version (then the notice carries no Scripture line).
 
 **Settle Publishing Rights.** `facts.publishing_rights_default` is the house answer:
 - **`public_domain`**: "This is a public domain work". The title carries the
@@ -116,7 +127,10 @@ Confirm the answer for this book with the user; don't carry it over silently.
 **Read `rights_flags` aloud to the user.** They are not boilerplate. A source edition
 whose translator or illustrator died within seventy years (`life_plus_70`) is in
 copyright across most of Europe, and `mexico_life_plus_100` matters because Mexico is
-the readership. They decide the listing's `territories`.
+the readership. They decide the listing's `territories`. `quoted_text_over_limit`
+means the quoted Bible text exceeds the version's free-quotation terms (for the NBLA:
+500 verses, 25% of the work, never a whole book); commercial print then needs the
+publisher's written approval, so stop and raise it before drafting.
 
 ### 2. Positioning
 
@@ -234,7 +248,8 @@ Rules that `check` cannot fully enforce:
     (`facts.ai.translation` names the model).
   - Cover art or image edits made through image-pass are AI-generated images.
 - **Edition notice.** Start from `facts.edition.notice_draft` and fix the original year
-  and the original-language title.
+  and the original-language title. Keep the Scripture notice line when
+  `facts.quotations` names a version; it is the wording the version requires.
 
 Run `check` and iterate until it reports no errors:
 

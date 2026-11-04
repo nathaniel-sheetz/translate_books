@@ -1,0 +1,56 @@
+[
+  {
+    "place": "inside",
+    "old": "Camina hacia la luz",
+    "new": "Caminen hacia la luz",
+    "before": "No te quedes atrás. «Camina hacia la luz.» Él te espera.",
+    "after": "No te quedes atrás. «Caminen hacia la luz.» Él te espera.",
+    "verdict": "apply",
+    "confidence": 0.9,
+    "reason": "Words inside the marks must be the Bible's, so its plural stands even though the narrator says tú."
+  },
+  {
+    "place": "inside",
+    "old": "guardar la lámpara encendida",
+    "new": "guarden la lámpara encendida",
+    "before": "Debemos «guardar la lámpara encendida».",
+    "after": "Debemos «guarden la lámpara encendida».",
+    "verdict": "partial",
+    "confidence": 0.9,
+    "fix": "Debemos guardar «la lámpara encendida»",
+    "fix_kind": "move_out",
+    "reason": "The conjugated verb breaks the sentence and the infinitive is not the Bible's, so the verb moves out of the marks."
+  },
+  {
+    "place": "outside",
+    "old": "cuidemos nuestro huerto",
+    "new": "cuida tu huerto",
+    "before": "Por eso cuidemos nuestro huerto cada mañana.",
+    "after": "Por eso cuida tu huerto cada mañana.",
+    "verdict": "reject",
+    "confidence": 0.9,
+    "reason": "With no quotation marks the narrator's first person plural stays, and nothing else is gained."
+  },
+  {
+    "place": "outside",
+    "old": "su huerto seco",
+    "new": "Su huerto marchito",
+    "before": "Vio su huerto seco y lloró.",
+    "after": "Vio Su huerto marchito y lloró.",
+    "verdict": "partial",
+    "confidence": 0.85,
+    "fix": "\"marchito\" is fine, but su, not Su",
+    "fix_kind": "blend",
+    "reason": "The Bible's word fits the narrator's sentence, but a divine capital does not belong outside quotation marks."
+  },
+  {
+    "place": "outside",
+    "old": "no hay otro como",
+    "new": "otro no hay como",
+    "before": "En toda la tierra no hay otro como él.",
+    "after": "En toda la tierra otro no hay como él.",
+    "verdict": "toss_up",
+    "confidence": 0.6,
+    "reason": "The Bible's word order fits and keeps the sense, reading only slightly less natural, so either wording is defensible."
+  }
+]

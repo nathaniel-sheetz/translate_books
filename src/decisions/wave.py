@@ -86,6 +86,7 @@ def run_wave(
     runner=None,
     root: Optional[Path] = None,
     draft_done: Optional[Callable[[Path], bool]] = None,
+    job_timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Run one headless wave over ``manifest``'s jobs as wave type ``command``.
 
@@ -93,7 +94,8 @@ def run_wave(
     ``root`` is the directory every manifest path must stay inside (default:
     ``.harness/decisions/``). ``draft_done`` replaces :func:`has_draft` when a
     non-empty file is not enough — book-review synthesis passes one that
-    requires the draft to parse.
+    requires the draft to parse. ``job_timeout`` (seconds) replaces the per-CLI
+    job ceiling; unset keeps it.
     """
     from src.harness import state as hstate
     from src.harness.headless import run_headless_wave
@@ -196,6 +198,7 @@ def run_wave(
         usage_log=usage_log_for(project_dir, command),
         extra_flags=extra_flags,
         effort=prof.effort,
+        job_timeout=job_timeout,
     )
     if "error" in wave and not wave.get("wrote") and not wave.get("failed"):
         return {

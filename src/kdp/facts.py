@@ -11,6 +11,9 @@ to answer the questions a listing asks:
 - what this edition adds (editorial footnotes, a new cover, translated or new
   images) — the "differentiated public domain" case KDP requires;
 - what was made with AI, for the KDP disclosure;
+- what the book quotes from a Bible version (``quotations``), read from the
+  quotation pass's ``quotations.json``: the exact verse and word counts and the
+  version's notice. This file decides nothing about them; the skill does;
 - what is still unknown (``needs_input``) and must be asked or researched.
 """
 
@@ -218,6 +221,49 @@ def render_edition_notice(defaults: dict, values: dict[str, Any]) -> dict[str, s
     return {"heading": template.get("heading") or "Créditos", "body": "\n\n".join(lines)}
 
 
+def _quotations(project_dir: Path) -> tuple[Optional[dict[str, Any]], list[dict[str, str]], list[dict[str, Any]]]:
+    """``(facts.quotations, rights flags, needs_input items)`` from ``quotations.json``.
+
+    With no record, a book whose English cites Bible verses gets a
+    ``needs_input`` item rather than a silent pass: either the quotation pass
+    runs, or someone confirms the book quotes no Bible version.
+    """
+    from src.quotations.record import has_written_bible_refs, read_record, record_path
+
+    record = read_record(project_dir)
+    if record is None:
+        if has_written_bible_refs(project_dir):
+            return None, [], [{
+                "field": "quotations",
+                "why": "The English cites Bible verses but there is no quotations.json: run "
+                       "quotation-pass, or confirm the book quotes no Bible version.",
+            }]
+        return None, [], []
+    view = {
+        key: record.get(key)
+        for key in ("version", "version_name", "verses_unique", "verse_occurrences",
+                    "quoted_words", "book_words", "share", "limits", "within_limits",
+                    "whole_book_quoted", "adapted", "notice", "generated_at")
+    }
+    view["quotations"] = len(record.get("rows") or [])
+    view["path"] = str(record_path(project_dir))
+    flags = []
+    if record.get("within_limits") is False:
+        limits = record.get("limits") or {}
+        flags.append({
+            "code": "quoted_text_over_limit",
+            "detail": (
+                f"{record.get('version', '').upper()} quoted beyond its permission-to-quote terms: "
+                f"{record.get('verses_unique')} verses ({record.get('verse_occurrences')} with "
+                f"repeats) against {limits.get('verses')}, {record.get('share')} of the book "
+                f"against {limits.get('share')}"
+                + (", a whole Bible book" if record.get("whole_book_quoted") else "")
+                + ". Commercial print needs the publisher's written approval."
+            ),
+        })
+    return view, flags, []
+
+
 def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = None) -> dict[str, Any]:
     """Collect the facts and write ``.harness/kdp/facts.json``. Returns the facts."""
     project_dir = Path(project_dir)
@@ -274,6 +320,8 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         })
     if not (project.get("author") or harness.get("author") or ingest.get("creator")):
         needs_input.append({"field": "author", "why": "No author recorded anywhere."})
+    quotations, quotation_flags, quotation_needs = _quotations(project_dir)
+    needs_input.extend(quotation_needs)
 
     descriptors = defaults.get("descriptors") or {}
     key = descriptor_key(footnotes, images)
@@ -287,6 +335,9 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         "edition_additions": additions,
         "year": today.year,
         "publisher": project.get("publisher") or defaults.get("publisher") or "",
+        # Only a book that kept some Bible version's wording carries its notice.
+        "scripture_notice": (quotations or {}).get("notice") or ""
+        if (quotations or {}).get("quotations") else "",
     }
 
     facts = {
@@ -315,7 +366,7 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         },
         "catalog": catalog,
         "catalog_error": catalog_error,
-        "rights_flags": gutenberg.rights_flags(catalog, today=today),
+        "rights_flags": gutenberg.rights_flags(catalog, today=today) + quotation_flags,
         "language": {
             "dialect": dialect,
             "locale": harness.get("locale") or "",
@@ -332,6 +383,7 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         },
         "footnotes": footnotes,
         "images": images,
+        "quotations": quotations,
         "translator_note": (project_dir / "translator_note.json").exists(),
         "authorship": _authorship(project_dir),
         "publishing_rights_default": str(defaults.get("publishing_rights") or "public_domain"),

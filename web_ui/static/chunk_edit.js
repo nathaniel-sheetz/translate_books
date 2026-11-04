@@ -16,6 +16,9 @@
     const overlapStart = parseInt(app.dataset.overlapStart || '0', 10) || 0;
     const overlapEnd = parseInt(app.dataset.overlapEnd || '0', 10) || 0;
     const anchorText = app.dataset.anchorText || '';
+    // Set when the quotation board opened the editor; the server only passes
+    // a path on that board.
+    const returnTo = app.dataset.returnTo || '';
 
     const textarea = document.getElementById('chunk-edit-textarea');
     const backBtn = document.getElementById('chunk-edit-back');
@@ -30,6 +33,7 @@
     });
 
     function readerUrl(extraQuery) {
+        if (returnTo) return returnTo;
         let url = `/read/${projectId}/${chapter}`;
         if (extraQuery) url += '?' + extraQuery;
         return url;
@@ -124,7 +128,9 @@
                     dirty = false;
                     const params = new URLSearchParams();
                     if (anchorText) params.set('anchor', anchorText);
-                    window.location.href = readerUrl(params.toString());
+                    const next = readerUrl(params.toString());
+                    if (returnTo) window.location.replace(next);
+                    else window.location.href = next;
                 } else {
                     setStatus(body.error || ('HTTP ' + status), false);
                     saveBtn.disabled = false;

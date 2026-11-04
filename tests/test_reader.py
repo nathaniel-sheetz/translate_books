@@ -698,6 +698,8 @@ class TestBookmark:
         for href, label in (
             ("/recommendations/test-project", "Recommendations"),
             ("/image-pass/test-project", "Images"),
+            ("/book-review/test-project", "Book review"),
+            ("/quotations/test-project", "Bible quotations"),
             ("/project/test-project", "Dashboard"),
         ):
             item = menu.split(f'href="{href}"', 1)[1].split("</a>", 1)[0]

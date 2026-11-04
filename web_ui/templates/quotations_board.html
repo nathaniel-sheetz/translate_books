@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t.quotations_title }} — {{ project_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='book_review_board.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='quotations_board.css') }}?v=7">
+</head>
+<body>
+<script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
+
+{#- The shell only. The cards are drawn by quotations_board.js from
+    /api/project/<id>/quotations; every diff comes from the server, computed on
+    in-memory copies of the current chunks. -#}
+<div class="nav-page br-page qb-page">
+    <div class="nav-header">
+        <h1>{{ t.quotations_title }}</h1>
+        <div class="nav-header-actions">
+            <a class="br-refresh" href="/quotations/{{ project_id }}/footnotes">{{ t.quotation_footnotes_link }}</a>
+            <button type="button" class="br-refresh" id="qb-refresh">{{ t.quotations_refresh }}</button>
+            <a class="btn-new-project" href="/read/{{ project_id }}">{{ project_title }}</a>
+        </div>
+    </div>
+
+    <p class="br-subtitle">{{ t.quotations_subtitle }}</p>
+
+    {#- Single-quoted, because `tojson` escapes `'` but not `"`. -#}
+    <div class="qb-board" id="qb-board"
+         data-project="{{ project_id }}"
+         data-strings='{{ t.quotations_js | tojson }}'>
+        <p class="br-status" id="qb-status">{{ t.quotations_loading }}</p>
+    </div>
+</div>
+
+<div class="qb-bar" id="qb-bar" hidden>
+    <span class="qb-bar-count" id="qb-bar-count"></span>
+    <span class="qb-bar-save" id="qb-bar-save" aria-live="polite"></span>
+    <span class="qb-bar-gate" id="qb-bar-gate"></span>
+    <button type="button" class="qb-btn qb-btn-primary" id="qb-approve"></button>
+</div>
+
+<script src="{{ url_for('static', filename='quotations_board.js') }}?v=8"></script>
+</body>
+</html>

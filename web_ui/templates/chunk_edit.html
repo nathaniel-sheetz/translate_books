@@ -19,6 +19,7 @@
      data-overlap-end="{{ overlap_end }}"
      data-anchor-idx="{{ anchor_idx }}"
      data-anchor-text="{{ anchor_text }}"
+     data-return-to="{{ return_to }}"
      data-dirty-confirm="{{ t.edit_chunk_dirty_confirm }}"
      data-saving-label="{{ t.edit_chunk_saving }}"
 >
@@ -59,6 +60,6 @@
     <div class="chunk-edit-status" id="chunk-edit-status"></div>
 </div>
 
-<script src="{{ url_for('static', filename='chunk_edit.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='chunk_edit.js') }}?v=3"></script>
 </body>
 </html>
