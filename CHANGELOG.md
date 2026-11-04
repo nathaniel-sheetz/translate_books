@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.83.0.0] - 2026-10-28
+## [0.83.0.0] - 2026-11-03
 
 ### Added
 - **quotation-pass puts the NBLA into a finished translation's Bible quotations** (`src/quotations/`, `scripts/quotation_pass.py`, skill `quotation-pass`). It is an optional post-translation pass for books that quote Scripture, and it replaces the ad-hoc short-sermons run (a hand-built quotation table, direct chunk edits and a follow-up audit).
@@ -16,6 +16,17 @@ All notable changes to this project will be documented in this file.
 - **`projects/<slug>/quotations.json` records exactly what the book quotes**: verses counted once and with repeats, quoted words, share of the book, the NBLA's limits (500 verses, 25%, no whole book) and `within_limits`, with one accounting row per accepted card. Every card with NBLA wording counts, edited or not; adapted ones are labelled.
 - **kdp-publish reads it.** `facts.quotations` carries the numbers, `rights_flags` gains `quoted_text_over_limit`, and a book whose English cites verses but has no record gets a `needs_input` item. The edition-notice template has a `{scripture_notice}` line, which is dropped when there is nothing to credit.
 - Two wave types with their own effort rows and usage logs: `quotations_scan` (medium) and `quotations_map` (high).
+- **A judge wave rules on every card that would change the text** (`judge-prepare` / `judge-fanout` / `judge-commit`, wave type `quotations_judge`, medium). Each card gets a verdict (apply, partial, reject, toss-up) and a confidence in `judge.json`, never in the book or `mapped.json`. Only an apply at 0.90 or above starts a card on Apply. Everything else starts on Not yet with the verdict shown, and a partial's fix is one click from the ask box. `judge-seed` holds chapters at pending so a held-out set holds only real marks, and `scripts/quotation_judge_gold.py` replays the judge against them. The prompt's worked examples are per-user (`prompts/quotation_judge_examples.json`, gitignored), with a made-up `.example` twin.
+- **`reref` gives a card another verse.** When the author quotes the KJV of one verse and the NBLA says it better in another, `reref --card <key> --ref "<Book c:v>"` makes a new card on the same sentence that `replaces` the old one. The request lives in `rerefs.json`, so the card survives a re-scan. An unapplied old card is set to Reject. An applied one stays until the new card is applied, and apply then writes a `superseded` row for it, so the record drops its verse and `verify` stops checking it.
+- **A reference endnote on every quotation inside « »** (`footnotes`, page `/quotations/<id>/footnotes`). Each note holds only the reference in the Spanish abbreviations, with an en dash in a range (`Sal 116:11`, `2 R 4:8–37`). Its marker follows the closing » and the punctuation after it. The notes are footnote annotations with origin `quotation_refs`, written through footnote_pass's validated `add` (which now takes an `origin`), and the chunk text is never touched. Only notes of this origin are retired, plus a note on exactly the same spot, or one holding nothing but the same verse's reference, when a ticked note replaces it. The page approves the exact plan, and the write refuses a plan that changed since.
+- The board has a "could go either way" tick, and every change to a choice is appended to `board_history.jsonl`. The paste and ask boxes save on blur and on leaving the page. `revise` accepts a `new` that only moves or removes quotation marks, which counts nothing. `map-fanout` takes `--job-timeout`.
+
+### Fixed
+- **Apply resumes after a kill.** An edit already in the text (its new words present, the old gone or only inside the new) is never applied again. A card whose edits all landed is recorded with `recovered`, and a card half-applied across two chunks finishes the rest. The resume check never ran before, so a re-run skipped the landed card, left it out of `quotations.json`, and doubled an edit whose old words sit inside its new ones ("amor" → "el amor").
+- **The approval covers every chunk a card writes to**, including those reached only by an echo or reference edit. An edit there after approval now voids the approval instead of being written over.
+- **A refused reference note no longer costs the reader the note it replaces.** The write adds first and retires a replaced note only once its replacement has landed.
+- Every state file of the pass (board, footnotes page, candidates, resolved, mapped, revisions, rerefs, judge verdicts, `quotations.json`) is written to a temp file and renamed into place, so a kill can't leave half a file. Board and footnote-page saves are serialized, so two saves in flight can't drop each other's choice.
+- A malformed `echo` in a board save is dropped instead of failing the request, `judge-commit` refuses a draft path outside the judge directory (as scan and map already did), and a failed approve on either page says so and re-enables the button.
 
 ## [0.82.1.0] - 2026-10-28
 

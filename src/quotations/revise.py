@@ -28,14 +28,14 @@ from typing import Any
 
 from src.quotations import map as qmap
 from src.quotations import scan as qscan
+from src.quotations import write_json
 
 
 def _store(project_dir: Path, key: str, revision: dict[str, Any]) -> None:
     path = qmap.revisions_path(project_dir)
     revisions = qmap.load_revisions(project_dir)
     revisions[key] = revision
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(revisions, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, revisions)
 
 
 def asks(project_dir: Path) -> dict[str, Any]:
@@ -182,7 +182,7 @@ def revise(project_dir: Path, key: str, mapping: dict[str, Any], *, ask: str | N
 
     _store(project_dir, key, revision)
     doc["cards"][position] = card
-    qmap.mapped_path(project_dir).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(qmap.mapped_path(project_dir), doc)
     qboard.save(project_dir, {key: {
         "ref": bool(old_choice.get("ref", True)) and bool(card.get("ref_edit")),
         "nbla": bool(card["quote_edits"]),

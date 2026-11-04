@@ -223,6 +223,22 @@ def test_a_missing_draft_is_reported_not_guessed(book):  # noqa: F811
     assert qjudge.load_verdicts(book)["verdicts"] == {}
 
 
+def test_a_draft_outside_the_judge_directory_is_not_read(book, tmp_path):  # noqa: F811
+    qjudge.judge_prepare(book, worker_model="claude-sonnet-5-5", cli="claude")
+    manifest_path = qjudge.judge_dir(book) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    job = manifest["jobs"][0]
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text(json.dumps([_answer(item=i) for i in range(1, len(job["keys"]) + 1)]), encoding="utf-8")
+    job["draft_path"] = str(outside)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    out = qjudge.judge_commit(book)
+    assert [f["id"] for f in out["failed"]] == ["job_001"]
+    assert "escapes" in out["failed"][0]["problem"]
+    assert qjudge.load_verdicts(book)["verdicts"] == {}
+
+
 def test_a_wave_runs_through_the_shared_runner(book):  # noqa: F811
     qjudge.judge_prepare(book, worker_model="claude-sonnet-5-5", cli="claude")
     manifest = json.loads((qjudge.judge_dir(book) / "manifest.json").read_text(encoding="utf-8"))

@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations import scan as qscan
 from src.quotations.index import BibleIndex, IndexError_, load_index
 from src.quotations.refs import Ref, find_es_refs, parse_ref, range_separator
@@ -189,7 +189,7 @@ def resolve(project_dir: Path, *, index: Optional[BibleIndex] = None) -> dict[st
         "candidates": out,
     }
     path = resolved_path(project_dir)
-    path.write_text(json.dumps(resolved, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, resolved)
     return {
         "status": "ok",
         "counts": dict(counts),

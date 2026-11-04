@@ -172,6 +172,99 @@ def test_apply_twice_changes_nothing_more(book):
     assert (book / "chunks" / "chapter_01_chunk_000.json").read_text(encoding="utf-8") == text
 
 
+def _chunk_text(root):
+    return json.loads((root / "chunks" / "chapter_01_chunk_000.json").read_text(encoding="utf-8"))["translated_text"]
+
+
+def _kill_after_the_chunk_save(root, monkeypatch):
+    """Run apply until its first ledger write, as if killed there."""
+    def killed(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(qapply, "append_decisions", killed)
+    with pytest.raises(KeyboardInterrupt):
+        qapply.apply(root)
+    monkeypatch.undo()
+
+
+def test_apply_killed_before_the_ledger_write_is_recorded_on_the_rerun(book, monkeypatch):
+    key = _card(book)["key"]
+    qboard.save(book, {key: {"ref": True, "nbla": True, "echo": [0]}})
+    qboard.approve(book)
+    _kill_after_the_chunk_save(book, monkeypatch)
+    text = _chunk_text(book)
+    assert text == "Jesús dijo: «Yo soy la luz del camino». (Jn 8:12) Anden en la luz."
+    assert qapply.applied_cards(book) == {}
+
+    # The chunk changed, so the user approves again.
+    qboard.approve(book)
+    out = qapply.apply(book)
+    assert out["status"] == "ok", out
+    assert out["edits_archived"] == 0 and _chunk_text(book) == text
+    row = qapply.applied_cards(book)[key]
+    assert row["recovered"] is True and row["nbla"] is True
+    assert {e["chunk_id"] for e in row["edits"]} == {"chapter_01_chunk_000"}
+    assert qrecord.read_record(book)["verses_unique"] == 1
+
+
+def test_an_edit_whose_old_text_is_inside_its_new_is_not_applied_twice(book, monkeypatch):
+    doc = qboard.load_mapped(book)
+    doc["cards"][0]["echo"][0]["new"] = "Caminen siempre"
+    qmap.mapped_path(book).write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    key = _card(book)["key"]
+    qboard.save(book, {key: {"ref": True, "nbla": True, "echo": [0]}})
+    qboard.approve(book)
+    _kill_after_the_chunk_save(book, monkeypatch)
+    assert _chunk_text(book).endswith("Caminen siempre en la luz.")
+
+    qboard.approve(book)
+    qapply.apply(book)
+    assert _chunk_text(book).endswith("Caminen siempre en la luz.")
+    assert qapply.applied_cards(book)[key]["recovered"] is True
+
+
+def test_a_half_applied_card_finishes_the_rest(book):
+    # One edit in the text with no ledger row: what a kill between two chunks leaves.
+    path = book / "chunks" / "chapter_01_chunk_000.json"
+    chunk = json.loads(path.read_text(encoding="utf-8"))
+    chunk["translated_text"] = chunk["translated_text"].replace("luz del mundo", "luz del camino;")
+    chunk["translated_text"] = chunk["translated_text"].replace("Yo soy la luz del camino;", "Yo soy la luz del camino")
+    path.write_text(json.dumps(chunk, ensure_ascii=False), encoding="utf-8")
+    key = _card(book)["key"]
+    qboard.save(book, {key: {"ref": True, "nbla": True, "echo": [0]}})
+    qboard.approve(book)
+
+    out = qapply.apply(book)
+    assert out["status"] == "ok", out
+    assert out["cards_applied"] == 1 and out["edits_archived"] == 2
+    assert _chunk_text(book) == "Jesús dijo: «Yo soy la luz del camino». (Jn 8:12) Anden en la luz."
+    assert [r["action"] for r in qapply.read_decisions(book)] == ["applied"]
+
+
+def test_the_approval_covers_a_chunk_only_an_echo_edit_touches(book):
+    # Put the echo's sentence (and the written reference) in a chunk of its own.
+    first = book / "chunks" / "chapter_01_chunk_000.json"
+    chunk = json.loads(first.read_text(encoding="utf-8"))
+    second = {**chunk, "id": "chapter_01_chunk_001", "position": 1, "translated_text": SENTENCES[1]}
+    chunk["translated_text"] = SENTENCES[0]
+    first.write_text(json.dumps(chunk, ensure_ascii=False), encoding="utf-8")
+    path = book / "chunks" / "chapter_01_chunk_001.json"
+    path.write_text(json.dumps(second, ensure_ascii=False), encoding="utf-8")
+    rows = json.loads((book / "alignments" / "chapter_01.json").read_text(encoding="utf-8"))
+    rows["alignments"][1]["chunk_id"] = "chapter_01_chunk_001"
+    (book / "alignments" / "chapter_01.json").write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    assert _card(book)["es_idx"] == [0]
+
+    key = _card(book)["key"]
+    qboard.save(book, {key: {"ref": True, "nbla": True, "echo": [0]}})
+    qboard.approve(book)
+    assert qboard.approved_choices(book)[1] is None
+    second["translated_text"] = SENTENCES[1].replace("luz", "lumbre")
+    path.write_text(json.dumps(second, ensure_ascii=False), encoding="utf-8")
+    _choices, error = qboard.approved_choices(book)
+    assert error and "changed since it was approved" in error
+
+
 def test_a_board_whose_chunk_changed_since_approval_is_refused(book):
     qboard.approve(book)
     path = book / "chunks" / "chapter_01_chunk_000.json"

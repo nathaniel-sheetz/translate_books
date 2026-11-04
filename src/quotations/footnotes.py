@@ -30,9 +30,11 @@ only exists in the EPUB build and the reader.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -42,7 +44,7 @@ from src.endnotes import _injection_point, parse_endnote_content
 from src.footnote_import import _unique_anchor
 from src.footnote_pass import FOOTNOTE_TYPE
 from src.footnote_pass.corpus import load_alignment_es_map, read_chapter_body
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations.refs import find_es_refs, parse_ref
 
 ORIGIN = "quotation_refs"
@@ -86,9 +88,7 @@ def load_board(project_dir: Path) -> dict[str, Any]:
 
 
 def _write_board(project_dir: Path, board: dict[str, Any]) -> None:
-    path = board_path(project_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(board, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(board_path(project_dir), board)
 
 
 # ── finding the spot ──────────────────────────────────────────────────────────
@@ -426,7 +426,7 @@ def plan(project_dir: Path, found: Optional[list[dict[str, Any]]] = None,
                            "sub_id": note.get("sub_id"), "content": note.get("content"), "origin": ORIGIN})
     for it in wanted.values():
         for old in it["replaces"]:
-            retire.append({"chapter_id": it["chapter_id"], **old})
+            retire.append({"chapter_id": it["chapter_id"], **old, "for_key": it["key"]})
     add = [{"chapter_id": c, "es_idx": i, "anchor": it["anchor"], "note": it["note"], "key": it["key"]}
            for (c, i, _content), it in wanted.items() if (c, i, _content) not in have]
     body = json.dumps({"add": [[a["chapter_id"], a["es_idx"], a["anchor"], a["note"]] for a in add],
@@ -435,6 +435,20 @@ def plan(project_dir: Path, found: Optional[list[dict[str, Any]]] = None,
     return {"add": add, "retire": retire, "fingerprint": hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]}
 
 
+#: The board file is read, changed and written back; two saves in flight from
+#: the page must not drop each other's ticks.
+_BOARD_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _BOARD_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_locked
 def save_choices(project_dir: Path, choices: dict[str, Any]) -> dict[str, Any]:
     project_dir = Path(project_dir)
     found = {it["key"]: it for it in items(project_dir)["items"]}
@@ -452,6 +466,7 @@ def save_choices(project_dir: Path, choices: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+@_locked
 def approve(project_dir: Path) -> dict[str, Any]:
     project_dir = Path(project_dir)
     board = load_board(project_dir)
@@ -463,6 +478,7 @@ def approve(project_dir: Path) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+@_locked
 def unapprove(project_dir: Path) -> None:
     board = load_board(Path(project_dir))
     board["approved"] = None
@@ -504,7 +520,7 @@ def build(project_dir: Path) -> dict[str, Any]:
 
 
 def write(project_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
-    """Write the approved plan: tombstone what it retires, then add through ``add``."""
+    """Write the approved plan: add through ``add``, then tombstone what it retires."""
     from src.footnote_pass import write as fp_write
 
     project_dir = Path(project_dir)
@@ -527,24 +543,31 @@ def write(project_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
     if not current["add"] and not current["retire"]:
         return {"status": "ok", **summary, "added": 0, "retired": 0, "refused": []}
 
-    now = datetime.now().isoformat()
-    store.append_records(project_dir, [{
-        "project_id": project_dir.name, "chapter_id": r["chapter_id"], "es_idx": r["es_idx"],
-        "sub_id": r["sub_id"], "removed": True, "origin": r.get("origin"), "timestamp": now,
-    } for r in current["retire"]])
     added = fp_write.add(
         project_dir,
         [{"chapter_id": a["chapter_id"], "es_idx": a["es_idx"], "anchor": a["anchor"], "note": a["note"],
           "reason": f"reference of {a['key']}"} for a in current["add"]],
         report=False, origin=ORIGIN,
     ) if current["add"] else {"counts": {"added": 0}, "refused": [], "warnings": []}
+    # Retire after adding: a note another origin wrote stays when its replacement
+    # was refused, so a refusal never costs the reader a note.
+    from src.footnote_pass import ledger as fp_ledger
+
+    refused_keys = {current["add"][r[fp_ledger.KEEP_INDEX]]["key"]
+                    for r in added.get("refused") or [] if fp_ledger.KEEP_INDEX in r}
+    retiring = [r for r in current["retire"] if r.get("for_key") not in refused_keys]
+    now = datetime.now().isoformat()
+    store.append_records(project_dir, [{
+        "project_id": project_dir.name, "chapter_id": r["chapter_id"], "es_idx": r["es_idx"],
+        "sub_id": r["sub_id"], "removed": True, "origin": r.get("origin"), "timestamp": now,
+    } for r in retiring])
     board["approved"] = None
     _write_board(project_dir, board)
     return {
         "status": "ok" if not added.get("refused") else "partial",
         **summary,
         "added": added["counts"]["added"],
-        "retired": len(current["retire"]),
+        "retired": len(retiring),
         "refused": added.get("refused") or [],
         "warnings": added.get("warnings") or [],
         "instructions": "Run `footnote_pass.py verify`, then build the EPUB; a note reaches the book only then.",

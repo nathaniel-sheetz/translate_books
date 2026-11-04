@@ -35,7 +35,7 @@ from typing import Any, Optional
 from src.decisions.scan import normalize_for_match
 from src.decisions.wave import fanout_error, load_manifest, run_wave
 from src.judges.llm_io import JudgeParseError, load_template, parse_judge_json, prompt_version
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations.refs import FoundRef, find_es_refs, find_refs, parse_ref
 
 logger = logging.getLogger(__name__)
@@ -452,11 +452,10 @@ def attach_written_refs(
     candidate covers at most one written occurrence, so a reference written
     twice needs two candidates.
     """
-    norm_english = english
     positions: list[Optional[int]] = []
     for cand in candidates:
         pattern = _ws_pattern(cand["en_span"])
-        match = pattern.search(norm_english) if pattern else None
+        match = pattern.search(english) if pattern else None
         positions.append(match.start() if match else None)
     used: set[int] = set()
     added: list[dict[str, Any]] = []
@@ -644,7 +643,7 @@ def scan_commit(project_dir: Path) -> dict[str, Any]:
         "missing": missing,
     }
     path = candidates_path(project_dir)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, doc)
     return {
         "status": "partial" if failed or missing else "ok",
         "counts": counts,

@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from src.quotations import write_json
 from src.quotations.versions import NBLA
 
 FILENAME = "quotations.json"
@@ -160,7 +161,7 @@ def build_record(project_dir: Path) -> dict[str, Any]:
 
 def write_record(project_dir: Path) -> dict[str, Any]:
     doc = build_record(project_dir)
-    record_path(project_dir).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(record_path(project_dir), doc)
     return doc
 
 

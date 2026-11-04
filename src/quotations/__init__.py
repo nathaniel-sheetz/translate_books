@@ -17,7 +17,10 @@ EPUB that has since changed, is an error, so the pass can never splice some
 other version under the NBLA's name.
 """
 
+import json
+import os
 from pathlib import Path
+from typing import Any
 
 #: Name of this pass's working directory under ``<project>/.harness/``.
 DIRNAME = "quotations"
@@ -28,3 +31,12 @@ INDEX_DIR = Path(__file__).resolve().parents[2] / "prompts" / "bible"
 
 def quotations_dir(project_dir: Path) -> Path:
     return Path(project_dir) / ".harness" / DIRNAME
+
+
+def write_json(path: Path, doc: Any) -> None:
+    """Whole or not at all: a kill mid-write never leaves half a state file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)

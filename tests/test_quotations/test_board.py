@@ -270,6 +270,13 @@ def test_a_second_seed_keeps_marks_and_stops_listing_them(tmp_path, mark):
     assert qboard.load(book)["choices"][key]["state"] == state
 
 
+@pytest.mark.parametrize("echo", [5, "0", {"0": 1}, [True], [None, -1, 9]])
+def test_a_malformed_echo_tick_is_dropped_not_a_crash(echo):
+    card = _card(echo=[{"es_idx": 1, "old": "Caminen", "new": "Anden"}])
+    assert qboard.clean_choice(card, {"nbla": True, "echo": echo, "state": "approve"})["echo"] == []
+    assert qboard.clean_choice(card, {"nbla": True, "echo": [0], "state": "approve"})["echo"] == [0]
+
+
 def test_seed_refuses_a_chapter_with_no_cards(tmp_path):
     out = qboard.seed_pending(_book(tmp_path, _card()), ["chapter_09"])
     assert out["status"] == "error" and "chapter_09" in out["problems"][0]

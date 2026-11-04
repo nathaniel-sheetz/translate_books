@@ -41,7 +41,7 @@ from typing import Any, Optional
 from src.decisions.scan import normalize_for_match
 from src.decisions.wave import fanout_error, load_manifest, run_wave
 from src.judges.llm_io import JudgeParseError, load_template, parse_judge_json, prompt_version
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations import scan as qscan
 from src.quotations.conventions import (
     fills_paragraph,
@@ -685,7 +685,7 @@ def map_commit(project_dir: Path) -> dict[str, Any]:
         "missing": missing,
     }
     path = mapped_path(project_dir)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, doc)
     quote_edits = [e for c in cards for e in c["quote_edits"]]
     return {
         "status": "partial" if failed or missing else "ok",

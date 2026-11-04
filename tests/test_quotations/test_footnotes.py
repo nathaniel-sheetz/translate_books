@@ -173,6 +173,29 @@ def test_write_adds_the_ticked_notes_and_leaves_the_hymn_alone(book):
     assert qfoot.approve(book)["status"] == "error"  # a second write would do nothing
 
 
+def test_a_refused_replacement_keeps_the_note_it_would_have_replaced(book, monkeypatch):
+    from src.footnote_pass import ledger as fp_ledger
+    from src.footnote_pass import write as fp_write
+
+    real_add = fp_write.add
+
+    def add_refusing_a(project_dir, notes, **kwargs):
+        # A's note (es_idx 0) is refused, as a validation failure would.
+        at_a = next(i for i, n in enumerate(notes) if n["es_idx"] == 0)
+        out = real_add(project_dir, [n for i, n in enumerate(notes) if i != at_a], **kwargs)
+        out["refused"] = [{"chapter_id": "chapter_01", "es_idx": 0, "problems": [], fp_ledger.KEEP_INDEX: at_a}]
+        return out
+
+    monkeypatch.setattr(fp_write, "add", add_refusing_a)
+    assert qfoot.approve(book)["status"] == "ok"
+    out = qfoot.write(book)
+    assert out["status"] == "partial" and out["added"] == 7
+    # F's replacement landed, so its reference-only note goes; A's stays.
+    assert out["retired"] == 1
+    live = {n["sub_id"] for n in _active(book) if n.get("origin") != qfoot.ORIGIN}
+    assert live == {"uhymn001", "uempty01"}
+
+
 def test_unticking_retires_only_its_own_note(book):
     _approve_and_write(book)
     assert qfoot.save_choices(book, {"B": False})["status"] == "ok"

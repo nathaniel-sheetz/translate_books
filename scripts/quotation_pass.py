@@ -19,7 +19,7 @@ to ``projects/<slug>/.harness/quotations/last_output.json`` when a project is na
     judge-prepare  render the judge's jobs for the unapplied cards     (no spend)
     judge-fanout   run the judge wave headless                         (no API spend)
     judge-commit   read the verdicts into judge.json                   (no spend)
-    asks          the cards where the user asked for other wording    (no spend)
+    asks           the cards where the user asked for other wording   (no spend)
     revise         validate a revised mapping for one card, store it   (no spend)
     reref          make the card for another verse on a card's sentence (no spend)
     apply          apply the approved board through the judge path     (no spend)

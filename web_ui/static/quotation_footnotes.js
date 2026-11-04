@@ -197,6 +197,7 @@
         }).catch(function (err) {
             saving--;
             barSave.textContent = fill(S.save_failed, { error: String(err) });
+            if (data) updateBar();
         });
     }
 
@@ -210,6 +211,9 @@
                 return;
             }
             data = reply.json;
+            updateBar();
+        }).catch(function (err) {
+            barSave.textContent = fill(S.save_failed, { error: String(err) });
             updateBar();
         });
     });

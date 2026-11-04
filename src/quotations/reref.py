@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations import scan as qscan
 from src.quotations.refs import parse_ref
 
@@ -98,7 +98,7 @@ def add_derived(project_dir: Path, candidates: list[dict[str, Any]], index) -> l
 
 
 def _write(path: Path, doc: Any) -> None:
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, doc)
 
 
 def reref(project_dir: Path, key: str, ref_en: str, *, why: str = "") -> dict[str, Any]:

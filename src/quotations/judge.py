@@ -40,7 +40,7 @@ from typing import Any, Optional
 
 from src.decisions.wave import fanout_error, load_manifest, run_wave
 from src.judges.llm_io import JudgeParseError, extract_json, load_template, prompt_version, render
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations import map as qmap
 from src.quotations import scan as qscan
 from src.quotations.index import plain
@@ -463,6 +463,9 @@ def collect(root: Path) -> dict[str, Any]:
     missing: list[str] = []
     for job in manifest["jobs"]:
         draft = Path(job["draft_path"])
+        if not draft.resolve().is_relative_to(root.resolve()):
+            failed.append({"id": job["id"], "problem": f"draft_path escapes the judge directory: {draft}"})
+            continue
         if not draft.exists():
             missing.append(job["id"])
             continue
@@ -556,7 +559,7 @@ def judge_commit(project_dir: Path) -> dict[str, Any]:
     doc["verdicts"].update(got["verdicts"])
     doc.update({k: manifest.get(k) for k in ("prompt_version", "worker_model", "cli", "effort")})
     doc["committed_at"] = datetime.now().isoformat(timespec="seconds")
-    verdicts_path(project_dir).write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(verdicts_path(project_dir), doc)
     counts: dict[str, int] = {}
     for verdict in got["verdicts"].values():
         counts[verdict["verdict"]] = counts.get(verdict["verdict"], 0) + 1

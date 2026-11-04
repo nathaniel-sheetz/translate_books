@@ -13,8 +13,9 @@ evaluation; then per chapter :func:`~src.corrections_apply.recombine_chapter` â†
   (:func:`src.quotations.board.locate_edit`) and ``source: "quotation-pass"``.
 - **A card lands whole or not at all.** Its edits are first applied to in-memory
   copies; a card with any edit that would not land is reported and skipped.
-- **Resumable.** A card whose edits are already in the text (old gone, new
-  present) is recorded as applied, not re-edited; a chapter whose alignment is
+- **Resumable.** An edit already in the text (new present, old gone or only
+  inside new) is never re-applied: a card whose edits all are is recorded as
+  applied, and a half-applied one finishes the rest; a chapter whose alignment is
   older than its chunks gets its recombine/realign tail on the next run.
 
 - **Only approved cards are applied.** A rejected card gets one ``declined`` row
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -126,11 +128,25 @@ def alignment_is_stale(project_dir: Path, chapter_id: str) -> bool:
     return False
 
 
-def _already_in(book, record: dict[str, Any]) -> bool:
-    """The edit is already made: the new text is in the chunk and the old is not."""
-    chunk = book.chunk(record["chunk_id"]) if record else None
+def _edit_chunk_id(book, chapter_id: str, edit: dict[str, Any]) -> Optional[str]:
+    """The chunk the edit's row sits in."""
+    return (book.chapter_rows(chapter_id).get(edit["es_idx"]) or {}).get("chunk_id")
+
+
+def _already_in(book, chapter_id: str, edit: dict[str, Any]) -> bool:
+    """The edit is already made: the new text is in its row's chunk, and the old
+    text is gone or occurs only inside the new ("amor" -> "el amor")."""
+    chunk_id = _edit_chunk_id(book, chapter_id, edit)
+    chunk = book.chunk(chunk_id) if chunk_id else None
     text = (chunk.translated_text if chunk else "") or ""
-    return bool(record) and record["corrected_es"] in text and record["original_es"] not in text
+    old, new = edit["old"], edit["new"]
+    if not new or new not in text:
+        return False
+    spans = [(m.start(), m.start() + len(new)) for m in re.finditer(re.escape(new), text)]
+    return all(
+        any(s <= m.start() and m.start() + len(old) <= e for s, e in spans)
+        for m in re.finditer(re.escape(old), text)
+    ) if old else True
 
 
 def _ledger_row(card: dict[str, Any], choice: dict[str, Any], edits: list[dict[str, Any]],
@@ -277,17 +293,27 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
             if action != last:
                 ledger.extend(_applied_rows(card, _ledger_row(card, choice, [], action, applied_at), latest))
             continue
-        records = [qboard.locate_edit(book, card["chapter_id"], e) for e in edits]
+        # An edit already in the text (a run killed between the chunk save and the
+        # ledger write) is not located again, so it can never be applied twice.
+        landed = [_already_in(book, card["chapter_id"], e) for e in edits]
+        records = [None if done_ else qboard.locate_edit(book, card["chapter_id"], e)
+                   for e, done_ in zip(edits, landed)]
         # The ledger keeps each edit's chunk, which is what `verify` reads.
-        placed[key] = [{**e, "chunk_id": r["chunk_id"]} if r else e for e, r in zip(edits, records)]
-        if all(r is None or _already_in(book, r) for r in records) and any(records):
+        placed[key] = [
+            {**e, "chunk_id": r["chunk_id"]} if r
+            else {**e, "chunk_id": _edit_chunk_id(book, card["chapter_id"], e)} if done_
+            else e
+            for e, r, done_ in zip(edits, records, landed)
+        ]
+        if all(landed):
             ledger.extend(_applied_rows(card, _ledger_row(
                 card, choice, placed[key], ACTION_APPLIED, applied_at, recovered=True), latest))
             continue
-        if any(r is None for r in records):
+        if any(r is None and not done_ for r, done_ in zip(records, landed)):
             skipped.append({"key": key, "reason": "an edit's text is no longer in the chapter"})
             continue
-        card_records[key] = [{**r, "card": key} for r in records]
+        # A half-applied card (one chunk saved before a kill) finishes the rest.
+        card_records[key] = [{**r, "card": key} for r in records if r is not None]
         for record in card_records[key]:
             plan.setdefault(record["chunk_id"], []).append((key, record))
 

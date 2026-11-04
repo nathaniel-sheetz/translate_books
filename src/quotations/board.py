@@ -52,15 +52,17 @@ the patched text away. Nothing here writes a chunk.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
-from src.quotations import quotations_dir
+from src.quotations import quotations_dir, write_json
 from src.quotations import scan as qscan
 from src.quotations.map import (
     CARD_MATCHES,
@@ -132,9 +134,7 @@ def load(project_dir: Path) -> dict[str, Any]:
 
 
 def _write(project_dir: Path, board: dict[str, Any]) -> None:
-    path = board_path(project_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(board, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(board_path(project_dir), board)
 
 
 # ── the recommendation ───────────────────────────────────────────────────────
@@ -233,8 +233,8 @@ def clean_choice(card: dict[str, Any], raw: Any, decision: Optional[dict[str, An
     return {
         "ref": bool(raw.get("ref")) and bool(card.get("ref_edit")),
         "nbla": bool(raw.get("nbla")) and bool(card.get("quote_edits")),
-        "echo": sorted({int(i) for i in raw.get("echo") or []
-                        if isinstance(i, int) and 0 <= i < echo_count}),
+        "echo": sorted({int(i) for i in (raw.get("echo") if isinstance(raw.get("echo"), list) else [])
+                        if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < echo_count}),
         "paste": str(raw.get("paste") or "").strip() if paste_ok else "",
         "state": state,
         "hand": bool(raw.get("hand")) and card.get("status") not in (CARD_NOT_SCRIPTURE, CARD_UNRESOLVED),
@@ -422,7 +422,14 @@ def fingerprint(project_dir: Path, doc: dict[str, Any], board_choices: dict[str,
     chunk_ids = set()
     for card in doc.get("cards") or []:
         rows = book.chapter_rows(card["chapter_id"])
-        for idx in card.get("es_idx") or []:
+        # Echo and reference edits can sit on rows (and chunks) the card's own
+        # sentence does not reach.
+        edits = list(card.get("quote_edits") or []) + list(card.get("echo") or [])
+        if card.get("ref_edit"):
+            edits.append(card["ref_edit"])
+        indices = set(card.get("es_idx") or [])
+        indices.update(e["es_idx"] for e in edits if isinstance(e, dict) and isinstance(e.get("es_idx"), int))
+        for idx in indices:
             if rows.get(idx, {}).get("chunk_id"):
                 chunk_ids.add(rows[idx]["chunk_id"])
     for chunk_id in sorted(chunk_ids):
@@ -465,6 +472,20 @@ def effective_choices(doc: dict[str, Any], saved: dict[str, dict],
             if card["key"] in saved else default_choice(card) for card in doc.get("cards") or []}
 
 
+#: board.json is read, changed and written back; the page can have two saves in
+#: flight, and without this the second can drop the first.
+_BOARD_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _BOARD_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_locked
 def save(project_dir: Path, choices: dict[str, Any]) -> dict[str, Any]:
     """Store the page's choices for the cards it names; any change drops the approval."""
     project_dir = Path(project_dir)
@@ -548,6 +569,7 @@ def seed_pending(project_dir: Path, chapters: list[str]) -> dict[str, Any]:
             "marked": len(cards) - len(unmarked), "unmarked": unmarked}
 
 
+@_locked
 def approve(project_dir: Path) -> dict[str, Any]:
     """Approve the board as it stands: the choices in force and the text they were checked on."""
     project_dir = Path(project_dir)
@@ -566,6 +588,7 @@ def approve(project_dir: Path) -> dict[str, Any]:
     return {"status": "ok", "approved": board["approved"]}
 
 
+@_locked
 def unapprove(project_dir: Path) -> dict[str, Any]:
     board = load(project_dir)
     board["approved"] = None

@@ -620,6 +620,9 @@
             }
             data = reply.json;
             updateBar();
+        }).catch(function (err) {
+            barSave.textContent = fill(S.save_failed, { error: String(err) });
+            updateBar();
         });
     });
 
