@@ -43,6 +43,16 @@ style answers (the horse books). Pass `--group <id>` to `setup`, or afterwards r
 to rebuild the sibling snapshot the drafting steps read. A group id is also a scope for house rules
 and house-lexicon entries (`group:horses`).
 
+**Collections (several works, one volume).** An anthology or two short books bound together is
+one project per work plus a collection over them — never one project with the works as
+chapters. `setup` each work on its own, then **before drafting any style guide** run
+`python scripts/harness.py collection-create <slug> --members <a> <b> ... --title "<volume>"`
+(`--group <id>` to reuse a group, `--group-kind series` when the works share a cast). That joins
+the works to one book group, so each later work's style guide and glossary pre-fill from the
+earlier ones. Then draft and translate each work in member order as an ordinary book. If the
+result lists `stale_precedent`, run `precedent --project <slug>` for each. The volume EPUB is
+`collection-epub <slug>` (see `docs/TRANSLATE_HARNESS.md` § Collections).
+
 `setup` also accepts `--always-dialogue` / `--always-images`, which force the dialogue block and
 image bullet onto every chunk so the cacheable prompt prefix stays byte-identical book-wide. Both
 default to **auto** (on when the book needs it), and **`setup` is no longer the only place to set

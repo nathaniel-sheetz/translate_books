@@ -188,6 +188,18 @@ class TestBuildEndnoteArtifacts:
         assert entries == []
         assert injected == {"chapter_01": "Texto sin notas."}
 
+    def test_start_offset_continues_the_numbering(self, tmp_path):
+        # A collection renders its second work after the first one's notes.
+        _write_annotations(tmp_path, [
+            {"chapter_id": "chapter_01", "es_idx": 0, "type": "footnote", "content": "uno"},
+            {"chapter_id": "chapter_01", "es_idx": 1, "type": "footnote", "content": "dos"},
+        ])
+        _write_alignment(tmp_path, "chapter_01", {0: "Primera.", 1: "Segunda."})
+        injected, entries = build_endnote_artifacts(
+            tmp_path, [("chapter_01", "Primera. Segunda.")], start=7)
+        assert [e.number for e in entries] == [8, 9]
+        assert injected["chapter_01"] == "Primera.{{ENDNOTE:8}} Segunda.{{ENDNOTE:9}}"
+
 
 # --- render_endnotes_xhtml ---
 
@@ -212,6 +224,24 @@ class TestRenderEndnotesXhtml:
         assert "Tercera nota." in html
         # Chapter 1 group comes before chapter 2.
         assert html.index("Capítulo 1") < html.index("Capítulo 2")
+
+    def test_work_titles_group_by_work_then_chapter(self):
+        entries = [
+            Endnote("w01/chapter_02", 0, 1, "Uno."),
+            Endnote("w01/chapter_03", 0, 2, "Dos."),
+            Endnote("w02/chapter_01", 0, 3, "Tres."),
+        ]
+        headings = {"w01/chapter_02": "Sermón I", "w01/chapter_03": "Sermón II",
+                    "w02/chapter_01": "El gigante"}
+        files = {k: k.replace("/", "_") + ".xhtml" for k in headings}
+        works = {"w01/chapter_02": "Sermones", "w01/chapter_03": "Sermones",
+                 "w02/chapter_01": "El gigante"}
+        html = render_endnotes_xhtml(entries, headings, files, work_titles=works)
+        assert re.findall(r"<(h[123])>([^<]+)</h[123]>", html) == [
+            ("h1", "Notas"), ("h2", "Sermones"), ("h3", "Sermón I"), ("h3", "Sermón II"),
+            ("h2", "El gigante"),
+        ]
+        assert 'href="w02_chapter_01.xhtml#enref-3"' in html
 
     def test_escapes_text(self):
         entries = [Endnote("chapter_01", 0, 1, "a < b & c")]

@@ -3471,3 +3471,101 @@ body {
 .overflow-btn-danger {
     color: var(--review-blacklist);
 }
+
+/* Collections: one volume bound from several books. The library shows one
+   card for it (tagged, no ⋮ menu); /read/collection/<id> lists the works, each
+   with the chapter list a book page draws, plus the volume's status table and
+   its EPUB build. */
+
+.show-works-btn[aria-pressed="true"] {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    color: var(--accent-dark);
+}
+
+.collection-tag {
+    display: block;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 2px 0 4px;
+}
+
+.collection-page .collection-status {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    margin: 8px 0 20px;
+}
+.collection-status th,
+.collection-status td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-light);
+    vertical-align: top;
+}
+.collection-status th {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.collection-status td.num {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.collection-status .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.collection-status-wrap {
+    overflow-x: auto;
+}
+
+.collection-build {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    margin: 0 0 24px;
+}
+.collection-build-msg.is-error {
+    color: var(--review-blacklist);
+}
+
+.work-section {
+    margin: 0 0 28px;
+}
+.work-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin: 0 0 6px;
+}
+.work-head h2 {
+    font-size: 19px;
+    margin: 0;
+}
+.work-head h2 a {
+    color: inherit;
+    text-decoration: none;
+}
+.work-missing {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.nav-chevron.nav-next-work {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--accent-dark);
+}
+.next-work-label {
+    font-size: 12px;
+    white-space: nowrap;
+}
+

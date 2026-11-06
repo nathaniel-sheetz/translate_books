@@ -123,12 +123,17 @@ def _injection_point(
 def build_endnote_artifacts(
     project_path: Path,
     ordered_chapters: List[Tuple[str, str]],
+    *,
+    start: int = 0,
 ) -> Tuple[Dict[str, str], List[Endnote]]:
     """Compute endnote markers and the numbered endnote list.
 
     Args:
         project_path: project root (contains ``annotations.jsonl`` / ``alignments/``).
         ordered_chapters: ``[(chapter_id, chapter_text), ...]`` in book order.
+        start: how many notes precede this project's first one. A collection
+            renders each member with the running total, so the numbers run on
+            across the volume (the first note here is ``start + 1``).
 
     Returns:
         ``(injected_texts, entries)`` where ``injected_texts`` maps every input
@@ -142,7 +147,7 @@ def build_endnote_artifacts(
     """
     injected_texts: Dict[str, str] = {}
     entries: List[Endnote] = []
-    counter = 0
+    counter = start
 
     for chapter_id, text in ordered_chapters:
         annotations = _load_footnote_annotations(project_path, chapter_id)
@@ -215,12 +220,19 @@ def render_endnotes_xhtml(
     chapter_headings: Dict[str, str],
     chapter_files: Dict[str, str],
     section_heading: str = "Notas",
+    *,
+    work_titles: Optional[Dict[str, str]] = None,
 ) -> str:
     """Render the back-matter "Notas" section as XHTML.
 
     Grouped by chapter (in book order), one ``<p class="endnote">`` per note.
     Each number links back to its in-text marker (``#enref-N``) and carries an
     ``id="en-N"`` so the marker can link forward to it.
+
+    ``work_titles`` (a collection build) maps each chapter key to its work's
+    title: the notes are then grouped by work (``<h2>``) and then by chapter
+    (``<h3>``), and a one-chapter work whose chapter heading is its title gets
+    no chapter heading under it.
     """
     body: List[str] = [f"<h1>{escape(section_heading)}</h1>"]
 
@@ -230,9 +242,18 @@ def render_endnotes_xhtml(
     for e in entries:
         grouped.setdefault(e.chapter_id, []).append(e)
 
+    current_work = None
     for chapter_id, notes in grouped.items():
         heading = chapter_headings.get(chapter_id, chapter_id)
-        body.append(f"<h2>{escape(heading)}</h2>")
+        if work_titles is None:
+            body.append(f"<h2>{escape(heading)}</h2>")
+        else:
+            work = work_titles.get(chapter_id, "")
+            if work != current_work:
+                body.append(f"<h2>{escape(work)}</h2>")
+                current_work = work
+            if heading.casefold() != work.casefold():
+                body.append(f"<h3>{escape(heading)}</h3>")
         href_base = chapter_files.get(chapter_id, "")
         if not href_base:
             logger.warning("No chapter file mapped for %s — back-links will be fragment-only", chapter_id)

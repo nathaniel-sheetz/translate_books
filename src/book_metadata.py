@@ -54,6 +54,42 @@ def _note(path: Path) -> tuple[str, str]:
     return _text(data.get("heading")), str(data.get("body") or "")
 
 
+def _joined(names: list[str]) -> str:
+    """One name -> itself; several -> "A, B y C" (the volume is Spanish)."""
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return f"{', '.join(names[:-1])} y {names[-1]}"
+
+
+def _collection_defaults(project_dir: Path) -> dict[str, str]:
+    """For a collection dir: author, translator and language from its members.
+
+    A blank field on the volume falls back to the members' values: one
+    distinct author names the volume's author, several are joined. ``{}`` for
+    a book, so a book's metadata is resolved exactly as before.
+    """
+    from src import collection as collection_mod
+
+    if not collection_mod.is_collection_dir(project_dir):
+        return {}
+    coll = collection_mod.load_collection(project_dir)
+    members = [load_book_metadata(m.path) for m in coll.members if m.path is not None]
+
+    def distinct(key: str) -> list[str]:
+        seen: list[str] = []
+        for meta in members:
+            if meta[key] and meta[key] not in seen:
+                seen.append(meta[key])
+        return seen
+
+    languages = distinct("language")
+    return {
+        "author": _joined(distinct("author")),
+        "translator": _joined(distinct("translator")),
+        "language": languages[0] if languages else "",
+    }
+
+
 def load_book_metadata(project_dir: Path) -> dict[str, Any]:
     """Resolve every metadata field a build needs for ``project_dir``.
 
@@ -79,13 +115,22 @@ def load_book_metadata(project_dir: Path) -> dict[str, Any]:
     note_heading, note_body = _note(project_dir / TRANSLATOR_NOTE_FILE)
     notice_heading, notice_body = _note(project_dir / EDITION_NOTICE_FILE)
 
+    author = _first(project.get("author"), harness.get("author"), ingest.get("creator"))
+    translator = _text(project.get("translator"))
+    language = _first(project.get("target_lang_code"), harness.get("language_code"))
+    if not (author and translator and language):
+        derived = _collection_defaults(project_dir)
+        author = author or derived.get("author", "")
+        translator = translator or derived.get("translator", "")
+        language = language or derived.get("language", "")
+
     return {
         "title": _first(project.get("spanish_title"), project.get("title"),
                         harness.get("title"), ingest.get("title")),
         "subtitle": _text(project.get("subtitle")),
-        "author": _first(project.get("author"), harness.get("author"), ingest.get("creator")),
-        "language": _first(project.get("target_lang_code"), harness.get("language_code")) or "es",
-        "translator": _text(project.get("translator")),
+        "author": author,
+        "language": language or "es",
+        "translator": translator,
         "description": _text(project.get("description")),
         "rights": _text(project.get("rights")),
         "source_title": _text(project.get("source_title")),

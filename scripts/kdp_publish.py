@@ -66,10 +66,18 @@ def _die(message: str) -> None:
 
 
 def _resolve_project(arg: str) -> Path:
+    """A book's project dir, or a collection's dir (a volume is listed like a book)."""
+    from src import collection as collection_mod
+
     try:
         return hstate.resolve_project_dir(arg).resolve()
     except FileNotFoundError:
-        _die(f"project not found: {arg!r} (looked for a directory and projects/{arg})")
+        pass
+    try:
+        return collection_mod.resolve_collection_dir(arg).resolve()
+    except (FileNotFoundError, ValueError):
+        _die(f"project not found: {arg!r} (looked for a directory, projects/{arg} "
+             f"and a collection named {arg!r})")
         raise AssertionError("unreachable")  # pragma: no cover
 
 

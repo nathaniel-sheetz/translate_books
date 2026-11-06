@@ -76,6 +76,20 @@ def read_opf(epub_path: Path) -> dict[str, Any]:
     }
 
 
+def _authors_landed(project_dir: Path, author: str, creators: list[str]) -> bool:
+    """A book's author is one ``dc:creator``; a collection carries one per member author.
+
+    A collection's volume author may be a joined "A y B" or a label of its own
+    ("Varios autores"), so it is checked against the members instead.
+    """
+    from src import collection as collection_mod
+
+    if collection_mod.is_collection_dir(project_dir):
+        expected = collection_mod.member_authors(collection_mod.load_collection(project_dir))
+        return bool(creators) and all(a in creators for a in expected)
+    return author in creators
+
+
 def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any]:
     project_dir = Path(project_dir)
     epub_path = Path(epub_path) if epub_path else newest_epub(project_dir)
@@ -99,7 +113,8 @@ def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any
         _check("subtitle", subtitle == want["subtitle"]
                and got["refines"].get("subtitle", {}).get("title-type") == "subtitle",
                f"OPF {subtitle!r}")
-    _check("author", want["author"] in got["creators"], f"OPF {got['creators']}")
+    _check("author", _authors_landed(project_dir, want["author"], got["creators"]),
+           f"OPF {got['creators']}")
     if want["translator"]:
         _check("translator_trl", (want["translator"], "trl") in got["contributors"],
                f"OPF {got['contributors']}")

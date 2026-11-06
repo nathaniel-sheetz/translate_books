@@ -214,6 +214,43 @@ def _build_parser() -> argparse.ArgumentParser:
     prp.add_argument("--keep", action="store_true",
                      help="Show the existing snapshot instead of rebuilding it")
 
+    # collection-* (one volume bound from several existing projects) ---------
+    ccp = sub.add_parser("collection-create",
+                         help="Bind existing projects into one volume and join them to a book group")
+    ccp.add_argument("collection", help="Collection slug (must not be a project slug)")
+    ccp.add_argument("--members", nargs="+", required=True, metavar="SLUG",
+                     help="Member project slugs, in volume order (each set up with `setup` first)")
+    ccp.add_argument("--title", default=None, help="The volume's Spanish title (project.json)")
+    ccp.add_argument("--group", default=None,
+                     help="Book group to join (default: the collection slug); an existing id reuses it")
+    ccp.add_argument("--group-kind", dest="group_kind", choices=["domain", "series"], default=None,
+                     help="Kind for a new group (default domain; series when the works share "
+                          "characters, so address pairs and names carry over too)")
+    ccp.add_argument("--parent", default=None,
+                     help="Folder under projects/ to create the collection in (e.g. .macdonald)")
+    cap_ = sub.add_parser("collection-add", help="Add an existing project to a collection")
+    cap_.add_argument("collection")
+    cap_.add_argument("--member", required=True)
+    cap_.add_argument("--position", type=_positive_int, default=None,
+                      help="1-based place in the volume (default: last)")
+    cap_.add_argument("--group-kind", dest="group_kind", choices=["domain", "series"], default=None)
+    crp = sub.add_parser("collection-remove", help="Remove a member from a collection")
+    crp.add_argument("collection")
+    crp.add_argument("--member", required=True)
+    crp.add_argument("--keep-group", dest="keep_group", action="store_true",
+                     help="Leave the member in the collection's book group")
+    cop_ = sub.add_parser("collection-reorder", help="Set the order of a collection's members")
+    cop_.add_argument("collection")
+    cop_.add_argument("--members", nargs="+", required=True, metavar="SLUG",
+                      help="Every member exactly once, in the new order")
+    csp_ = sub.add_parser("collection-status",
+                          help="Per-member stage, translated share and open findings (read-only)")
+    csp_.add_argument("collection")
+    cep = sub.add_parser("collection-epub", help="Build the volume EPUB from its members")
+    cep.add_argument("collection")
+    cep.add_argument("--allow-partial", dest="allow_partial", action="store_true",
+                     help="Build even when a member has untranslated chapters (they are left out)")
+
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
         p.add_argument("--chapter-pattern", default="auto",
@@ -747,6 +784,22 @@ def _dispatch(args: argparse.Namespace):
             return flow.group_leave(args.project, group=args.group)
     if cmd == "precedent":
         return flow.precedent(args.project, rebuild=not args.keep)
+    if cmd == "collection-create":
+        return flow.collection_create(args.collection, members=args.members, title=args.title,
+                                      group=args.group, group_kind=args.group_kind,
+                                      parent=args.parent)
+    if cmd == "collection-add":
+        return flow.collection_add(args.collection, member=args.member, position=args.position,
+                                   group_kind=args.group_kind)
+    if cmd == "collection-remove":
+        return flow.collection_remove(args.collection, member=args.member,
+                                      keep_group=args.keep_group)
+    if cmd == "collection-reorder":
+        return flow.collection_reorder(args.collection, members=args.members)
+    if cmd == "collection-status":
+        return flow.collection_status(args.collection)
+    if cmd == "collection-epub":
+        return flow.collection_epub(args.collection, allow_partial=args.allow_partial)
     if cmd == "style-rule":
         if args.action == "list":
             return flow.style_rule_list(args.project)
@@ -907,7 +960,10 @@ def _artifact_harness_dir(args: argparse.Namespace, result: dict) -> Path | None
     project = getattr(args, "project", None)
     if not project:
         # setup --title (no --project) resolves the dir itself; carry it in result.
-        project_dir_str = result.get("project_dir") if isinstance(result, dict) else None
+        # A collection command writes beside its collection.json instead.
+        project_dir_str = None
+        if isinstance(result, dict):
+            project_dir_str = result.get("project_dir") or result.get("collection_dir")
         if not project_dir_str:
             return None
         project_dir = Path(project_dir_str)
@@ -1069,6 +1125,8 @@ def _log_command(args: argparse.Namespace, *, status: str, duration: float,
                 run_id = state.ensure_run_id(project_dir)
             except Exception:  # noqa: BLE001
                 slug = project_dir_str
+        elif getattr(args, "collection", None):
+            slug = args.collection
         elif getattr(args, "title", None):
             # A `setup --title` that failed before naming its folder: still the book's row.
             slug = state.slugify(args.title)

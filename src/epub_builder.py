@@ -322,6 +322,16 @@ p.titlepage-publisher { margin-top: 4em; font-size: 0.9em; }
 section.edition-notice p { text-indent: 0; font-size: 0.9em; margin: 0.6em 0; }
 """
 
+# Appended to the stylesheet of a collection build only, so a single book's
+# style.css stays byte-for-byte what it was.
+_COLLECTION_CSS = """\
+section.partpage { text-align: center; margin-top: 30%; }
+section.partpage h1 { font-size: 1.6em; margin-bottom: 0.6em; }
+section.partpage p { text-indent: 0; text-align: center; margin: 0.4em 0; }
+p.partpage-original { font-size: 1.05em; }
+p.partpage-author { font-size: 1.1em; margin-top: 1.2em; }
+"""
+
 _DEFAULT_TRANSLATOR_LABEL = "Traducción de"
 _DEFAULT_EDITION_NOTICE_HEADING = "Créditos"
 
@@ -706,6 +716,25 @@ def title_page_to_xhtml(
     return _xhtml_page(title, body)
 
 
+def part_page_to_xhtml(
+    title: str,
+    original_title: Optional[str] = None,
+    author: Optional[str] = None,
+    year: Optional[Any] = None,
+) -> str:
+    """Render a collection's part page: one work's title, original title, author, year."""
+    body = ['<section class="partpage">', f'<h1>{escape(title)}</h1>']
+    original = (original_title or '').strip()
+    if original and original.casefold() != title.strip().casefold():
+        body.append(f'<p class="partpage-original"><em>{escape(original)}</em></p>')
+    if author and author.strip():
+        body.append(f'<p class="partpage-author">{escape(author.strip())}</p>')
+    if year not in (None, ''):
+        body.append(f'<p class="partpage-year">{escape(str(year).strip())}</p>')
+    body.append('</section>')
+    return _xhtml_page(title, body)
+
+
 def edition_notice_to_xhtml(heading: str, body: str) -> str:
     """Render the copyright / edition-notice page. Unlike the translator note the
     heading is visually quiet (an h2), and paragraphs are not indented."""
@@ -829,6 +858,26 @@ def matter_text_to_xhtml(text: str, label: str) -> str:
     parts.append('</body>')
     parts.append('</html>')
     return '\n'.join(parts)
+
+
+def story_text_to_xhtml(text: str, title: str) -> str:
+    """Render a one-chapter work of a collection under its own title.
+
+    The title line is consumed when the text opens with it (ignoring case and
+    trailing punctuation); nothing else is promoted. A story's short opening
+    paragraph is prose, not a subtitle, which is what both the chapter and the
+    matter heuristics would take it for.
+    """
+    def _key(s: str) -> str:
+        return s.strip().strip(".:!?,;").strip().casefold()
+
+    lines = text.split('\n')
+    first = _first_nonempty_line(text)
+    body = text
+    if first and _key(first) == _key(title):
+        idx = next(i for i, line in enumerate(lines) if line.strip() == first)
+        body = '\n'.join(lines[:idx] + lines[idx + 1:])
+    return _xhtml_page(title, [f'<h1>{escape(title)}</h1>', *_render_body_blocks(body)])
 
 
 def collect_referenced_images(chapters_dir: Path) -> set:
@@ -974,27 +1023,20 @@ def _discover_chunk_chapters(chunks_dir: Path) -> Dict[str, List[Path]]:
     )
 
 
-def build_epub_from_chunks(
+def _combine_translated_chapters(
     project_path: Path,
-    title: str,
-    author: str,
-    language: str = 'es',
-    *,
     chapters: Optional[Iterable[str]] = None,
-    output_path: Optional[Path] = None,
-    **build_epub_kwargs: Any,
-) -> EpubBuildResult:
-    """Build an EPUB from fully translated chunk JSON files only.
+) -> Tuple[Dict[str, str], List[str], List[str]]:
+    """Combine each fully translated chapter's chunks into its text.
 
-    This keeps EPUB generation independent from project_path/chapters, which
-    may still contain English source text for chapters that are not translated.
+    Returns ``(texts, included, skipped)``: ``texts`` maps chapter id to the
+    combined translation in chapter-id order; ``skipped`` lists the chapters
+    with an untranslated chunk, plus any requested id that does not exist.
     """
     from src.combiner import combine_chunks
     from src.utils.file_io import load_chunk
 
-    project_path = Path(project_path)
-    chunks_dir = project_path / 'chunks'
-    discovered = _discover_chunk_chapters(chunks_dir)
+    discovered = _discover_chunk_chapters(Path(project_path) / 'chunks')
 
     requested = set(chapters) if chapters is not None else None
     chapter_items = [
@@ -1017,6 +1059,28 @@ def build_epub_from_chunks(
 
     if requested is not None:
         skipped.extend(sorted(requested - set(discovered)))
+
+    return translated_chapters, included, skipped
+
+
+def build_epub_from_chunks(
+    project_path: Path,
+    title: str,
+    author: str,
+    language: str = 'es',
+    *,
+    chapters: Optional[Iterable[str]] = None,
+    output_path: Optional[Path] = None,
+    **build_epub_kwargs: Any,
+) -> EpubBuildResult:
+    """Build an EPUB from fully translated chunk JSON files only.
+
+    This keeps EPUB generation independent from project_path/chapters, which
+    may still contain English source text for chapters that are not translated.
+    """
+    project_path = Path(project_path)
+    translated_chapters, included, skipped = _combine_translated_chapters(
+        project_path, chapters)
 
     if not included:
         raise ValueError('No fully translated chapters found')
@@ -1114,16 +1178,11 @@ def build_epub(
     """
     project_path = Path(project_path)
     chapters_dir = Path(chapters_dir) if chapters_dir else project_path / 'chapters'
-    images_dir = project_path / 'images'
 
     if chapter_heading_config is None:
         chapter_heading_config = _load_chapter_heading_config(project_path)
     chapter_heading_config = _apply_language_default_label(
         chapter_heading_config, language)
-
-    chapter_manifest = _load_chapter_manifest(project_path)
-    toc_format = _load_toc_format(project_path)
-    image_widths = _load_image_widths(project_path)
 
     # Discover chapter files
     chapter_files = list(chapters_dir.glob('chapter_*.txt'))
@@ -1133,27 +1192,97 @@ def build_epub(
         )
     chapter_files = _sort_chapter_files(chapter_files)
     logger.info(f"Found {len(chapter_files)} chapter files")
-
-    # Turn 'footnote' annotations into endnotes: inject in-text markers and
-    # collect the globally-numbered list for the back-matter "Notas" section.
-    from src.endnotes import build_endnote_artifacts, render_endnotes_xhtml
     ordered_chapters = [
         (cf.stem, cf.read_text(encoding='utf-8')) for cf in chapter_files
     ]
-    injected_texts, endnote_entries = build_endnote_artifacts(
-        project_path, ordered_chapters,
-    )
-    # Captured during the chapter loop so the Notas section can title each group
-    # and link back to the right body file.
-    chapter_headings: Dict[str, str] = {}
-    chapter_files_map: Dict[str, str] = {}
 
-    # Create EPUB book
+    book, css_item = _new_book(
+        identifier=f'translate-books-{project_path.name}',
+        title=title, language=language, authors=[author],
+        translator=translator, description=description, rights=rights,
+        sources=[source_title] if source_title else [],
+        publisher=publisher, subtitle=subtitle, subjects=subjects, date=date,
+        cover_path=_resolve_cover(project_path, cover_image),
+    )
+    _embed_images(book, project_path, [text for _, text in ordered_chapters])
+    spine = _front_matter_items(
+        book, css_item, title=title, language=language, subtitle=subtitle,
+        author=author, translator=translator, publisher=publisher,
+        front_matter=front_matter, edition_notice_heading=edition_notice_heading,
+        edition_notice_body=edition_notice_body,
+    )
+
+    # Convert chapters to XHTML and add to book
+    spine.append('nav')
+    rendered = _render_chapters(
+        book, project_path, ordered_chapters,
+        heading_config=chapter_heading_config,
+        manifest=_load_chapter_manifest(project_path),
+        toc_format=_load_toc_format(project_path),
+        image_widths=_load_image_widths(project_path),
+        css_item=css_item, language=language,
+    )
+    spine.extend(rendered.items)
+    toc: List[Any] = list(rendered.items)
+
+    _finish_book(
+        book, css_item, spine, toc, language=language,
+        endnote_entries=rendered.endnotes,
+        chapter_headings=rendered.chapter_headings,
+        chapter_files_map=rendered.chapter_files_map,
+        translator_note_heading=translator_note_heading,
+        translator_note_body=translator_note_body,
+    )
+
+    # Write EPUB. Named after the (Spanish) title so every build path -- web UI,
+    # harness, corrections rebuild -- lands on the same file.
+    if output_path is None:
+        output_path = project_path / epub_filename(title, project_path.name)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    epub.write_epub(str(output_path), book)
+    logger.info(f"EPUB written to {output_path}")
+    return output_path
+
+
+class _RenderedChapters(NamedTuple):
+    items: List[Any]
+    chapter_headings: Dict[str, str]
+    chapter_files_map: Dict[str, str]
+    endnotes: List[Any]
+
+
+def _new_book(
+    *,
+    identifier: str,
+    title: str,
+    language: str,
+    authors: List[str],
+    translator: Optional[str] = None,
+    description: Optional[str] = None,
+    rights: Optional[str] = None,
+    sources: Iterable[str] = (),
+    publisher: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    subjects: Optional[Iterable[str]] = None,
+    date: Optional[str] = None,
+    cover_path: Optional[Path] = None,
+    css: str = _DEFAULT_CSS,
+) -> Tuple[epub.EpubBook, epub.EpubItem]:
+    """A book with its identifier, Dublin Core metadata, stylesheet and cover.
+
+    One ``dc:creator`` per entry of ``authors`` and one ``dc:source`` per entry
+    of ``sources``: a single book passes one of each, a collection one per
+    distinct member author and one per member.
+    """
     book = epub.EpubBook()
-    book.set_identifier(f'translate-books-{project_path.name}')
+    book.set_identifier(identifier)
     book.set_title(title)
     book.set_language(language)
-    book.add_author(author)
+    for i, author in enumerate(authors):
+        # ebooklib ids the first creator "creator"; the rest need their own.
+        book.add_author(author, uid='creator' if i == 0 else f'creator{i + 1:02d}')
 
     # Optional Dublin Core metadata. All fields are skipped when blank so we
     # never emit empty <dc:*/> elements to the OPF.
@@ -1176,8 +1305,9 @@ def build_epub(
         book.add_metadata('DC', 'description', description.strip())
     if rights and rights.strip():
         book.add_metadata('DC', 'rights', rights.strip())
-    if source_title and source_title.strip():
-        book.add_metadata('DC', 'source', source_title.strip())
+    for source in sources:
+        if source and source.strip():
+            book.add_metadata('DC', 'source', source.strip())
     if publisher and publisher.strip():
         book.add_metadata('DC', 'publisher', publisher.strip())
     if subtitle and subtitle.strip():
@@ -1197,22 +1327,33 @@ def build_epub(
         uid='style',
         file_name='style.css',
         media_type='text/css',
-        content=_DEFAULT_CSS.encode('utf-8'),
+        content=css.encode('utf-8'),
     )
     book.add_item(css_item)
 
-    # Handle cover image
-    cover_path = _resolve_cover(project_path, cover_image)
     if cover_path:
-        cover_data = cover_path.read_bytes()
-        book.set_cover(
-            f'images/{cover_path.name}',
-            cover_data,
-        )
+        book.set_cover(f'images/{cover_path.name}', cover_path.read_bytes())
         logger.info(f"Cover image: {cover_path.name}")
+    return book, css_item
 
-    # Collect all referenced images and embed them
-    referenced = collect_referenced_images(chapters_dir)
+
+def _embed_images(
+    book: epub.EpubBook,
+    project_path: Path,
+    texts: Iterable[str],
+    image_dir: str = 'images',
+) -> int:
+    """Embed every image the texts reference, flat under ``image_dir``.
+
+    Images are deduplicated by basename (a chapter's ``[IMAGE:images/x]`` is
+    rendered as ``<img src="images/x">`` whatever folder it came from), so two
+    projects bound in one volume each get their own ``image_dir``.
+    Returns how many were embedded.
+    """
+    referenced = set()
+    for text in texts:
+        for _, rel_path, _ in parse_image_placeholders(text):
+            referenced.add(rel_path)
     embedded_images = set()
     missing_images = []
 
@@ -1229,8 +1370,9 @@ def build_epub(
             continue
 
         img_item = epub.EpubItem(
-            uid=f'img-{filename}',
-            file_name=f'images/{filename}',
+            uid=f'img-{filename}' if image_dir == 'images'
+            else f'img-{image_dir.replace("/", "-")}-{filename}',
+            file_name=f'{image_dir}/{filename}',
             media_type=_image_media_type(filename),
             content=img_file.read_bytes(),
         )
@@ -1240,11 +1382,30 @@ def build_epub(
     logger.info(f"Embedded {len(embedded_images)} images")
     if missing_images:
         logger.warning(f"Missing images: {missing_images}")
+    return len(embedded_images)
 
-    # Generated front matter (title page, then edition notice) opens the spine
-    # ahead of the nav, so a reader goes cover -> title page. Neither is a TOC
-    # entry: they are pages you turn past, not places you navigate to.
-    spine = []
+
+def _front_matter_items(
+    book: epub.EpubBook,
+    css_item: epub.EpubItem,
+    *,
+    title: str,
+    language: str,
+    subtitle: Optional[str],
+    author: Optional[str],
+    translator: Optional[str],
+    publisher: Optional[str],
+    front_matter: Optional[Dict[str, Any]],
+    edition_notice_heading: Optional[str],
+    edition_notice_body: Optional[str],
+) -> List[Any]:
+    """The generated title page and edition notice, as the opening of the spine.
+
+    Generated front matter (title page, then edition notice) opens the spine
+    ahead of the nav, so a reader goes cover -> title page. Neither is a TOC
+    entry: they are pages you turn past, not places you navigate to.
+    """
+    spine: List[Any] = []
     front_matter = front_matter or {}
     if front_matter.get('title_page'):
         title_item = epub.EpubHtml(
@@ -1271,28 +1432,86 @@ def build_epub(
         notice_item.add_item(css_item)
         book.add_item(notice_item)
         spine.append(notice_item)
+    return spine
 
-    # Convert chapters to XHTML and add to book
-    spine.append('nav')
-    toc = []
 
-    for i, chapter_file in enumerate(chapter_files, 1):
-        chapter_id = chapter_file.stem  # e.g. "chapter_03"
+def _prefix_image_srcs(xhtml: str, image_prefix: str) -> str:
+    """Point every ``<img src="images/x">`` at ``images/<prefix>x`` instead."""
+    if not image_prefix:
+        return xhtml
+    return xhtml.replace('<img src="images/', f'<img src="images/{image_prefix}')
+
+
+def _render_chapters(
+    book: epub.EpubBook,
+    project_path: Path,
+    texts: List[Tuple[str, str]],
+    *,
+    heading_config: Optional[Dict[str, Any]],
+    manifest: Dict[str, Dict[str, Any]],
+    toc_format: Optional[str],
+    image_widths: Dict[str, float],
+    css_item: epub.EpubItem,
+    language: str,
+    file_prefix: str = '',
+    image_prefix: str = '',
+    key_prefix: str = '',
+    endnote_start: int = 0,
+    story_title: Optional[str] = None,
+) -> _RenderedChapters:
+    """Render one project's chapters into ``book`` (the chapter loop).
+
+    ``texts`` is ``[(chapter_id, text), ...]`` in reading order. A collection
+    renders each member through here with its own ``file_prefix`` (``w01_``)
+    and ``image_prefix`` (``w01/``) so two works' file and image names never
+    collide, a ``key_prefix`` so their chapter ids do not either, and an
+    ``endnote_start`` so the endnote numbers run on across the volume.
+
+    ``story_title`` marks a work with a single chapter: its one ``chapter``
+    entry takes its own first line as the heading (``story_title`` when that
+    line is not heading-like) and never gets a synthesized "Capítulo 1".
+
+    Returns the items (in spine order), the heading and file of each chapter
+    keyed by ``key_prefix + chapter_id``, and the endnotes, keyed the same way.
+    """
+    # Turn 'footnote' annotations into endnotes: inject in-text markers and
+    # collect the globally-numbered list for the back-matter "Notas" section.
+    from src.endnotes import build_endnote_artifacts
+    injected_texts, endnote_entries = build_endnote_artifacts(
+        project_path, texts, start=endnote_start,
+    )
+    # Captured during the chapter loop so the Notas section can title each group
+    # and link back to the right body file.
+    chapter_headings: Dict[str, str] = {}
+    chapter_files_map: Dict[str, str] = {}
+    items: List[Any] = []
+
+    for i, (chapter_id, _) in enumerate(texts, 1):
         # Endnote markers were injected into this text by build_endnote_artifacts.
         text = injected_texts[chapter_id]
-        manifest_entry = chapter_manifest.get(chapter_id) or {}
+        manifest_entry = manifest.get(chapter_id) or {}
         kind = manifest_entry.get('kind', 'chapter')
 
-        if kind == 'chapter':
+        if kind == 'chapter' and story_title is not None:
+            # A one-chapter work: the heading is the story's title line.
+            first_line = _first_nonempty_line(text)
+            if len(first_line) > 80 or _HEADING_RE.match(first_line):
+                first_line = ''
+            display_label = _normalize_allcaps_title(first_line) if first_line \
+                else story_title
+            xhtml_content = story_text_to_xhtml(text, display_label)
+            toc_label = display_label
+            section_heading = display_label
+        elif kind == 'chapter':
             display_number = manifest_entry.get('number', i) if manifest_entry \
                 else i
             xhtml_content = chapter_text_to_xhtml(
-                text, display_number, heading_config=chapter_heading_config,
+                text, display_number, heading_config=heading_config,
             )
             heading, subtitle, _ = detect_chapter_heading(
                 text,
                 chapter_number=display_number,
-                heading_config=chapter_heading_config,
+                heading_config=heading_config,
             )
             norm_heading = _normalize_heading(heading) if heading else ''
             toc_label = norm_heading or f'Chapter {display_number}'
@@ -1312,7 +1531,7 @@ def build_epub(
             # rather than "DEDICATORIA").
             label = (manifest_entry.get('label') or '').strip()
             heading, _, _ = detect_chapter_heading(
-                text, chapter_number=None, heading_config=chapter_heading_config,
+                text, chapter_number=None, heading_config=heading_config,
             )
             first_line = _first_nonempty_line(text)
             if len(first_line) > 80:
@@ -1332,28 +1551,52 @@ def build_epub(
             if subtitle and subtitle.casefold() != display_label.casefold():
                 toc_label = f'{display_label}: {_normalize_allcaps_title(subtitle)}'
 
-        file_name = f'chapter_{i:02d}.xhtml'
+        file_name = f'{file_prefix}chapter_{i:02d}.xhtml'
         chapter_item = epub.EpubHtml(
             title=toc_label,
             file_name=file_name,
             lang=language,
         )
         xhtml_content = _apply_image_widths(xhtml_content, image_widths)
+        xhtml_content = _prefix_image_srcs(xhtml_content, image_prefix)
         chapter_item.set_content(xhtml_content.encode('utf-8'))
         chapter_item.add_item(css_item)
         book.add_item(chapter_item)
+        items.append(chapter_item)
 
-        spine.append(chapter_item)
-        toc.append(chapter_item)
+        chapter_headings[key_prefix + chapter_id] = section_heading
+        chapter_files_map[key_prefix + chapter_id] = file_name
 
-        chapter_headings[chapter_id] = section_heading
-        chapter_files_map[chapter_id] = file_name
+    if key_prefix:
+        endnote_entries = [
+            e._replace(chapter_id=key_prefix + e.chapter_id) for e in endnote_entries
+        ]
+    return _RenderedChapters(items, chapter_headings, chapter_files_map, endnote_entries)
+
+
+def _finish_book(
+    book: epub.EpubBook,
+    css_item: epub.EpubItem,
+    spine: List[Any],
+    toc: List[Any],
+    *,
+    language: str,
+    endnote_entries: List[Any],
+    chapter_headings: Dict[str, str],
+    chapter_files_map: Dict[str, str],
+    translator_note_heading: Optional[str],
+    translator_note_body: Optional[str],
+    work_titles: Optional[Dict[str, str]] = None,
+) -> None:
+    """Append Notas and the translator note, then set the TOC, spine and nav."""
+    from src.endnotes import render_endnotes_xhtml
 
     # Append the "Notas" endnotes section after the last chapter and before the
     # translator note (which is appended last below).
     if endnote_entries:
         endnotes_xhtml = render_endnotes_xhtml(
             endnote_entries, chapter_headings, chapter_files_map,
+            work_titles=work_titles,
         )
         endnotes_item = epub.EpubHtml(
             uid='endnotes',
@@ -1400,17 +1643,6 @@ def build_epub(
     nav_item.add_link(href='style.css', rel='stylesheet', type='text/css')
     book.add_item(nav_item)
 
-    # Write EPUB. Named after the (Spanish) title so every build path -- web UI,
-    # harness, corrections rebuild -- lands on the same file.
-    if output_path is None:
-        output_path = project_path / epub_filename(title, project_path.name)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    epub.write_epub(str(output_path), book)
-    logger.info(f"EPUB written to {output_path}")
-    return output_path
-
 
 def _resolve_cover(
     project_path: Path, cover_image: Optional[Path]
@@ -1431,3 +1663,212 @@ def _resolve_cover(
         if candidate.exists():
             return candidate
     return None
+
+
+# ---------------------------------------------------------------------------
+# Collections: one volume bound from several projects (src/collection.py)
+# ---------------------------------------------------------------------------
+
+class CollectionBuildResult(NamedTuple):
+    path: Path
+    #: One ``{slug, included, skipped}`` per member, in volume order.
+    works: List[Dict[str, Any]]
+    endnotes: int
+
+
+def _chapter_sort_key(chapter_id: str) -> Tuple[int, str]:
+    """Numeric order for ``chapter_NN`` ids, matching ``_sort_chapter_files``."""
+    m = re.search(r'(\d+)$', chapter_id)
+    return (int(m.group(1)) if m else 0, chapter_id)
+
+
+def _chapter_kind_count(project_path: Path) -> int:
+    """How many of the project's chapters are ``kind: chapter`` (not front/back matter)."""
+    manifest = _load_chapter_manifest(project_path)
+    ids = [cid for cid in _discover_chunk_chapters(project_path / 'chunks')
+           if cid.startswith('chapter_')]
+    return sum(1 for cid in ids if (manifest.get(cid) or {}).get('kind', 'chapter') == 'chapter')
+
+
+def _member_original(project_path: Path) -> Tuple[str, Any]:
+    """``(original title, year)`` of a member, for its part page and ``dc:source``."""
+    def _obj(path: Path) -> Dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    project = _obj(project_path / 'project.json')
+    harness = _obj(project_path / '.harness' / 'config.json')
+    ingest = _obj(project_path / 'ingest_report.json').get('metadata') or {}
+    if not isinstance(ingest, dict):
+        ingest = {}
+    original = next(
+        (str(v).strip() for v in (project.get('source_title'), harness.get('title'),
+                                  ingest.get('title')) if v and str(v).strip()),
+        '',
+    )
+    return original, project.get('original_year')
+
+
+def build_collection_epub(
+    collection_dir: Path,
+    *,
+    allow_partial: bool = False,
+    output_path: Optional[Path] = None,
+) -> CollectionBuildResult:
+    """Build one EPUB from every member of a collection.
+
+    Spine: title page -> copyright -> nav -> for each member, its part page
+    (a multi-chapter member only, unless ``part_page`` says otherwise) and its
+    chapters, front matter included -> Notas -> the volume's translator note.
+
+    Each member's xhtml is named ``wNN_chapter_MM.xhtml`` and its images sit
+    under ``images/wNN/``, so two works' ``chapter_01`` or ``illus01.jpg`` never
+    collide. Endnotes number continuously across the volume, on one Notas page
+    grouped by work and then chapter. A multi-chapter member is a nested TOC
+    section; a one-chapter story is one flat entry titled by its own first line.
+
+    Metadata comes from the collection's own ``project.json`` and sidecars
+    (:func:`src.book_metadata.epub_kwargs`), with one ``dc:creator`` per
+    distinct member author and one ``dc:source`` per member.
+
+    Raises ``ValueError`` when a member has untranslated chapters (unless
+    ``allow_partial``, which leaves them out and reports them) or when nothing
+    is translated at all, and ``FileNotFoundError`` for a member slug that no
+    longer resolves to a project.
+    """
+    from src import collection as collection_mod
+    from src.book_metadata import epub_kwargs
+
+    collection_dir = Path(collection_dir)
+    coll = collection_mod.load_collection(collection_dir)
+    if not coll.members:
+        raise ValueError(f'collection {coll.slug!r} has no members')
+    unresolved = [m.slug for m in coll.members if m.path is None]
+    if unresolved:
+        raise FileNotFoundError(
+            f'collection {coll.slug!r} lists projects that do not exist: {", ".join(unresolved)}')
+
+    meta = epub_kwargs(collection_dir)
+    title = meta.get('title') or coll.slug
+    language = meta.get('language') or 'es'
+    volume_toc_format = _load_toc_format(collection_dir)
+
+    gathered = []
+    for idx, member in enumerate(coll.members, 1):
+        texts, included, skipped = _combine_translated_chapters(member.path)
+        ordered = sorted(
+            ((cid, text) for cid, text in texts.items() if cid.startswith('chapter_')),
+            key=lambda pair: _chapter_sort_key(pair[0]),
+        )
+        gathered.append((idx, member, ordered, included, skipped))
+    incomplete = {m.slug: skipped for _, m, _, _, skipped in gathered if skipped}
+    if incomplete and not allow_partial:
+        detail = '; '.join(f'{slug}: {len(ids)} untranslated' for slug, ids in incomplete.items())
+        raise ValueError(f'Collection has untranslated chapters ({detail}); '
+                         f'pass allow_partial to build without them')
+    if not any(ordered for _, _, ordered, _, _ in gathered):
+        raise ValueError('No fully translated chapters found in any member')
+
+    originals = {m.slug: _member_original(m.path) for _, m, _, _, _ in gathered}
+    authors = collection_mod.member_authors(coll) or [meta.get('author') or 'Unknown']
+    book, css_item = _new_book(
+        identifier=f'translate-books-{coll.slug}',
+        title=title, language=language, authors=authors,
+        translator=meta.get('translator'), description=meta.get('description'),
+        rights=meta.get('rights'),
+        sources=[originals[m.slug][0] for _, m, ordered, _, _ in gathered if ordered],
+        publisher=meta.get('publisher'), subtitle=meta.get('subtitle'),
+        subjects=meta.get('subjects'), date=meta.get('date'),
+        cover_path=_resolve_cover(collection_dir, None),
+        css=_DEFAULT_CSS + _COLLECTION_CSS,
+    )
+    for idx, member, ordered, _, _ in gathered:
+        _embed_images(book, member.path, [text for _, text in ordered],
+                      image_dir=f'images/w{idx:02d}')
+    spine = _front_matter_items(
+        book, css_item, title=title, language=language, subtitle=meta.get('subtitle'),
+        author=meta.get('author'), translator=meta.get('translator'),
+        publisher=meta.get('publisher'), front_matter=meta.get('front_matter'),
+        edition_notice_heading=meta.get('edition_notice_heading'),
+        edition_notice_body=meta.get('edition_notice_body'),
+    )
+    spine.append('nav')
+
+    toc: List[Any] = []
+    endnote_entries: List[Any] = []
+    chapter_headings: Dict[str, str] = {}
+    chapter_files_map: Dict[str, str] = {}
+    work_titles: Dict[str, str] = {}
+    works: List[Dict[str, Any]] = []
+    for idx, member, ordered, included, skipped in gathered:
+        works.append({'slug': member.slug, 'included': included, 'skipped': skipped})
+        if not ordered:
+            continue
+        prefix = f'w{idx:02d}'
+        work_title = collection_mod.part_title(member)
+        chapter_count = _chapter_kind_count(member.path)
+        want_part_page = member.part_page if isinstance(member.part_page, bool) \
+            else chapter_count > 1
+
+        part_item = None
+        if want_part_page:
+            original, year = originals[member.slug]
+            member_author = collection_mod.member_metadata(member).get('resolved_author')
+            part_item = epub.EpubHtml(
+                uid=f'{prefix}_part', title=work_title,
+                file_name=f'{prefix}_part.xhtml', lang=language,
+            )
+            part_item.set_content(
+                part_page_to_xhtml(work_title, original, member_author, year).encode('utf-8'))
+            part_item.add_item(css_item)
+            book.add_item(part_item)
+            spine.append(part_item)
+
+        heading_config = _apply_language_default_label(
+            _load_chapter_heading_config(member.path), language)
+        rendered = _render_chapters(
+            book, member.path, ordered,
+            heading_config=heading_config,
+            manifest=_load_chapter_manifest(member.path),
+            toc_format=volume_toc_format or _load_toc_format(member.path),
+            image_widths=_load_image_widths(member.path),
+            css_item=css_item, language=language,
+            file_prefix=f'{prefix}_', image_prefix=f'{prefix}/', key_prefix=f'{prefix}/',
+            endnote_start=len(endnote_entries),
+            story_title=work_title if chapter_count == 1 else None,
+        )
+        spine.extend(rendered.items)
+        if part_item is not None:
+            toc.append((epub.Section(work_title, href=part_item.file_name), rendered.items))
+        elif len(rendered.items) > 1:
+            # No part page to point at: the section opens on the work's first page
+            # (an NCX navPoint cannot have an empty src).
+            toc.append((epub.Section(work_title, href=rendered.items[0].file_name),
+                        rendered.items))
+        else:
+            toc.extend(rendered.items)
+        endnote_entries.extend(rendered.endnotes)
+        chapter_headings.update(rendered.chapter_headings)
+        chapter_files_map.update(rendered.chapter_files_map)
+        work_titles.update({key: work_title for key in rendered.chapter_files_map})
+
+    _finish_book(
+        book, css_item, spine, toc, language=language,
+        endnote_entries=endnote_entries,
+        chapter_headings=chapter_headings,
+        chapter_files_map=chapter_files_map,
+        translator_note_heading=meta.get('translator_note_heading'),
+        translator_note_body=meta.get('translator_note_body'),
+        work_titles=work_titles,
+    )
+
+    if output_path is None:
+        output_path = collection_dir / epub_filename(title, coll.slug)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    epub.write_epub(str(output_path), book)
+    logger.info(f"Collection EPUB written to {output_path}")
+    return CollectionBuildResult(path=output_path, works=works, endnotes=len(endnote_entries))

@@ -41,6 +41,7 @@ from src.annotations import (
     is_effectively_blank,
     load_active,
 )
+from src import collection as collection_mod
 from src.harness import locks
 from src.harness import state as hstate
 from src.models import (
@@ -126,9 +127,11 @@ from web_ui import favorites as favorites_store
 from web_ui.book_phases import PHASE_GROUPS, book_phases, book_triage_phase
 from web_ui.project_cards import (
     PROJECT_STATUSES,
+    build_collection_card,
     build_project_card,
     card_badges,
     find_cover,
+    harness_stage,
 )
 
 app = Flask(__name__)
@@ -1290,16 +1293,31 @@ def reader_projects():
         seen_ids[proj_dir.name] = proj_dir
         projects.append(build_project_card(proj_dir, proj_dir.name))
 
+    # A collection is one card; its members leave the top level unless the
+    # reader asked to see the works individually.
+    show_works = _get_show_works()
+    by_id = {card["id"]: card for card in projects}
+    collections = _library_collections()
+    collection_cards = [
+        build_collection_card(coll.path, [by_id[s] for s in coll.member_slugs if s in by_id])
+        for coll in collections
+    ]
+    hidden = set() if show_works else {s for coll in collections for s in coll.member_slugs}
+
     lang = _get_ui_lang()
     review_types_selected = _get_review_types()
     # The cached card is shared and read-only; what depends on this request (UI
     # language, the category cookie) goes on a per-render copy.
     view = []
-    for card in projects:
+    for card in [c for c in projects if c["id"] not in hidden] + collection_cards:
         p = dict(card)
         p["display_title"] = (card["spanish_title"] if lang == "es" else "") or card["title"]
-        # The reader when there is something to read, the dashboard otherwise.
-        p["work_href"] = f"/read/{card['id']}" if card["has_alignments"] else f"/project/{card['id']}"
+        if card.get("is_collection"):
+            p["work_href"] = f"/read/collection/{card['id']}"
+        else:
+            # The reader when there is something to read, the dashboard otherwise.
+            p["work_href"] = (f"/read/{card['id']}" if card["has_alignments"]
+                              else f"/project/{card['id']}")
         p["badges"] = card_badges(card, review_types_selected)
         view.append(p)
     # Books that need work first, in the order you would work through them.
@@ -1318,7 +1336,174 @@ def reader_projects():
         review_types_selected=review_types_selected,
         statuses=list(PROJECT_STATUSES),
         statuses_selected=_get_status_filter(),
+        has_collections=bool(collections),
+        show_works=show_works,
     )
+
+
+# ── collections: one volume bound from several books (src/collection.py) ──
+
+# Whether the library lists a collection's members on their own as well. Per
+# device, like the library view: the page reloads after the cookie is set.
+_SHOW_WORKS_COOKIE = "reader_show_works"
+
+
+def _get_show_works() -> bool:
+    return request.cookies.get(_SHOW_WORKS_COOKIE) == "1"
+
+
+@app.route("/api/set-show-works", methods=["POST"])
+def set_show_works():
+    """Persist the library's "show works individually" toggle via cookie."""
+    show = bool((request.json or {}).get("show"))
+    resp = make_response(jsonify({"ok": True, "show": show}))
+    resp.set_cookie(_SHOW_WORKS_COOKIE, "1" if show else "0",
+                    max_age=365 * 24 * 3600, samesite="Lax")
+    return resp
+
+
+def _library_collections() -> list:
+    """Every readable collection under projects/, in folder order."""
+    out = []
+    for cdir in collection_mod.iter_collection_dirs(_get_projects_dir()):
+        try:
+            out.append(collection_mod.load_collection(cdir))
+        except ValueError as exc:
+            app.logger.warning("Skipping unreadable collection %s: %s", cdir, exc)
+    return out
+
+
+def _find_collection(collection_id: str):
+    """The collection with this slug, or ``None``."""
+    if not _safe_id(collection_id):
+        return None
+    return next((c for c in _library_collections() if c.slug == collection_id), None)
+
+
+def _member_dir(slug: str) -> Optional[Path]:
+    """A member's project dir as the web UI resolves it, or ``None`` when it is gone."""
+    path = _resolve_project_dir(slug)
+    return path if _is_project_dir(path) else None
+
+
+def _work_title(member, lang: str) -> str:
+    """A member's name on the collection page: its ``part_title``, else its title
+    in the UI language, else the title the harness resolved (the source's own)."""
+    if member.part_title:
+        return member.part_title
+    config = _load_project_config(member.slug)
+    return (((config.get("spanish_title") if lang == "es" else "") or config.get("title"))
+            or collection_mod.part_title(member))
+
+
+def _collection_title(coll, lang: str) -> str:
+    config = collection_mod.volume_metadata(coll)
+    return ((config.get("spanish_title") if lang == "es" else "")
+            or config.get("title") or config.get("spanish_title") or coll.slug)
+
+
+@app.route("/read/collection/<collection_id>")
+def reader_collection(collection_id):
+    """A collection's page: its works, each with its chapters, and the volume build."""
+    t = _reader_strings()
+    lang = _get_ui_lang()
+    coll = _find_collection(collection_id)
+    if coll is None:
+        return render_template("reader.html", mode="not_found", project_id=collection_id,
+                               t=t, lang=lang), 404
+
+    review_types_selected = _get_review_types()
+    chapter_prefix = t.get("chapter_prefix", "Chapter")
+    works = []
+    member_cards = []
+    for member in coll.members:
+        mdir = _member_dir(member.slug)
+        if mdir is None:
+            works.append({"id": member.slug, "missing": True, "display_title": member.slug})
+            continue
+        card = build_project_card(mdir, member.slug)
+        member_cards.append(card)
+        total = card["total_chunks"]
+        works.append({
+            "id": member.slug,
+            "missing": False,
+            "display_title": _work_title(member, lang),
+            "card": card,
+            "stage": harness_stage(card),
+            "translated_pct": round(100 * card["translated_chunks"] / total) if total else 0,
+            "judge_findings": sum(card["flag_counts"].get(k, 0) for k in REVIEW_JUDGE_TYPES),
+            "badges": card_badges(card, review_types_selected),
+            "chapters": (_chapter_rows(mdir, _load_chapter_manifest_for_project(member.slug),
+                                       chapter_prefix)
+                         if (mdir / "alignments").exists() else []),
+        })
+    card = build_collection_card(coll.path, member_cards)
+    epubs = sorted(coll.path.glob("*.epub"), key=lambda p: p.stat().st_mtime)
+    return render_template(
+        "reader.html", mode="collection",
+        collection_id=coll.slug, collection_title=_collection_title(coll, lang),
+        card=card, works=works, t=t, lang=lang,
+        review_types_selected=review_types_selected,
+        epub_name=epubs[-1].name if epubs else None,
+    )
+
+
+@app.route("/api/collection/<collection_id>/epub", methods=["POST"])
+def build_collection_epub_route(collection_id):
+    """Build the volume EPUB into the collection folder."""
+    from src.epub_builder import build_collection_epub
+
+    coll = _find_collection(collection_id)
+    if coll is None:
+        return jsonify({"error": "Collection not found"}), 404
+    allow_partial = bool((request.get_json(silent=True) or {}).get("allow_partial"))
+    try:
+        result = build_collection_epub(coll.path, allow_partial=allow_partial)
+    except (ValueError, FileNotFoundError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "ok": True,
+        "name": result.path.name,
+        "works": result.works,
+        "endnotes": result.endnotes,
+        "download": f"/api/collection/{coll.slug}/download-epub",
+    })
+
+
+@app.route("/api/collection/<collection_id>/download-epub")
+def download_collection_epub(collection_id):
+    """Serve the collection's most recently built EPUB."""
+    coll = _find_collection(collection_id)
+    if coll is None:
+        return jsonify({"error": "Collection not found"}), 404
+    epubs = list(coll.path.glob("*.epub"))
+    if not epubs:
+        return jsonify({"error": "EPUB not found. Build it first."}), 404
+    epub_file = max(epubs, key=lambda p: p.stat().st_mtime)
+    return send_from_directory(str(coll.path), epub_file.name, as_attachment=True)
+
+
+def _collection_reading_context(collection_id: Optional[str], project_id: str, lang: str):
+    """For a member opened from its collection: the way back, and the next work.
+
+    ``None`` unless ``collection_id`` names a collection that lists this book.
+    ``next_work`` is the first later member with something to read, and its
+    first aligned chapter.
+    """
+    if not collection_id:
+        return None
+    coll = _find_collection(collection_id)
+    if coll is None or project_id not in coll.member_slugs:
+        return None
+    next_work = None
+    for member in coll.members[coll.member_slugs.index(project_id) + 1:]:
+        mdir = _member_dir(member.slug)
+        chapters = sorted(f.stem for f in (mdir / "alignments").glob("*.json")) if mdir else []
+        if chapters:
+            next_work = {"id": member.slug, "chapter": chapters[0],
+                         "title": _work_title(member, lang)}
+            break
+    return {"id": coll.slug, "title": _collection_title(coll, lang), "next_work": next_work}
 
 
 def _empty_annotation_state() -> dict[str, int]:
@@ -1456,6 +1641,64 @@ def book_phases_triage(project_id):
     })
 
 
+def _chapter_rows(
+    project_dir: Path,
+    manifest: dict,
+    chapter_prefix: str,
+    *,
+    annotations: Optional[dict] = None,
+    flag_counts_by_chapter: Optional[dict] = None,
+) -> list[dict]:
+    """One row per aligned chapter, with the badges the chapter list draws.
+
+    Shared by a book's chapter list and a collection's page, which lists every
+    member's chapters with the same badges.
+    """
+    align_dir = project_dir / "alignments"
+    if annotations is None:
+        annotations = _chapter_annotation_state(project_dir)
+    if flag_counts_by_chapter is None:
+        flag_counts_by_chapter = load_chapter_type_counts(project_dir)
+    reviewed = _load_reviewed(project_dir)
+
+    chapters = []
+    for f in sorted(align_dir.glob("*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                data = json.load(fh)
+            ch_id = f.stem
+            # Source runs with no translation at all (src/sentence_aligner.py).
+            # Distinct from low confidence: those sentences ARE translated, just
+            # matched weakly. A gap means the prose is missing outright.
+            coverage = data.get("coverage") or {}
+            # The three review-type annotations (word choice, inconsistency, and
+            # "Other"/flag) are folded into one "to review" count by
+            # _chapter_annotation_state; footnotes stay separate because they
+            # feed endnotes.
+            ann = annotations.get(ch_id) or _empty_annotation_state()
+            review_count = ann["review"]
+            footnote_count = ann["footnotes_total"]
+            empty_footnotes = ann["footnotes_empty"]
+
+            entry = manifest.get(ch_id) or {}
+            chapters.append({
+                "id": ch_id,
+                "display_label": _chapter_display_label(ch_id, manifest, chapter_prefix),
+                "kind": entry.get("kind", "chapter"),
+                "gap_count": coverage.get("gap_count", 0),
+                "gap_chars": coverage.get("en_orphan_chars", 0),
+                "review_count": review_count,
+                "footnote_count": footnote_count,
+                "filled_footnotes": footnote_count - empty_footnotes,
+                "empty_footnotes": empty_footnotes,
+                "flag_counts": flag_counts_by_chapter.get(ch_id) or empty_type_counts(),
+                "reviewed": ch_id in reviewed,
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+    return chapters
+
+
 @app.route("/read/<project_id>")
 def reader_chapters(project_id):
     """List chapters with alignments for a project, under the book's header."""
@@ -1491,48 +1734,11 @@ def reader_chapters(project_id):
             except OSError:
                 pass
 
-    # Load reviewed status
-    reviewed = _load_reviewed(project_dir)
-
-    # Load chapter manifest for display labels
     manifest = _load_chapter_manifest_for_project(project_id)
-    chapter_prefix = t.get("chapter_prefix", "Chapter")
-
-    chapters = []
-    for f in sorted(align_dir.glob("*.json")):
-        try:
-            with open(f, encoding="utf-8") as fh:
-                data = json.load(fh)
-            ch_id = f.stem
-            # Source runs with no translation at all (src/sentence_aligner.py).
-            # Distinct from low confidence: those sentences ARE translated, just
-            # matched weakly. A gap means the prose is missing outright.
-            coverage = data.get("coverage") or {}
-            # The three review-type annotations (word choice, inconsistency, and
-            # "Other"/flag) are folded into one "to review" count by
-            # _chapter_annotation_state; footnotes stay separate because they
-            # feed endnotes.
-            ann = all_annotations.get(ch_id) or _empty_annotation_state()
-            review_count = ann["review"]
-            footnote_count = ann["footnotes_total"]
-            empty_footnotes = ann["footnotes_empty"]
-
-            entry = manifest.get(ch_id) or {}
-            chapters.append({
-                "id": ch_id,
-                "display_label": _chapter_display_label(ch_id, manifest, chapter_prefix),
-                "kind": entry.get("kind", "chapter"),
-                "gap_count": coverage.get("gap_count", 0),
-                "gap_chars": coverage.get("en_orphan_chars", 0),
-                "review_count": review_count,
-                "footnote_count": footnote_count,
-                "filled_footnotes": footnote_count - empty_footnotes,
-                "empty_footnotes": empty_footnotes,
-                "flag_counts": flag_counts_by_chapter.get(ch_id) or empty_type_counts(),
-                "reviewed": ch_id in reviewed,
-            })
-        except (json.JSONDecodeError, OSError):
-            continue
+    chapters = _chapter_rows(
+        project_dir, manifest, t.get("chapter_prefix", "Chapter"),
+        annotations=all_annotations, flag_counts_by_chapter=flag_counts_by_chapter,
+    )
 
     # The reader's own deep link, the one search results use. `near=1` asks it
     # to fall back on the sentence number when the text is found nowhere.
@@ -1643,11 +1849,17 @@ def reader_view(project_id, chapter):
         if c in {p.strip() for p in (request.args.get("review") or "").split(",")}
     ]
 
+    # Opened from a collection's page (`?collection=<id>`): the way back leads
+    # there, links keep the context, and the last chapter leads to the next work.
+    collection = _collection_reading_context(
+        request.args.get("collection"), project_id, _get_ui_lang())
+
     resp = make_response(render_template(
         "reader.html", mode="read",
         project_id=project_id, project_title=_project_title(project_id),
         chapter=chapter, t=t, lang=_get_ui_lang(),
         prev_chapter=prev_chapter, next_chapter=next_chapter,
+        collection=collection,
         display_label=display_label,
         has_pending_corrections=has_pending_corrections,
         reader_ui_version=ui_version,
@@ -2458,6 +2670,10 @@ def serve_cover_thumb(project_id):
     if not _safe_id(project_id):
         return "Bad request", 400
     cover = find_cover(_resolve_project_dir(project_id))
+    if cover is None:
+        # A collection's card shows the volume's own cover.
+        coll = _find_collection(project_id)
+        cover = find_cover(coll.path) if coll is not None else None
     if cover is None:
         return jsonify({"error": "No cover"}), 404
     try:

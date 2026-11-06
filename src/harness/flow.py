@@ -617,6 +617,122 @@ def precedent(project: str, *, rebuild: bool = True) -> dict:
     }
 
 
+# ── collections (one volume bound from several projects) ───────────────────
+
+def _collection_summary(coll) -> dict:
+    return {
+        "collection": coll.slug,
+        "collection_dir": str(coll.path),
+        "group": coll.group,
+        "members": coll.member_slugs,
+    }
+
+
+def _collection_next(report: dict) -> str:
+    if report.get("stale_precedent"):
+        slugs = " ".join(w["member"] for w in report["stale_precedent"])
+        return (f"rebuild the stale precedent snapshots ({slugs}) with `precedent --project "
+                f"<slug>`, then draft each work's style guide and glossary in order")
+    return "draft each work's style guide and glossary in member order; later works pre-fill from earlier ones"
+
+
+def collection_create(slug: str, *, members: list[str], title: str | None = None,
+                      group: str | None = None, group_kind: str | None = None,
+                      parent: str | None = None) -> dict:
+    """Bind existing projects into a collection and join them to its book group."""
+    from src import collection as collection_mod
+
+    coll, report = collection_mod.create(slug, members=members, title=title, group=group,
+                                         group_kind=group_kind, parent=parent)
+    return {**_collection_summary(coll), **report, "next": _collection_next(report)}
+
+
+def collection_add(slug: str, *, member: str, position: int | None = None,
+                   group_kind: str | None = None) -> dict:
+    from src import collection as collection_mod
+
+    coll = collection_mod.load_collection(collection_mod.resolve_collection_dir(slug))
+    report = collection_mod.add_member(coll, member, position=position, group_kind=group_kind)
+    return {**_collection_summary(coll), **report, "next": _collection_next(report)}
+
+
+def collection_remove(slug: str, *, member: str, keep_group: bool = False) -> dict:
+    from src import collection as collection_mod
+
+    coll = collection_mod.load_collection(collection_mod.resolve_collection_dir(slug))
+    report = collection_mod.remove_member(coll, member, keep_group=keep_group)
+    return {**_collection_summary(coll), **report}
+
+
+def collection_reorder(slug: str, *, members: list[str]) -> dict:
+    from src import collection as collection_mod
+
+    coll = collection_mod.load_collection(collection_mod.resolve_collection_dir(slug))
+    collection_mod.reorder(coll, members)
+    return _collection_summary(coll)
+
+
+def collection_status(slug: str) -> dict:
+    """Per-member stage, translated share and open findings (read-only).
+
+    Built from the library card each member's dashboard already computes, so
+    the numbers here and on ``/read/`` never disagree.
+    """
+    from src import collection as collection_mod
+    from web_ui.evaluations import REVIEW_JUDGE_TYPES
+    from web_ui.project_cards import build_project_card, harness_stage
+
+    coll = collection_mod.load_collection(collection_mod.resolve_collection_dir(slug))
+    rows = []
+    for m in coll.members:
+        if m.path is None:
+            rows.append({"slug": m.slug, "missing": True, "stage": None})
+            continue
+        card = build_project_card(m.path, m.slug)
+        total = card["total_chunks"]
+        judge = sum(card["flag_counts"].get(k, 0) for k in REVIEW_JUDGE_TYPES)
+        rows.append({
+            "slug": m.slug,
+            "part_title": collection_mod.part_title(m),
+            "stage": harness_stage(card),
+            "status": card["status"],
+            "chapters": f'{card["chapters_translated"]}/{card["chapters_total"]}',
+            "translated_pct": round(100 * card["translated_chunks"] / total) if total else 0,
+            "open_findings": {
+                "judge": judge,
+                "annotations_awaiting_review": card["awaiting_review"],
+                "empty_footnotes": card["empty_footnotes"],
+            },
+        })
+    ready = bool(rows) and all(r.get("stage") == "fully-translated" for r in rows)
+    pending = [r["slug"] for r in rows if r.get("stage") != "fully-translated"]
+    return {
+        **_collection_summary(coll),
+        "works": rows,
+        "ready_to_build": ready,
+        "stale_precedent": collection_mod.stale_precedent_warnings(coll),
+        "next": ("every work is translated — build the volume EPUB"
+                 if ready else
+                 f"still to translate: {', '.join(pending)} (build with allow_partial to preview)"),
+    }
+
+
+def collection_epub(slug: str, *, allow_partial: bool = False) -> dict:
+    """Build the volume EPUB (fails on an untranslated member unless ``allow_partial``)."""
+    from src import collection as collection_mod
+    from src.epub_builder import build_collection_epub
+
+    cdir = collection_mod.resolve_collection_dir(slug)
+    result = build_collection_epub(cdir, allow_partial=allow_partial)
+    return {
+        "collection": cdir.name,
+        "collection_dir": str(cdir),
+        "epub_path": str(result.path),
+        "works": result.works,
+        "endnotes": result.endnotes,
+    }
+
+
 # ── split (review beat) ─────────────────────────────────────────────────────
 
 def _read_source(project_dir: Path) -> str:
@@ -5641,6 +5757,55 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "address_divergence": "directions where two series siblings disagree",
         "glossary_terms": "sibling-glossary and house-lexicon terms that occur in this source",
         "glossary_divergent": "terms the siblings render differently",
+    },
+    "collection-create": {
+        "collection": "the collection slug (also its folder name)",
+        "collection_dir": "where collection.json and the volume's project.json were written",
+        "group": "the book group the members joined (the collection slug unless --group named one)",
+        "members": "member project slugs, in volume order",
+        "joined": "list of {group, kind, about, members} as written, one per member join; a `warning` key when --group-kind disagreed with an existing group",
+        "stale_precedent": "list of {member, built_at, missing_siblings, next}: members whose .harness/precedent.json predates a sibling in this collection",
+        "next": "the next step",
+    },
+    "collection-add": {
+        "collection": "the collection slug",
+        "collection_dir": "the collection folder",
+        "group": "the collection's book group",
+        "members": "member slugs after the add",
+        "joined": "{group, kind, about, members} for the new member's join",
+        "stale_precedent": "as for collection-create",
+        "next": "the next step",
+    },
+    "collection-remove": {
+        "collection": "the collection slug",
+        "collection_dir": "the collection folder",
+        "group": "the collection's book group",
+        "members": "member slugs after the removal",
+        "left_group": "{group, kind, about, members} after the member left, or null",
+        "kept_group": "why the member stayed in the group (null when it left)",
+    },
+    "collection-reorder": {
+        "collection": "the collection slug",
+        "collection_dir": "the collection folder",
+        "group": "the collection's book group",
+        "members": "member slugs in their new order",
+    },
+    "collection-status": {
+        "collection": "the collection slug",
+        "collection_dir": "the collection folder",
+        "group": "the collection's book group",
+        "members": "member slugs, in volume order",
+        "works": "list of {slug, part_title, stage, status, chapters, translated_pct, open_findings{judge, annotations_awaiting_review, empty_footnotes}}; {slug, missing: true} for a slug that no longer resolves",
+        "ready_to_build": "true when every member is fully translated",
+        "stale_precedent": "as for collection-create",
+        "next": "the next step",
+    },
+    "collection-epub": {
+        "collection": "the collection slug",
+        "collection_dir": "the collection folder",
+        "epub_path": "the written volume EPUB",
+        "works": "list of {slug, included, skipped}: chapter ids built and left out, per member",
+        "endnotes": "total endnotes in the volume's Notas page",
     },
     "address-map rename": {
         "source_path": "the committed address_map.json the rename read (never modified)",

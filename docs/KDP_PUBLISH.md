@@ -76,6 +76,28 @@ pages a reader turns past, not places they navigate to. Both are opt-in. A build
 none of these arguments produces the same OPF and spine as before (covered by
 `tests/test_epub_builder.py::test_no_front_matter_keys_leaves_spine_unchanged`).
 
+## Collections
+
+A collection (`src/collection.py`, `harness.py collection-*`) is a volume bound from
+several projects. Its folder carries a book's `project.json` and sidecars, so
+`load_book_metadata` and `kdp_listing.apply` work on it unchanged; a blank `author`,
+`translator` or language falls back to the members' (one distinct author names the
+volume, several are joined "A, B y C").
+
+- **Build:** `build_collection_epub` (title page, copyright, nav, then per member a part
+  page and its chapters, then one Notas page and the volume's translator note). One
+  `dc:creator` per distinct member author, one `dc:source` per member's original title.
+- **Facts:** `gather` on a collection dir runs `gather_collection`: per-member catalog
+  fetches and rights flags (unioned, tagged with the work), summed notes, images, words
+  and authorship, a plural notice draft (`_collection_notice_lines`, or the template's
+  own `edition_notice.collection_lines`), and per-work `needs_input`.
+- **Quotations:** the collection's `quotations.json` is rebuilt by every `facts` run from
+  the members' records (`src/quotations/record.py:build_collection_record`): unique verses
+  unioned, occurrences and quoted words summed, the share over the volume's words.
+- **Checks:** `validate.check` treats `contributors` with role `Author` as metadata
+  (keywords must not repeat them); `verify` requires every member author among the
+  `dc:creator`s.
+
 ## Evidence sources
 
 **Gutenberg catalog** (`gutenberg.org/ebooks/<id>.rdf`, fetched once and cached as
