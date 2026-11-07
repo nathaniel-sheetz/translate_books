@@ -119,6 +119,70 @@
     color: #2d8a4e;
 }
 
+/* A collection's dashboard: the steps that run per work are greyed out, and
+   the works' own dashboards are listed beneath them. */
+.stepper li.disabled {
+    cursor: default;
+    color: #b3aea8;
+}
+
+.stepper li.disabled:hover {
+    background: none;
+}
+
+.stepper li.disabled .step-number {
+    background: #ebe7e2;
+    color: #b3aea8;
+}
+
+.stepper-works {
+    margin-top: 12px;
+    padding: 12px 20px 0;
+    border-top: 1px solid #e0dcd7;
+    font-size: 13px;
+}
+
+.stepper-works-label {
+    display: block;
+    margin-bottom: 4px;
+    color: #888;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.stepper-works ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.stepper-works li a {
+    display: block;
+    padding: 6px 0;
+    color: #2c3e50;
+    text-decoration: none;
+}
+
+.stepper-works li a:hover {
+    text-decoration: underline;
+}
+
+.stepper-works-missing {
+    display: block;
+    padding: 6px 0;
+    color: #999;
+    font-style: italic;
+}
+
+.epub-works-incomplete {
+    margin: 0 0 10px;
+    padding-left: 20px;
+    font-size: 13px;
+    color: #8a5a00;
+}
+
 /* ── Main content ── */
 
 .dash-main {

@@ -106,9 +106,9 @@ def iter_collection_dirs(root: Optional[Path] = None, _depth: int = 0) -> Iterat
     """Yield collection dirs under ``root`` (default ``projects/``), sorted.
 
     Walks the way :func:`src.harness.state.iter_project_dirs` does: symlinks
-    skipped, never into a project, depth-capped. It does descend into a
-    collection, but collections inside collections are not supported, so what
-    it finds there is only members.
+    skipped, never into a project, depth-capped. It does not descend into a
+    collection: collections inside collections are not supported, and members
+    are found by the project walker.
     """
     root = Path(root) if root is not None else state.projects_root()
     if not root.exists() or _depth > state.PROJECT_WALK_MAX_DEPTH:
@@ -361,6 +361,7 @@ def create(
         raise ValueError("a collection needs at least one member")
     member_slugs = _require_members(members)
     _group_kind(group_kind)  # validate before anything is written
+    group_id = (group or "").strip() or slug
 
     base = state.projects_root()
     if parent:
@@ -374,7 +375,7 @@ def create(
     if (cdir / PROJECT_FILE).exists():
         raise ValueError(f"{cdir} already has a project.json; refusing to adopt it")
 
-    coll = Collection(slug=slug, path=cdir, group=(group or slug).strip(),
+    coll = Collection(slug=slug, path=cdir, group=group_id,
                       members=[Member(slug=s, path=_resolve_member_dir(s)) for s in member_slugs])
     cdir.mkdir(parents=True, exist_ok=True)
     project: dict[str, Any] = {}

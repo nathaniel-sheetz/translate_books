@@ -1,11 +1,12 @@
 {#- The book page's pipeline strip and Proceso panel. Macros rather than
     includes so /api/book-phases/<id>/triage can render the same markup once
     triage coverage has been computed, and the page swaps it in. `bp` is
-    app._book_phases_view(book_phases(...)). -#}
+    app._book_phases_view(book_phases(...)). `idp` prefixes the strip's ids,
+    for a collection's page, which draws one strip per work. -#}
 
-{% macro phase_strip(bp, t) -%}
-<button type="button" class="phase-strip" id="phase-strip"
-        aria-label="{{ t.book_strip_label }}" aria-controls="tab-process">
+{% macro phase_strip(bp, t, idp='') -%}
+<button type="button" class="phase-strip" id="{{ idp }}phase-strip"
+        aria-label="{{ t.book_strip_label }}" aria-controls="{{ idp }}tab-process">
     <span class="phase-segs" aria-hidden="true">
         {%- for p in bp.phases %}
         <span class="phase-seg ph-{{ p.state }}" style="--pct: {{ p.pct }}%"

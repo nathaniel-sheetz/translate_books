@@ -1,6 +1,7 @@
 """Tests for reader mode routes."""
 
 import json
+import re
 import pytest
 from pathlib import Path
 
@@ -426,7 +427,7 @@ class TestBookPageHeader:
         assert html.count('class="phase-row ph-') == 9
         assert html.count('class="phase-group"') == 4
         # Capítulos opens first; Proceso is rendered but hidden.
-        assert 'id="tab-btn-chapters" type="button" role="tab"\n                aria-selected="true"' in html
+        assert re.search(r'id="tab-btn-chapters"[^>]*aria-selected="true"', html)
         assert 'id="tab-process" role="tabpanel" aria-labelledby="tab-btn-process" hidden' in html
 
     def test_old_toggles_are_gone(self, client, project_with_alignment):

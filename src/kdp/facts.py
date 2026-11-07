@@ -219,10 +219,10 @@ def _collection_notice_lines(lines: list[str]) -> list[str]:
     """
     out = []
     for line in lines:
-        if "{original_year}" in line:
-            continue
         if "{source_title}" in line:
             out.append("Títulos originales: {original_titles}.")
+            continue
+        if "{original_year}" in line:
             continue
         out.append(line.replace("La obra original es de dominio público",
                                 "Las obras originales son de dominio público"))

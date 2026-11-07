@@ -202,3 +202,14 @@ def test_kdp_verify_accepts_one_creator_per_member_author(library, plumer):
 def test_part_page_skips_an_original_title_equal_to_the_title():
     page = part_page_to_xhtml("Phantastes", "Phantastes", "George MacDonald", None)
     assert "<em>" not in page and "George MacDonald" in page
+
+
+def test_a_member_not_chunked_yet_fails_unless_partial(library, plumer):
+    # Set up but never chunked: no chunks/ at all, so nothing is "skipped" either.
+    make_project(library, "fresh", chapters=[], project={"spanish_title": "Recién llegado"})
+    coll, _ = collection_mod.create("vol", members=["short-sermons", "fresh"])
+    with pytest.raises(ValueError, match="fresh: not chunked yet"):
+        build_collection_epub(coll.path)
+
+    result = build_collection_epub(coll.path, allow_partial=True)
+    assert result.works[1] == {"slug": "fresh", "included": [], "skipped": []}

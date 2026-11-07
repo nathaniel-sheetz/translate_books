@@ -5,6 +5,10 @@
 
     var PROJECT = window.DASHBOARD_PROJECT_ID;
     var PROJECT_TITLE = window.DASHBOARD_PROJECT_TITLE;
+    // A collection's dashboard is the volume's: Export only. The other stages'
+    // markup is still on the page, so their bindings below stay harmless; what
+    // would ask the server about a book is skipped.
+    var IS_COLLECTION = !!window.DASHBOARD_IS_COLLECTION;
     var FIXED_QUESTIONS = window.DASHBOARD_FIXED_QUESTIONS;
     var projectStatus = null;
     var SPLIT_PATTERNS = null;
@@ -249,6 +253,7 @@
 
     function navigateTo(stage) {
         if (stages.indexOf(stage) === -1) stage = 'source';
+        if (IS_COLLECTION) stage = 'export';
         var changed = currentStage !== stage;
         currentStage = stage;
         // The Review rollup is the one stage expensive enough to be worth
@@ -274,6 +279,7 @@
     // Stepper click handlers
     document.querySelectorAll('.stepper li').forEach(function(li) {
         li.addEventListener('click', function() {
+            if (li.classList.contains('disabled')) return;
             navigateTo(li.dataset.stage);
         });
     });
@@ -3481,7 +3487,7 @@
     };
 
     // Load batch API jobs when entering translate stage
-    loadBatchApiJobs();
+    if (!IS_COLLECTION) loadBatchApiJobs();
 
     // ========================================================================
     // Stage 7: Review
@@ -4960,6 +4966,29 @@
             document.getElementById('epub-translated-count').textContent = data.translated_chapters;
             document.getElementById('epub-total-count').textContent = data.total_chapters;
 
+            // A volume: name each work that still has untranslated chapters,
+            // and show what a blank Author / Translator becomes at build time.
+            if (data.is_collection) {
+                var list = document.getElementById('epub-works-incomplete');
+                var short = (data.works || []).filter(function(w) {
+                    return w.missing || w.translated < w.total || !w.total;
+                });
+                list.innerHTML = short.map(function(w) {
+                    var what = w.missing ? 'project not found'
+                        : !w.total ? 'not split into chapters yet'
+                        : (w.total - w.translated) + ' of ' + w.total + ' chapters untranslated';
+                    return '<li><a href="/project/' + encodeURIComponent(w.id) + '">' +
+                        escapeHtml(w.title) + '</a>: ' + what + '</li>';
+                }).join('');
+                list.style.display = short.length ? '' : 'none';
+                if (data.author_fallback) {
+                    document.getElementById('epub-author').placeholder = 'Blank: ' + data.author_fallback;
+                }
+                if (data.translator_fallback) {
+                    document.getElementById('epub-translator').placeholder = 'Blank: ' + data.translator_fallback;
+                }
+            }
+
             // Pre-populate title/author (prefer spanish_title for epub)
             var titleInput = document.getElementById('epub-title');
             var authorInput = document.getElementById('epub-author');
@@ -5115,24 +5144,33 @@
         statusEl.textContent = '';
         document.getElementById('btn-download-epub').style.display = 'none';
 
-        apiPost('/api/project/' + PROJECT + '/build-epub', {
+        var body = {
             title: title || undefined,
             author: author || undefined,
             translator: translator,
-            source_title: sourceTitle,
             publisher: publisher,
             description: description,
             rights: rights,
             translator_heading: translatorHeading,
             translator_note: translatorNote,
-        }).then(function(data) {
+        };
+        // A volume has no Original title field: each work names its own.
+        if (document.getElementById('epub-source-title')) body.source_title = sourceTitle;
+        if (IS_COLLECTION) body.allow_partial = document.getElementById('epub-allow-partial').checked;
+
+        apiPost('/api/project/' + PROJECT + '/build-epub', body).then(function(data) {
             btn.disabled = false;
             btn.textContent = 'Build EPUB';
             if (data.error) {
                 statusEl.textContent = 'Error: ' + data.error;
                 statusEl.style.color = '#c00';
             } else {
-                statusEl.textContent = data.chapters_included + ' chapters, ' + formatBytes(data.size_bytes);
+                var summary = data.chapters_included + ' chapters, ' + formatBytes(data.size_bytes);
+                if (data.works) {
+                    summary = data.works.length + ' works, ' + summary;
+                    if (data.skipped) summary += ' (' + data.skipped + ' untranslated left out)';
+                }
+                statusEl.textContent = summary;
                 statusEl.style.color = '#080';
                 var dlBtn = document.getElementById('btn-download-epub');
                 dlBtn.href = '/api/project/' + PROJECT + '/download-epub';
@@ -5151,6 +5189,12 @@
     // ========================================================================
     // Init
     // ========================================================================
+
+    if (IS_COLLECTION) {
+        populateExportStage();
+        navigateTo('export');
+        return;
+    }
 
     loadLLMConfig().then(function() {
         initAllLLMSelectors();

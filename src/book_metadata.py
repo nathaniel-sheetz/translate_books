@@ -61,7 +61,7 @@ def _joined(names: list[str]) -> str:
     return f"{', '.join(names[:-1])} y {names[-1]}"
 
 
-def _collection_defaults(project_dir: Path) -> dict[str, str]:
+def collection_defaults(project_dir: Path) -> dict[str, str]:
     """For a collection dir: author, translator and language from its members.
 
     A blank field on the volume falls back to the members' values: one
@@ -72,7 +72,10 @@ def _collection_defaults(project_dir: Path) -> dict[str, str]:
 
     if not collection_mod.is_collection_dir(project_dir):
         return {}
-    coll = collection_mod.load_collection(project_dir)
+    try:
+        coll = collection_mod.load_collection(project_dir)
+    except ValueError:  # corrupt collection.json: resolve like a book
+        return {}
     members = [load_book_metadata(m.path) for m in coll.members if m.path is not None]
 
     def distinct(key: str) -> list[str]:
@@ -119,7 +122,7 @@ def load_book_metadata(project_dir: Path) -> dict[str, Any]:
     translator = _text(project.get("translator"))
     language = _first(project.get("target_lang_code"), harness.get("language_code"))
     if not (author and translator and language):
-        derived = _collection_defaults(project_dir)
+        derived = collection_defaults(project_dir)
         author = author or derived.get("author", "")
         translator = translator or derived.get("translator", "")
         language = language or derived.get("language", "")

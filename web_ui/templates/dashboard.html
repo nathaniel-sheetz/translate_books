@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ project_title }} — Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}?v=2">
     <link rel="stylesheet" href="{{ url_for('static', filename='setup.css') }}">
 </head>
 <body>
@@ -14,41 +14,48 @@
     <!-- ── Sidebar stepper ── -->
     <nav class="dash-sidebar">
         <div class="dash-project-name">
+            {% if is_collection %}
+            <a href="/read/collection/{{ project_id }}">&larr; Collection</a>
+            {% else %}
             <a href="/read/">&larr; Projects</a>
+            {% endif %}
             <span id="sidebar-project-title">{{ project_title }}</span>
         </div>
+        {#- A collection's dashboard is the volume's: only Export is its own.
+            Source through Review run per work, so those steps are greyed out
+            and the works' own dashboards are listed under them. -#}
         <ul class="stepper" id="stepper">
-            <li data-stage="source">
+            <li data-stage="source"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>1</span></span>
                 <span class="step-label">Source</span>
                 <span class="step-badge" id="badge-source"></span>
             </li>
-            <li data-stage="split">
+            <li data-stage="split"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>2</span></span>
                 <span class="step-label">Split</span>
                 <span class="step-badge" id="badge-split"></span>
             </li>
-            <li data-stage="chunk">
+            <li data-stage="chunk"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>3</span></span>
                 <span class="step-label">Chunk</span>
                 <span class="step-badge" id="badge-chunk"></span>
             </li>
-            <li data-stage="style-guide">
+            <li data-stage="style-guide"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>4</span></span>
                 <span class="step-label">Style</span>
                 <span class="step-badge" id="badge-style-guide"></span>
             </li>
-            <li data-stage="glossary">
+            <li data-stage="glossary"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>5</span></span>
                 <span class="step-label">Glossary</span>
                 <span class="step-badge" id="badge-glossary"></span>
             </li>
-            <li data-stage="translate">
+            <li data-stage="translate"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>6</span></span>
                 <span class="step-label">Translate</span>
                 <span class="step-badge" id="badge-translate"></span>
             </li>
-            <li data-stage="review">
+            <li data-stage="review"{% if is_collection %} class="disabled" aria-disabled="true" title="Runs per work"{% endif %}>
                 <span class="step-number"><span>7</span></span>
                 <span class="step-label">Review</span>
                 <span class="step-badge" id="badge-review"></span>
@@ -59,6 +66,17 @@
                 <span class="step-badge" id="badge-export"></span>
             </li>
         </ul>
+        {% if is_collection %}
+        <div class="stepper-works">
+            <span class="stepper-works-label">Works</span>
+            <ul>
+                {% for w in works %}
+                <li>{% if w.missing %}<span class="stepper-works-missing">{{ w.title }} (missing)</span>
+                    {%- else %}<a href="/project/{{ w.id }}">{{ w.title }}</a>{% endif %}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
     </nav>
 
     <!-- ── Main content ── -->
@@ -699,11 +717,26 @@
         <!-- ============================================================ -->
         <div class="stage-panel" id="stage-export">
             <h2>Export</h2>
+            {% if is_collection %}
+            <p class="stage-subtitle">Build one EPUB from every work in this collection. Each work's
+                author and original title come from its own project.</p>
+
+            <div id="epub-coverage" style="margin-bottom:16px;">
+                <p><strong><span id="epub-translated-count">0</span> of <span id="epub-total-count">0</span></strong>
+                    chapters across {{ works | length }} works are fully translated.</p>
+                <ul id="epub-works-incomplete" class="epub-works-incomplete" style="display:none;"></ul>
+                <label style="font-weight:normal; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                    <input type="checkbox" id="epub-allow-partial">
+                    Leave out untranslated chapters
+                </label>
+            </div>
+            {% else %}
             <p class="stage-subtitle">Build an EPUB from your translated chapters.</p>
 
             <div id="epub-coverage" style="margin-bottom:16px;">
                 <p><strong><span id="epub-translated-count">0</span> of <span id="epub-total-count">0</span></strong> chapters will be included in the EPUB.</p>
             </div>
+            {% endif %}
 
             <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
                 <label>Title</label>
@@ -715,15 +748,17 @@
                 <img id="epub-cover-thumb" alt="Cover preview"
                      style="display:none; max-width:160px; max-height:220px; border:1px solid #ccc; border-radius:4px;">
                 <p id="epub-cover-empty" class="section-hint" style="margin:0; color:#888;">
-                    No cover image found. Drop one into the project's
+                    No cover image found. Drop one into the {{ 'collection' if is_collection else "project" }}'s
                     <code>images/</code> directory as <code>cover.jpg</code>,
                     <code>cover.jpeg</code>, or <code>cover.png</code>.
                 </p>
                 <!-- The cover and every illustration are redone by the image
                      pass, and its board is where you see what it proposes and
-                     say what you want before an EPUB is built from them. -->
+                     say what you want before an EPUB is built from them. A
+                     collection's board holds the volume's cover alone; each
+                     work's illustrations are on that work's board. -->
                 <a class="btn-secondary" href="/image-pass/{{ project_id }}"
-                   style="display:inline-block; margin-top:8px;">Review this book's images</a>
+                   style="display:inline-block; margin-top:8px;">{{ "Review the volume's cover" if is_collection else "Review this book's images" }}</a>
             </div>
 
             <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
@@ -736,11 +771,14 @@
                 <input type="text" id="epub-translator" placeholder="Translator name (optional)">
             </div>
 
+            {#- A volume names each work's original (dc:source) from the work. -#}
+            {% if not is_collection %}
             <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
                 <label>Original title</label>
                 <input type="text" id="epub-source-title"
                        placeholder="Source-language title (optional)">
             </div>
+            {% endif %}
 
             <div class="dash-field" style="max-width:400px; margin-bottom:12px;">
                 <label>Publisher</label>
@@ -1059,8 +1097,9 @@
     window.DASHBOARD_FIXED_QUESTIONS = {{ fixed_questions | tojson }};
     window.DASHBOARD_REVIEW_TYPES = {{ review_types | tojson }};
     window.DASHBOARD_REVIEW_LABELS = {{ t.review_types | tojson }};
+    window.DASHBOARD_IS_COLLECTION = {{ (is_collection | default(false)) | tojson }};
 </script>
-<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='dashboard.js') }}?v=2"></script>
 
 </body>
 </html>

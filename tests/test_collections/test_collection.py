@@ -247,3 +247,19 @@ def test_the_cli_parses_the_collection_verbs():
         "plumer-volumen", ["a", "b"], "plumer", "series")
     args = parser.parse_args(["collection-epub", "plumer-volumen", "--allow-partial"])
     assert args.allow_partial is True
+
+
+def test_a_blank_group_falls_back_to_the_slug(library, plumer):
+    coll, report = collection_mod.create("vol", members=["short-sermons"], group="   ")
+    assert coll.group == "vol"
+    assert [j["group"] for j in report["joined"]] == ["vol"]
+
+
+def test_a_corrupt_collection_json_resolves_like_a_book(library, plumer):
+    from src.book_metadata import load_book_metadata
+
+    coll, _ = collection_mod.create("vol", members=["short-sermons"], title="Volumen")
+    (coll.path / "collection.json").write_text("{not json", encoding="utf-8")
+    meta = load_book_metadata(coll.path)
+    assert meta["title"] == "Volumen"
+    assert meta["author"] == ""

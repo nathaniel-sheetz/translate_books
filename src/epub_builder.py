@@ -1764,9 +1764,16 @@ def build_collection_epub(
             key=lambda pair: _chapter_sort_key(pair[0]),
         )
         gathered.append((idx, member, ordered, included, skipped))
-    incomplete = {m.slug: skipped for _, m, _, _, skipped in gathered if skipped}
+    # A member with no chunks at all (set up, never chunked) is incomplete too:
+    # it would otherwise drop out of the volume without a word.
+    incomplete = {}
+    for _, m, _, included, skipped in gathered:
+        if skipped:
+            incomplete[m.slug] = f'{len(skipped)} untranslated'
+        elif not included:
+            incomplete[m.slug] = 'not chunked yet'
     if incomplete and not allow_partial:
-        detail = '; '.join(f'{slug}: {len(ids)} untranslated' for slug, ids in incomplete.items())
+        detail = '; '.join(f'{slug}: {why}' for slug, why in incomplete.items())
         raise ValueError(f'Collection has untranslated chapters ({detail}); '
                          f'pass allow_partial to build without them')
     if not any(ordered for _, _, ordered, _, _ in gathered):

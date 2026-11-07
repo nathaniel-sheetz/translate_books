@@ -3473,9 +3473,9 @@ body {
 }
 
 /* Collections: one volume bound from several books. The library shows one
-   card for it (tagged, no ⋮ menu); /read/collection/<id> lists the works, each
-   with the chapter list a book page draws, plus the volume's status table and
-   its EPUB build. */
+   tagged card for it; /read/collection/<id> lists the works as collapsible
+   sections that open onto the view a book page draws. The volume's EPUB is
+   built on its dashboard. */
 
 .show-works-btn[aria-pressed="true"] {
     background: var(--accent-bg);
@@ -3491,71 +3491,94 @@ body {
     margin: 2px 0 4px;
 }
 
-.collection-page .collection-status {
-    width: 100%;
-    border-collapse: collapse;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 13px;
-    margin: 8px 0 20px;
-}
-.collection-status th,
-.collection-status td {
-    text-align: left;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border-light);
-    vertical-align: top;
-}
-.collection-status th {
-    color: var(--text-muted);
-    font-weight: 600;
-}
-.collection-status td.num {
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-.collection-status .chips {
+.works-bar {
     display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-}
-.collection-status-wrap {
-    overflow-x: auto;
-}
-
-.collection-build {
-    display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 8px 14px;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 13px;
-    margin: 0 0 24px;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 22px 0 6px;
 }
-.collection-build-msg.is-error {
-    color: var(--review-blacklist);
+.works-title {
+    font-size: 19px;
+    margin: 0;
 }
 
+/* One work: a summary row (toggle, ⋮, the pill and counts beneath), then
+   the book view it opens onto. */
 .work-section {
-    margin: 0 0 28px;
+    border-top: 1px solid var(--border-light);
+}
+.work-section:last-child {
+    border-bottom: 1px solid var(--border-light);
 }
 .work-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 6px;
+    padding: 6px 0 10px;
+}
+.work-head .card-menu {
+    position: relative;
+}
+.work-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.work-toggle-static {
+    cursor: default;
+}
+.work-chevron {
+    flex: none;
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+}
+.work-section.is-open .work-chevron {
+    transform: rotate(90deg);
+}
+.work-title {
+    font-size: 17px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.work-summary {
+    grid-column: 1 / -1;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px 10px;
-    margin: 0 0 6px;
+    padding-left: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: var(--text-muted);
 }
-.work-head h2 {
-    font-size: 19px;
-    margin: 0;
+.work-count {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
-.work-head h2 a {
-    color: inherit;
-    text-decoration: none;
+.work-body {
+    padding: 0 0 18px;
+}
+.work-body .phase-strip-wrap {
+    margin-top: 0;
 }
 .work-missing {
+    grid-column: 1 / -1;
+    padding-left: 24px;
     color: var(--text-muted);
     font-style: italic;
+}
+@media (prefers-reduced-motion: reduce) {
+    .work-chevron { transition: none; }
 }
 
 .nav-chevron.nav-next-work {

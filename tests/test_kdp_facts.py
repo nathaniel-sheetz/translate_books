@@ -361,3 +361,9 @@ def test_gather_collection_asks_for_a_members_missing_record(library, monkeypatc
     assert facts["quotations"] is None
     # Offline, Bambi has no catalog title and no source_title: asked, not dropped silently.
     assert "source_title.bambi" in {n["field"] for n in facts["needs_input"]}
+
+
+def test_collection_notice_keeps_a_line_with_both_title_and_year():
+    lines = kdp_facts._collection_notice_lines(
+        ["Título original: {source_title} ({original_year})", "{publisher}"])
+    assert lines == ["Títulos originales: {original_titles}.", "{publisher}"]
