@@ -1,0 +1,89 @@
+{#- A book's Capítulos | Proceso tabs and its chapter rows. Drawn on the book's
+    own page and for each work on a collection's page, so the two never drift
+    apart. `idp` prefixes every id (one set of tabs per work on a collection's
+    page); the book's own page passes ''. -#}
+{% import "_book_phases.html" as phases_ui %}
+
+{#- The rows carry the badges the home-page card uses: what is left to do, in
+    the same words and the same colors. `rows` is app._chapter_rows(...);
+    `link_qs` is appended to every chapter link (a collection's page passes
+    `?collection=<id>`) and `row_idp` prefixes each row's id, so two works'
+    chapter_01 rows never share one.
+
+    `chapter_flags` is the flag total under the *current* category selection;
+    reader_chapters.js re-sums it from data-flags when the picker changes, and
+    toggles the clean chip with it. "Clean" is a claim about flags, so it needs
+    at least one type ticked. -#}
+{% macro chapter_list(rows, project_id, t, review_types_selected, link_qs='', from_chapter=None, row_idp='ch-') -%}
+<ul class="nav-list">
+    {% for ch in rows %}
+    {% set ns = namespace(flags=0) %}
+    {% for tkey in review_types_selected %}{% set ns.flags = ns.flags + ch.flag_counts.get(tkey, 0) %}{% endfor %}
+    {% set clean_eligible = ch.reviewed and ch.review_count == 0 and ch.empty_footnotes == 0 and not ch.gap_count %}
+    <li id="{{ row_idp }}{{ ch.id }}"{% if ch.id == from_chapter %} class="last-opened"{% endif %} data-flags='{{ ch.flag_counts | tojson }}'>
+        <a href="/read/{{ project_id }}/{{ ch.id }}{{ link_qs }}">
+            <span class="nav-title{% if ch.kind and ch.kind != 'chapter' %} nav-title-matter{% endif %}">
+                {%- if ch.id == from_chapter %}<small class="last-opened-label">{{ t.last_opened }}</small>{% endif -%}
+                {{ ch.display_label or (ch.id | replace('_', ' ') | title | replace('Chapter', t.chapter_prefix)) }}</span>
+            <span class="nav-meta">
+                {%- if not ch.reviewed -%}
+                    <span class="badge badge-unread">{{ t.badge_unread }}</span>
+                {%- endif -%}
+                {%- if ch.review_count > 0 -%}
+                    <span class="badge badge-review">{{ ch.review_count }} {{ t.badge_review }}</span>
+                {%- endif -%}
+                {#- Written-of-total, because a footnote mark with no gloss is
+                    dropped from the EPUB — 4/6 says two notes are still owed. -#}
+                {%- if ch.footnote_count > 0 -%}
+                    <span class="badge badge-footnote">{{ ch.filled_footnotes }}/{{ ch.footnote_count }} {{ t.badge_notes }}</span>
+                {%- endif -%}
+                <span class="badge badge-warn chapter-chip-flags" {% if not ns.flags %}hidden{% endif %}><span class="chip-flag-count">{{ ns.flags }}</span> <span class="chip-flag-label">{{ t.chip_flag_one if ns.flags == 1 else t.chip_flags }}</span></span>
+                {%- if ch.gap_count -%}
+                    <span class="badge badge-warn" title="{{ ch.gap_chars }} {{ t.badge_gap_title }}">{{ ch.gap_count }} {{ t.badge_gap }}</span>
+                {%- endif -%}
+                {%- if clean_eligible -%}
+                    <span class="badge badge-clean chapter-chip-clean" {% if ns.flags or not review_types_selected %}hidden{% endif %}>✓ {{ t.chip_clean }}</span>
+                {%- endif -%}
+            </span>
+        </a>
+    </li>
+    {% endfor %}
+</ul>
+{%- endmacro %}
+
+{#- Capítulos always opens first; Proceso is read-only. Switched in place by
+    reader_chapters.js. The resume link sits at the bar's far end. `bp` is
+    app._book_phases_view(...); `empty_text` stands in for an empty list. -#}
+{% macro book_tabs(idp, project_id, t, bp, rows, review_types_selected,
+                   bookmark_href=None, bookmark_label=None, link_qs='', from_chapter=None,
+                   row_idp='ch-', empty_text=None) -%}
+<div class="book-tabs" role="tablist">
+    <button class="book-tab" id="{{ idp }}tab-btn-chapters" type="button" role="tab"
+            aria-selected="true" aria-controls="{{ idp }}tab-chapters" data-tab="chapters">{{ t.book_tab_chapters }}</button>
+    <button class="book-tab" id="{{ idp }}tab-btn-process" type="button" role="tab" tabindex="-1"
+            aria-selected="false" aria-controls="{{ idp }}tab-process" data-tab="process">
+        {{- t.book_tab_process -}}
+        <span class="book-tab-count" id="{{ idp }}process-count"{% if not bp.missing %} hidden{% endif %}>{{ bp.missing | length }}</span>
+    </button>
+    <span class="book-tabs-spacer"></span>
+    {% if bookmark_href %}
+    <a href="{{ bookmark_href }}" class="book-resume bookmark-goto">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span class="book-resume-pre">{{ t.resume_reading }} · </span><span>{{ bookmark_label }}</span>
+    </a>
+    {% endif %}
+</div>
+<div class="book-panel" id="{{ idp }}tab-chapters" role="tabpanel" aria-labelledby="{{ idp }}tab-btn-chapters">
+{%- if rows %}
+{{ chapter_list(rows, project_id, t, review_types_selected, link_qs=link_qs, from_chapter=from_chapter, row_idp=row_idp) }}
+{%- elif empty_text %}
+<p class="empty-state">{{ empty_text }}</p>
+{%- endif %}
+</div>
+<div class="book-panel" id="{{ idp }}tab-process" role="tabpanel" aria-labelledby="{{ idp }}tab-btn-process" hidden>
+    {{ phases_ui.phase_panel(bp, t) }}
+</div>
+{%- endmacro %}

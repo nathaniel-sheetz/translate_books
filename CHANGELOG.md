@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.84.0.0] - 2026-11-06
+
+### Added
+- **Collections: one published volume bound from several independent works** (`src/collection.py`). An anthology of stories, or two short books printed together. A collection is a folder under `projects/` with a `collection.json` (the members by slug, in order, each with an optional part title and part page) plus the volume's own `project.json` and sidecars. Every member stays an ordinary project, so translation, judges and the passes run per member unchanged, and a member may sit in more than one collection.
+  - Harness verbs `collection-create`, `-add`, `-remove`, `-reorder`, `-status` and `-epub`. The members join a book group (the collection slug as a `domain`, or `--group` / `--group-kind series`), so later works get their style answers and glossary pre-filled. `create` and `status` name any member whose precedent predates a sibling.
+  - `build_collection_epub`: the volume's title and copyright pages, then a part page per multi-chapter work and its chapters, then one Notas page numbered continuously and grouped by work, then the translator note. A one-chapter story is one TOC entry titled by its first line. Each work's files and images are prefixed (`w01_chapter_01.xhtml`, `images/w01/`), so names never collide. The single-book build is split into shared helpers.
+  - Metadata: a blank volume author, translator or language falls back to the members' ("A, B y C"), with one `dc:creator` per distinct author and one `dc:source` per member.
+  - KDP: `gather` loops the members (rights flags tagged by work, sizes summed) and writes "Títulos originales: …" into the edition notice. `validate` keeps co-authors out of the keywords, `verify` checks every member author is a `dc:creator`, and `kdp_publish.py` takes a collection.
+  - Quotations: the volume's `quotations.json` adds the members' records together and checks the NBLA limits against the volume as one work.
+  - Web UI: one library card per collection (members hidden unless "show works individually"), a collection page listing each work as a collapsible section with its chapters, phase strip and menu, a reader that goes from a work's last chapter to the next work, and a volume dashboard with only the Export step, which builds and downloads the volume EPUB. The build fails while any member has untranslated chapters or has not been chunked yet, unless `--allow-partial` is passed.
+
 ## [0.83.0.0] - 2026-11-03
 
 ### Added

@@ -246,6 +246,12 @@ def check(
          if str(c.get("role") or "").lower() in ("translator", "traductor")),
         "",
     )
+    # A collection by several writers credits the first as Author and the rest as
+    # Author contributors; their names are metadata the keywords must not repeat.
+    co_authors = [
+        str(c.get("name") or "").strip() for c in contributors
+        if str(c.get("role") or "").lower() in ("author", "autor")
+    ]
 
     rights_mode = rights_mode_of(listing, defaults)
     public_domain = rights_mode == PUBLIC_DOMAIN
@@ -331,7 +337,7 @@ def check(
     if len(keywords) != KEYWORD_SLOTS:
         _issue(errors, "keyword_count",
                f"{len(keywords)} keywords; fill all {KEYWORD_SLOTS} slots.", "keywords")
-    metadata_words = _words(" ".join([title, subtitle, author, translator]))
+    metadata_words = _words(" ".join([title, subtitle, author, translator, *co_authors]))
     category_words = set()
     for cat in listing.get("categories") or []:
         path = cat.get("path") or []

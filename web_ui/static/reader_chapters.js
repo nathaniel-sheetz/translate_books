@@ -1,7 +1,9 @@
-/* Per-book chapter list (`/read/<project_id>`, mode == "chapters").
+/* Per-book chapter list (`/read/<project_id>`, mode == "chapters"), and a
+ * collection's page (`/read/collection/<id>`), which draws the same view once
+ * per work.
  *
- * The book's ⋮ menu, the Capítulos | Proceso tabs, the place you came back
- * to, and the flag chip with its type picker. The project id and strings
+ * The ⋮ menus, the Capítulos | Proceso tabs, a collection's collapsible works,
+ * the place you came back to, and the flag chip with its type picker. The project id and strings
  * arrive via window.__reader_chapters, the same way the home page gets
  * window.__i18n_projects. The theme toggle lives on the home page now.
  */
@@ -10,70 +12,89 @@
 
     var cfg = window.__reader_chapters || {};
 
-    /* ── Book ⋮ menu (recommendations, images, dashboard) ──
+    /* ── ⋮ menus (the book's; on a collection's page, the volume's and each work's) ──
      *
-     * The home page's card menu, one per page here. reader_projects.js's
-     * bindPopup is not loaded on this page, so the open/close is spelled out
-     * the same way the flag picker below does it.
+     * The home page's card menu. reader_projects.js's bindPopup is not loaded
+     * on this page, so the open/close is spelled out the same way the flag
+     * picker below does it, once per `.card-menu` on the page. Opening one
+     * closes the others.
      */
     (function () {
-        var menu = document.getElementById('chapter-menu');
-        var btn = document.getElementById('chapter-menu-btn');
-        var popup = document.getElementById('chapter-menu-popup');
-        if (!menu || !btn || !popup) return;
+        var menus = [];
 
-        var open = false;
-
-        function setOpen(next) {
-            open = next;
-            popup.hidden = !next;
-            btn.setAttribute('aria-expanded', next ? 'true' : 'false');
-            btn.classList.toggle('popup-open', next);
-        }
-
-        btn.addEventListener('click', function () {
-            setOpen(!open);
+        Array.prototype.forEach.call(document.querySelectorAll('.card-menu'), function (menu) {
+            var btn = menu.querySelector('.card-menu-btn');
+            var popup = menu.querySelector('.card-menu-popup');
+            if (!btn || !popup) return;
+            var entry = { menu: menu, open: false };
+            entry.set = function (next) {
+                entry.open = next;
+                popup.hidden = !next;
+                btn.setAttribute('aria-expanded', next ? 'true' : 'false');
+                btn.classList.toggle('popup-open', next);
+            };
+            btn.addEventListener('click', function () {
+                var next = !entry.open;
+                menus.forEach(function (m) { if (m !== entry && m.open) m.set(false); });
+                entry.set(next);
+            });
+            menus.push(entry);
         });
+        if (!menus.length) return;
 
         // Capture: the flag chip stops propagation, and a click on it should
-        // still close this menu.
+        // still close the menus.
         document.addEventListener('click', function (e) {
-            if (open && !menu.contains(e.target)) setOpen(false);
+            menus.forEach(function (m) {
+                if (m.open && !m.menu.contains(e.target)) m.set(false);
+            });
         }, true);
 
         document.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape' && open) setOpen(false);
+            if (e.key !== 'Escape') return;
+            menus.forEach(function (m) { if (m.open) m.set(false); });
         });
     })();
 
     /* ── Tabs: Capítulos | Proceso ──
      *
-     * Switched in place, no reload, and never remembered: the chapters always
-     * come first. Proceso's triage row arrives without its numbers when they
-     * are not cached yet (they take seconds to work out), so the first visit to
-     * the tab asks the server for them and swaps in the strip and the panel.
+     * One set per book: the book's page is one root (`.book-page[data-project]`),
+     * a collection's page has one per work (`.work-body`, set up the first time
+     * it opens). Switched in place, no reload, and never remembered: the
+     * chapters always come first. Proceso's triage row arrives without its
+     * numbers when they are not cached yet (they take seconds to work out), so
+     * the first visit to the tab asks the server for them and swaps in the strip
+     * and the panel. `data-idp` is the root's id prefix, passed back so the
+     * swapped-in strip keeps its ids.
      */
-    (function () {
-        var tabs = Array.prototype.slice.call(document.querySelectorAll('.book-tab'));
-        var resume = document.querySelector('.book-resume');
+    function initBook(root) {
+        if (root.dataset.bookReady) return;
+        root.dataset.bookReady = '1';
+        var projectId = root.dataset.project || cfg.projectId || '';
+        var idp = root.dataset.idp || '';
+        var tabs = Array.prototype.slice.call(root.querySelectorAll('.book-tab'));
+        var resume = root.querySelector('.book-resume');
         if (!tabs.length) return;
         var triageAsked = false;
 
+        function byId(id) { return document.getElementById(idp + id); }
+
         function loadTriage() {
-            if (triageAsked || !document.querySelector('.phase-row.ph-unknown')) return;
+            if (triageAsked || !root.querySelector('.phase-row.ph-unknown')) return;
             triageAsked = true;
-            fetch('/api/book-phases/' + encodeURIComponent(cfg.projectId || '') + '/triage')
+            fetch('/api/book-phases/' + encodeURIComponent(projectId) + '/triage' +
+                  (idp ? '?idp=' + encodeURIComponent(idp) : ''))
                 .then(function (r) { return r.ok ? r.json() : null; })
                 .then(function (data) {
                     if (!data) { triageAsked = false; return; }
-                    var wrap = document.getElementById('phase-strip-wrap');
-                    var panel = document.getElementById('tab-process');
+                    var wrap = root.querySelector('.phase-strip-wrap');
+                    var panel = byId('tab-process');
                     if (wrap) {
                         wrap.innerHTML = data.strip;
                         bindStrip();
                     }
                     if (panel) panel.innerHTML = data.panel;
-                    var count = document.getElementById('process-count');
+                    var count = byId('process-count');
                     if (count) {
                         count.textContent = data.missing;
                         count.hidden = !data.missing;
@@ -109,15 +130,78 @@
 
         // The strip is the header's summary of the Proceso tab: a click opens it.
         function bindStrip() {
-            var strip = document.getElementById('phase-strip');
+            var strip = root.querySelector('.phase-strip');
             if (!strip) return;
             strip.addEventListener('click', function () {
                 select('process');
-                var bar = document.querySelector('.book-tabs');
+                var bar = root.querySelector('.book-tabs');
                 if (bar && bar.getBoundingClientRect().top < 0) bar.scrollIntoView();
             });
         }
         bindStrip();
+    }
+
+    var bookRoot = document.querySelector('.book-page[data-project]');
+    if (bookRoot) initBook(bookRoot);
+
+    /* ── A collection's works: collapsed rows that open onto the book view ──
+     *
+     * All closed on arrival, except the work the URL's hash names
+     * (`#work-<slug>`, where the reader's back link points), which opens and
+     * scrolls into view. "Expand all" flips to "Collapse all" once every work
+     * is open.
+     */
+    (function () {
+        var toggles = Array.prototype.slice.call(document.querySelectorAll('.work-toggle[aria-controls]'));
+        if (!toggles.length) return;
+        var all = document.getElementById('works-toggle-all');
+
+        function setOpen(btn, open) {
+            var body = document.getElementById(btn.getAttribute('aria-controls'));
+            if (!body) return;
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            body.hidden = !open;
+            btn.closest('.work-section').classList.toggle('is-open', open);
+            if (open) initBook(body);
+        }
+
+        function syncAll() {
+            if (!all) return;
+            var allOpen = toggles.every(function (b) { return b.getAttribute('aria-expanded') === 'true'; });
+            all.textContent = allOpen ? all.dataset.collapse : all.dataset.expand;
+            all.dataset.state = allOpen ? 'open' : 'closed';
+        }
+
+        toggles.forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                setOpen(btn, btn.getAttribute('aria-expanded') !== 'true');
+                syncAll();
+            });
+        });
+
+        if (all) {
+            all.addEventListener('click', function () {
+                var open = all.dataset.state !== 'open';
+                toggles.forEach(function (b) { setOpen(b, open); });
+                syncAll();
+            });
+        }
+
+        function openFromHash() {
+            var m = /^#work-(.+)$/.exec(location.hash);
+            if (!m) return;
+            var id;
+            try { id = decodeURIComponent(m[1]); } catch (e) { return; }
+            var section = document.getElementById('work-' + id);
+            var btn = section && section.querySelector('.work-toggle[aria-controls]');
+            if (!btn) return;
+            setOpen(btn, true);
+            syncAll();
+            section.scrollIntoView({ block: 'start' });
+        }
+        openFromHash();
+        window.addEventListener('hashchange', openFromHash);
+        syncAll();
     })();
 
     /* ── Coming back from a chapter ──

@@ -165,6 +165,79 @@ def write_record(project_dir: Path) -> dict[str, Any]:
     return doc
 
 
+def build_collection_record(collection_dir: Path) -> Optional[dict[str, Any]]:
+    """The volume's record: the members' ``quotations.json`` added together.
+
+    Verse occurrences and quoted words are summed, unique verses are the union,
+    and the share is over every member's words, record or not. The limits
+    apply to the volume as one published work. Each row carries the member it
+    came from as ``work``. ``None`` when no member has a record.
+    """
+    from src import collection as collection_mod
+
+    coll = collection_mod.load_collection(collection_dir)
+    records: list[tuple[str, dict[str, Any]]] = []
+    total_words = 0
+    for member in coll.members:
+        if member.path is None:
+            continue
+        total_words += book_words(member.path)
+        doc = read_record(member.path)
+        if doc is not None:
+            records.append((member.slug, doc))
+    if not records:
+        return None
+
+    unique: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for slug, doc in records:
+        for row in doc.get("rows") or []:
+            unique.update(row.get("verses") or [])
+            rows.append({**row, "work": slug})
+    occurrences = sum(int(doc.get("verse_occurrences") or 0) for _, doc in records)
+    words = sum(int(doc.get("quoted_words") or 0) for _, doc in records)
+    share = round(words / total_words, 4) if total_words else None
+    whole = whole_books_quoted(unique)
+    limits = dict(NBLA.limits)
+    within = (
+        max(len(unique), occurrences) <= limits["verses"]
+        and (share is None or share < limits["share"])
+        and not whole
+    )
+    return {
+        "version": NBLA.id,
+        "version_name": NBLA.name,
+        "notice": NBLA.notice,
+        "verses_unique": len(unique),
+        "verse_occurrences": occurrences,
+        "quoted_words": words,
+        "book_words": total_words,
+        "share": share,
+        "limits": limits,
+        "within_limits": within,
+        "whole_book_quoted": (bool(whole) if whole is not None else None),
+        "whole_books": whole,
+        "adapted": sum(1 for r in rows if r.get("adapted")),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "works": [{"slug": slug, "verses_unique": doc.get("verses_unique"),
+                   "verse_occurrences": doc.get("verse_occurrences"),
+                   "quoted_words": doc.get("quoted_words")} for slug, doc in records],
+        "rows": rows,
+    }
+
+
+def write_collection_record(collection_dir: Path) -> Optional[dict[str, Any]]:
+    """Write the volume's ``quotations.json`` (removing a stale one when no member has a record)."""
+    doc = build_collection_record(collection_dir)
+    path = record_path(collection_dir)
+    if doc is None:
+        if path.exists():
+            path.unlink()
+        return None
+    write_json(path, doc)
+    return doc
+
+
 def read_record(project_dir: Path) -> Optional[dict[str, Any]]:
     path = record_path(project_dir)
     if not path.exists():

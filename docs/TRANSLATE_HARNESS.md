@@ -176,7 +176,8 @@ errors always inline them.
 
 Every command is `python scripts/harness.py <verb> ...`, run from the repo root. All of
 them are non-interactive — none calls `input()`, so none can deadlock an agent. All take
-`--project <slug-or-path>` (except `setup`, where it is optional) and `--schema`.
+`--project <slug-or-path>` (except `setup`, where it is optional, and the `collection-*`
+verbs, which name a collection instead) and `--schema`.
 
 ### Setup and splitting
 
@@ -279,6 +280,41 @@ landed since the last review (see [`BOOK_REVIEW.md`](BOOK_REVIEW.md)).
 `image_model` belongs to the image pass: the Codex model `image_pass.py generate` runs
 a job on when neither the job nor `--model` names one (see
 [`CLI_REFERENCE.md`](CLI_REFERENCE.md)).
+
+### Collections
+
+A collection binds several existing projects into one published volume: an anthology of
+stories, or two short books printed together. Each work stays an ordinary project with its
+own style guide, glossary, address map, judges and passes; the collection folder holds only
+`collection.json` (the members, in order) and the volume's own `project.json` and sidecars
+(`edition_notice.json`, `translator_note.json`, `kdp_listing.json`, `cover/`). A member may
+sit in more than one collection and keeps its own EPUB and listing.
+
+| Verb | What it does |
+|---|---|
+| `collection-create` | `<slug> --members a b ... [--title] [--group ID] [--group-kind domain\|series] [--parent DIR]`. Bind existing projects and join them to a book group |
+| `collection-add` | `<slug> --member X [--position N]`. Add a project (it joins the group) |
+| `collection-remove` | `<slug> --member X [--keep-group]`. Drop a member; it leaves the group unless another collection sharing it still lists the member |
+| `collection-reorder` | `<slug> --members ...`. Set the volume order (every member once) |
+| `collection-status` | Per member: stage, chapters and % translated, open judge findings, annotations awaiting review, blank footnote marks. Read-only |
+| `collection-epub` | `<slug> [--allow-partial]`. Build the volume EPUB in the collection folder |
+
+There is no ingest of its own: add each work with `setup`, then bind them. The members
+form a book group (the collection slug, as a `domain`, unless `--group` names an existing
+one or `--group-kind series` says the works share a cast), so the precedent machinery
+pre-fills story 2+'s style answers and glossary from the earlier stories. Bind the works
+**before** drafting their style guides; `collection-create` and `collection-status` list
+any member whose `.harness/precedent.json` predates a sibling, and the fix is
+`precedent --project <slug>`.
+
+The volume EPUB opens with the volume's title page and copyright page, then for each work
+a part page (title, original title, author, year; multi-chapter works only, unless
+`collection.json` sets `part_page`) and its chapters, then one Notas page numbered
+continuously and grouped by work, then the volume's translator note. A one-chapter story
+is a single TOC entry titled by its own first line, never "Capítulo 1". Each work's files
+and images are prefixed (`w01_chapter_01.xhtml`, `images/w01/…`), so two works' names
+never collide. The build fails while a member has untranslated chapters unless
+`--allow-partial`, which reports what it left out.
 
 ---
 

@@ -3471,3 +3471,124 @@ body {
 .overflow-btn-danger {
     color: var(--review-blacklist);
 }
+
+/* Collections: one volume bound from several books. The library shows one
+   tagged card for it; /read/collection/<id> lists the works as collapsible
+   sections that open onto the view a book page draws. The volume's EPUB is
+   built on its dashboard. */
+
+.show-works-btn[aria-pressed="true"] {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    color: var(--accent-dark);
+}
+
+.collection-tag {
+    display: block;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 2px 0 4px;
+}
+
+.works-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 22px 0 6px;
+}
+.works-title {
+    font-size: 19px;
+    margin: 0;
+}
+
+/* One work: a summary row (toggle, ⋮, the pill and counts beneath), then
+   the book view it opens onto. */
+.work-section {
+    border-top: 1px solid var(--border-light);
+}
+.work-section:last-child {
+    border-bottom: 1px solid var(--border-light);
+}
+.work-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 6px;
+    padding: 6px 0 10px;
+}
+.work-head .card-menu {
+    position: relative;
+}
+.work-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.work-toggle-static {
+    cursor: default;
+}
+.work-chevron {
+    flex: none;
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+}
+.work-section.is-open .work-chevron {
+    transform: rotate(90deg);
+}
+.work-title {
+    font-size: 17px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.work-summary {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding-left: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+.work-count {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.work-body {
+    padding: 0 0 18px;
+}
+.work-body .phase-strip-wrap {
+    margin-top: 0;
+}
+.work-missing {
+    grid-column: 1 / -1;
+    padding-left: 24px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+@media (prefers-reduced-motion: reduce) {
+    .work-chevron { transition: none; }
+}
+
+.nav-chevron.nav-next-work {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--accent-dark);
+}
+.next-work-label {
+    font-size: 12px;
+    white-space: nowrap;
+}
+

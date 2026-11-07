@@ -122,6 +122,24 @@
         });
     })();
 
+    /* ── Show works individually (collections) ──
+     * Which cards exist is decided on the server, so this sets the cookie and
+     * reloads rather than hiding cards in place. */
+    (function () {
+        var btn = document.getElementById('show-works-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            var show = btn.getAttribute('aria-pressed') !== 'true';
+            btn.disabled = true;
+            fetch('/api/set-show-works', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ show: show })
+            }).then(function () { window.location.reload(); })
+              .catch(function () { btn.disabled = false; });
+        });
+    })();
+
     /* ── Popups ──
      *
      * The status filter, the category picker and every card menu are the same

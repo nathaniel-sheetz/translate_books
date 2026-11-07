@@ -209,11 +209,52 @@ def edition_additions(
     return f"Esta edición incluye {body}."
 
 
-def render_edition_notice(defaults: dict, values: dict[str, Any]) -> dict[str, str]:
+def _collection_notice_lines(lines: list[str]) -> list[str]:
+    """A book's notice template turned plural for a collection.
+
+    The ``{source_title}`` line becomes "Títulos originales: {original_titles}."
+    (each with its year), the separate original-year line is dropped, and "La obra
+    original es" becomes "Las obras originales son". A template's own
+    ``collection_lines`` win over this.
+    """
+    out = []
+    for line in lines:
+        if "{source_title}" in line:
+            out.append("Títulos originales: {original_titles}.")
+            continue
+        if "{original_year}" in line:
+            continue
+        out.append(line.replace("La obra original es de dominio público",
+                                "Las obras originales son de dominio público"))
+    return out
+
+
+def original_titles_line(works: list[dict[str, Any]]) -> str:
+    """``_Short Sermons_ (1848); _Plain Thoughts_ (1850)`` for the copyright page.
+
+    Underscores are the pipeline's italic marker (the notice renders through
+    the same body renderer as a chapter).
+    """
+    parts = []
+    for work in works:
+        title = str(work.get("original_title") or "").strip()
+        if not title:
+            continue
+        year = work.get("original_year")
+        parts.append(f"_{title}_ ({year})" if year else f"_{title}_")
+    return "; ".join(parts)
+
+
+def render_edition_notice(
+    defaults: dict, values: dict[str, Any], *, collection: bool = False,
+) -> dict[str, str]:
     """Fill the defaults' notice template; a line with an empty placeholder is dropped."""
     template = defaults.get("edition_notice") or {}
+    template_lines = template.get("lines") or []
+    if collection:
+        template_lines = template.get("collection_lines") or _collection_notice_lines(template_lines)
     lines = []
-    for line in template.get("lines") or []:
+    for line in template_lines:
         names = re.findall(r"\{(\w+)\}", line)
         if any(not str(values.get(name) or "").strip() for name in names):
             continue
@@ -265,8 +306,16 @@ def _quotations(project_dir: Path) -> tuple[Optional[dict[str, Any]], list[dict[
 
 
 def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = None) -> dict[str, Any]:
-    """Collect the facts and write ``.harness/kdp/facts.json``. Returns the facts."""
+    """Collect the facts and write ``.harness/kdp/facts.json``. Returns the facts.
+
+    A collection dir (:mod:`src.collection`) is gathered by
+    :func:`gather_collection`, which loops its members.
+    """
+    from src import collection as collection_mod
+
     project_dir = Path(project_dir)
+    if collection_mod.is_collection_dir(project_dir):
+        return gather_collection(project_dir, fetch=fetch, today=today)
     today = today or date.today()
     defaults = load_defaults()
     project = _obj(project_dir / "project.json")
@@ -411,9 +460,259 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         "description_examples": str(examples_path()),
         "needs_input": needs_input,
     }
+    return _write_facts(project_dir, facts)
 
+
+def _write_facts(project_dir: Path, facts: dict[str, Any]) -> dict[str, Any]:
     out = work_dir(project_dir) / "facts.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
     facts["_path"] = str(out)
     return facts
+
+
+# ---------------------------------------------------------------------------
+# collections: one volume, several works
+# ---------------------------------------------------------------------------
+
+def _sum_counts(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, int]:
+    return {k: sum(int(r.get(k) or 0) for r in rows) for k in keys}
+
+
+def _member_facts(member_dir: Path, *, fetch: bool, today: date) -> dict[str, Any]:
+    """The per-work facts a volume's listing needs: source, rights, size, additions."""
+    project = _obj(member_dir / "project.json")
+    pipeline = _obj(member_dir / "pipeline_state.json")
+    harness = _obj(member_dir / ".harness" / "config.json")
+    ingest = _obj(member_dir / "ingest_report.json").get("metadata") or {}
+    if not isinstance(ingest, dict):
+        ingest = {}
+    url = _source_url(project, pipeline)
+    book_id = gutenberg.gutenberg_id(url)
+    catalog, catalog_error = (None, None)
+    if book_id and fetch:
+        # The member's own cache, shared with its own kdp-publish run.
+        catalog, catalog_error = gutenberg.fetch_rdf(book_id, work_dir(member_dir))
+    return {
+        "slug": member_dir.name,
+        "spanish_title": project.get("spanish_title") or project.get("title") or "",
+        "original_title": project.get("source_title") or (catalog or {}).get("title")
+                          or harness.get("title") or ingest.get("title") or "",
+        "original_year": project.get("original_year"),
+        "author": project.get("author") or harness.get("author") or ingest.get("creator") or "",
+        "url": url,
+        "gutenberg_id": book_id,
+        "catalog": catalog,
+        "catalog_error": catalog_error,
+        "rights_flags": gutenberg.rights_flags(catalog, today=today),
+        "footnotes": _footnotes(member_dir),
+        "images": _images(member_dir),
+        "source_words": pipeline.get("source_words"),
+        "translated_words": _translated_words(member_dir),
+        "chapters": len(project.get("chapter_manifest") or []) or pipeline.get("chapter_count"),
+        "translator_note": (member_dir / "translator_note.json").exists(),
+        "authorship": _authorship(member_dir),
+        "harness": harness,
+        "dialect": str(_obj(member_dir / ".harness" / "style_answers.json").get("dialect") or ""),
+    }
+
+
+def gather_collection(
+    collection_dir: Path, *, fetch: bool = True, today: Optional[date] = None,
+) -> dict[str, Any]:
+    """The facts for a collection volume, with the same keys a book's facts carry.
+
+    Each member's source is looked up on its own (one cached catalog fetch per
+    member), and ``rights_flags`` is the union over every credited person of
+    every work, so the life+70 and Mexico life+100 checks have to hold for all
+    of them. Sizes, notes, images and the authorship measure are summed; the
+    volume's ``quotations.json`` is rewritten as the aggregate of the members'
+    records (:func:`src.quotations.record.build_collection_record`). ``works``
+    keeps the per-member detail, original titles and years included.
+    """
+    from src import collection as collection_mod
+    from src.book_metadata import load_book_metadata
+    from src.quotations.record import has_written_bible_refs, read_record, write_collection_record
+
+    collection_dir = Path(collection_dir)
+    today = today or date.today()
+    defaults = load_defaults()
+    coll = collection_mod.load_collection(collection_dir)
+    project = _obj(collection_dir / "project.json")
+    meta = load_book_metadata(collection_dir)
+    cover = _obj(collection_dir / "cover" / "spec.json")
+
+    needs_input: list[dict[str, Any]] = []
+    works: list[dict[str, Any]] = []
+    for member in coll.members:
+        if member.path is None:
+            needs_input.append({"field": f"members.{member.slug}",
+                                "why": f"{member.slug!r} is listed but no such project exists."})
+            continue
+        work = _member_facts(member.path, fetch=fetch, today=today)
+        work["part_title"] = collection_mod.part_title(member)
+        works.append(work)
+        if not work["original_title"]:
+            needs_input.append({
+                "field": f"source_title.{work['slug']}",
+                "why": f"No original title for {work['slug']!r}: it is left out of the copyright "
+                       "page's \"Títulos originales\" line. Set source_title in that project's "
+                       "project.json (or fetch its catalog record).",
+            })
+        if not work["original_year"]:
+            needs_input.append({
+                "field": f"original_year.{work['slug']}",
+                "why": f"First publication of {work['original_title'] or work['slug']!r}, "
+                       "for the copyright page. Set original_year in that project's project.json.",
+            })
+        if read_record(member.path) is None and has_written_bible_refs(member.path):
+            needs_input.append({
+                "field": f"quotations.{work['slug']}",
+                "why": f"{work['slug']}'s English cites Bible verses but it has no quotations.json: "
+                       "run quotation-pass on it, or confirm it quotes no Bible version.",
+            })
+
+    translator_default = str(defaults.get("translator") or "").strip()
+    translator_project = meta["translator"]
+    if translator_default and translator_project and translator_project != translator_default:
+        needs_input.append({
+            "field": "translator",
+            "why": f"The volume's translator is {translator_project!r}; the house default is "
+                   f"{translator_default!r}.",
+        })
+    if not meta["author"]:
+        needs_input.append({"field": "author", "why": "No author recorded on the volume or its works."})
+
+    write_collection_record(collection_dir)
+    quotations, quotation_flags, _ = _quotations(collection_dir)
+
+    footnotes = _sum_counts([w["footnotes"] for w in works],
+                            ("total", "imported_from_source", "editorial"))
+    by_origin: Counter[str] = Counter()
+    for w in works:
+        by_origin.update(w["footnotes"].get("by_origin") or {})
+    footnotes["by_origin"] = dict(by_origin)
+    volume_images = _images(collection_dir)
+    images = {
+        **_sum_counts([w["images"] for w in works],
+                      ("count", "translated_lettering", "restored", "new_illustrations",
+                       "ledger_rows")),
+        # The volume's own cover, not a member's.
+        "has_cover": volume_images["has_cover"],
+        "new_cover": volume_images["new_cover"],
+        "cover_made_from_nothing": volume_images["cover_made_from_nothing"],
+        "models": sorted({m for w in works for m in w["images"]["models"]}
+                         | set(volume_images["models"])),
+    }
+    images["ledger_rows"] += volume_images["ledger_rows"]
+    authorship_rows = [w["authorship"] for w in works]
+    authorship = _sum_counts(authorship_rows, (
+        "final_words", "words_with_draft", "changed_words", "reader_saves_typed",
+        "reader_saves_from_finding", "model_fixes"))
+    authorship["changed_fraction"] = (
+        round(authorship["changed_words"] / authorship["words_with_draft"], 4)
+        if authorship["words_with_draft"] else None)
+
+    dialect = next((w["dialect"] for w in works if w["dialect"]), "")
+    first_harness = works[0]["harness"] if works else {}
+    if not dialect and first_harness.get("locale") == "mx":
+        dialect = "mexican_spanish"
+    key = descriptor_key(footnotes, images)
+    additions = edition_additions(
+        footnotes, images, dialect, str(defaults.get("variety_label") or "").strip())
+    notice_values = {
+        "original_titles": original_titles_line(works),
+        "translator": translator_default or translator_project,
+        "edition_additions": additions,
+        "year": today.year,
+        "publisher": project.get("publisher") or defaults.get("publisher") or "",
+        "scripture_notice": (quotations or {}).get("notice") or ""
+        if (quotations or {}).get("quotations") else "",
+    }
+
+    rights_flags = [
+        {**flag, "work": w["slug"], "detail": f"[{w['slug']}] {flag['detail']}"}
+        for w in works for flag in w["rights_flags"]
+    ] + quotation_flags
+    # The register of the first work stands for the volume's.
+    first_dir = next((m.path for m in coll.members if m.path is not None), None)
+    style = _obj(first_dir / "style.json").get("content") or "" if first_dir else ""
+
+    facts = {
+        "slug": collection_dir.name,
+        "collection": True,
+        "generated_at": today.isoformat(),
+        "defaults_source": defaults.get("_source"),
+        "titles": {
+            "spanish_title": project.get("spanish_title") or "",
+            "project_title": project.get("title") or "",
+            "subtitle": project.get("subtitle") or "",
+            "cover_title": cover.get("title") or "",
+            "cover_subtitle": cover.get("subtitle") or "",
+            "source_title": "",
+            "setup_title": "",
+            "ingest_title": "",
+            "catalog_title": "",
+        },
+        "author": meta["author"],
+        "authors": collection_mod.member_authors(coll),
+        "translator": {"project": translator_project, "default": translator_default},
+        "publisher": project.get("publisher") or defaults.get("publisher") or "",
+        "source": {"url": None, "gutenberg_id": None, "format": None, "ingest_publisher": "",
+                   "works": [{"slug": w["slug"], "url": w["url"],
+                              "gutenberg_id": w["gutenberg_id"]} for w in works]},
+        "catalog": None,
+        "catalog_error": "; ".join(f"{w['slug']}: {w['catalog_error']}"
+                                   for w in works if w["catalog_error"]) or None,
+        "works": [{k: v for k, v in w.items() if k not in ("harness", "dialect")} for w in works],
+        "rights_flags": rights_flags,
+        "language": {
+            "dialect": dialect,
+            "locale": first_harness.get("locale") or "",
+            "style_excerpt": str(style)[:700],
+        },
+        "size": {
+            "works": len(works),
+            "source_words": sum(int(w["source_words"] or 0) for w in works) or None,
+            "translated_words": sum(w["translated_words"] for w in works),
+            "chapters": sum(int(w["chapters"] or 0) for w in works) or None,
+        },
+        "readability": {k: None for k in
+                        ("difficulty", "mean_sentence_length", "rare_word_fraction",
+                         "dialogue_density")},
+        "footnotes": footnotes,
+        "images": images,
+        "quotations": quotations,
+        "translator_note": (collection_dir / "translator_note.json").exists(),
+        "translator_notes_by_work": [w["slug"] for w in works if w["translator_note"]],
+        "authorship": authorship,
+        "publishing_rights_default": str(defaults.get("publishing_rights") or "public_domain"),
+        "ai": {
+            "translation": {
+                "provider": first_harness.get("provider"),
+                "model": first_harness.get("model"),
+                "backend": first_harness.get("backend"),
+                "worker_model": first_harness.get("worker_model"),
+                "headless_cli": first_harness.get("headless_cli"),
+            },
+            "translation_models_by_work": {
+                w["slug"]: w["harness"].get("worker_model") or w["harness"].get("model")
+                for w in works
+            },
+            "images_touched_by_image_pass": images["ledger_rows"] > 0,
+            "image_models": images["models"],
+        },
+        "edition": {
+            "descriptor_key": key,
+            "descriptor": (defaults.get("descriptors") or {}).get(key) or "",
+            "additions": additions,
+            "house_subtitle": str(defaults.get("subtitle") or ""),
+            "series": str(defaults.get("series") or ""),
+            "variety_label": str(defaults.get("variety_label") or ""),
+            "notice_draft": render_edition_notice(defaults, notice_values, collection=True),
+        },
+        "existing_listing": (collection_dir / "kdp_listing.json").exists(),
+        "description_examples": str(examples_path()),
+        "needs_input": needs_input,
+    }
+    return _write_facts(collection_dir, facts)

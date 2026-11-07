@@ -223,6 +223,16 @@ def card_badges(card: dict, review_types_selected) -> list[dict]:
     ]
 
 
+def harness_stage(card: dict) -> str:
+    """The one-word stage ``harness.py status`` reports, from a card's chunk counts."""
+    total, done = card["total_chunks"], card["translated_chunks"]
+    if total == 0:
+        return "pre-chunk"
+    if done == 0:
+        return "untranslated"
+    return "partial" if done < total else "fully-translated"
+
+
 def derive_status(
     *,
     archived: bool,
@@ -387,4 +397,57 @@ def build_project_card(project_dir: Path, project_id: str) -> dict:
     }
 
     _CARD_CACHE[cache_key] = (fingerprint, card)
+    return card
+
+
+# Summed over the members to make a collection's card.
+_SUMMED_KEYS = (
+    "chapter_count", "glossary_count", "total_chunks", "translated_chunks",
+    "chapters_total", "chapters_translated", "unread_chapters", "awaiting_review",
+    "empty_footnotes",
+)
+
+
+def build_collection_card(collection_dir: Path, member_cards: list[dict]) -> dict:
+    """One library card for a collection, from its members' cards.
+
+    Counts and flags are summed. The status is the earliest harness stage any
+    member is still in (one book still pending makes the volume pending), so
+    the card says what the volume is waiting on. Archived is the collection's
+    own choice, read from its ``project.json``. The cover is the volume's own
+    (``images/cover.*`` in the collection folder), never a member's.
+
+    Not cached: each member card already is, and this is a handful of sums.
+    """
+    collection_dir = Path(collection_dir)
+    config = _load_json(collection_dir / "project.json")
+    if not isinstance(config, dict):
+        config = {}
+    project_id = collection_dir.name
+    card: dict[str, Any] = {k: sum(c[k] for c in member_cards) for k in _SUMMED_KEYS}
+    flag_counts = empty_type_counts()
+    for c in member_cards:
+        for name, n in c["flag_counts"].items():
+            flag_counts[name] = flag_counts.get(name, 0) + n
+    archived = bool(config.get("archived"))
+    live = [c["status"] for c in member_cards if c["status"] != "archived"]
+    status = "archived" if archived else next(
+        (s for s in PROJECT_STATUSES if s in live), "complete" if member_cards else "pending")
+    cover = find_cover(collection_dir)
+    card.update({
+        "id": project_id,
+        "title": config.get("title") or config.get("spanish_title") or project_id,
+        "spanish_title": config.get("spanish_title", ""),
+        "archived": archived,
+        "status": status,
+        "has_style_guide": bool(member_cards) and all(c["has_style_guide"] for c in member_cards),
+        "fully_translated": bool(member_cards) and all(c["fully_translated"] for c in member_cards),
+        "has_alignments": any(c["has_alignments"] for c in member_cards),
+        "flag_counts": flag_counts,
+        "cover": cover.name if cover else None,
+        "cover_version": _file_fingerprint(cover)[0] if cover else 0,
+        "cloth": zlib.crc32(project_id.encode("utf-8")) % COVER_CLOTHS,
+        "is_collection": True,
+        "members": [c["id"] for c in member_cards],
+    })
     return card

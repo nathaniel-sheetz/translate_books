@@ -1,0 +1,87 @@
+{#- A book's ⋮ menu: everywhere else the book can be looked at. Drawn on its
+    chapter list and on each work of a collection's page. `menu_id` names the
+    wrapper (the popup and button take `-popup` / `-btn`); reader_chapters.js
+    binds every `.card-menu` on the page by class, so the ids are only anchors.
+    `read_href`, when given, leads with the book's own page: a collection's
+    page lists the work, and this is the way into it. -#}
+
+{% macro book_menu(project_id, t, menu_id, read_href=None) -%}
+<div class="card-menu" id="{{ menu_id }}">
+    <button class="topbar-icon-btn card-menu-btn" id="{{ menu_id }}-btn" type="button"
+            title="{{ t.card_menu_label }}" aria-label="{{ t.card_menu_label }}"
+            aria-haspopup="true" aria-expanded="false">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+            <circle cx="12" cy="5" r="2"/>
+            <circle cx="12" cy="12" r="2"/>
+            <circle cx="12" cy="19" r="2"/>
+        </svg>
+    </button>
+    <div class="card-menu-popup" id="{{ menu_id }}-popup" hidden>
+        {%- if read_href %}
+        <a class="card-menu-item" href="{{ read_href }}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/>
+                <path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/>
+            </svg>
+            <span>{{ t.open_book_page }}</span>
+        </a>
+        {%- endif %}
+        {#- Not in the Review-mode group: Review mode paints findings
+            onto the prose you are reading, and this is the opposite
+            reading — every model opinion about the book at once,
+            with none of it actionable. -#}
+        <a class="card-menu-item" href="/recommendations/{{ project_id }}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                <path d="M9 7h7"/>
+                <path d="M9 11h5"/>
+            </svg>
+            <span>{{ t.rec_link }}</span>
+        </a>
+        {#- The book's pictures, on the board the image pass works from. -#}
+        <a class="card-menu-item" href="/image-pass/{{ project_id }}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2"/>
+                <circle cx="8.5" cy="9.5" r="1.5"/>
+                <path d="M21 16l-5-5L5 20"/>
+            </svg>
+            <span>{{ t.imgboard_link }}</span>
+        </a>
+        {#- The fixes a book review proposed, to pick from and approve. -#}
+        <a class="card-menu-item" href="/book-review/{{ project_id }}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 11l3 3 8-8"/>
+                <path d="M20 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+            <span>{{ t.bookreview_link }}</span>
+        </a>
+        {#- The book's Bible quotations against the NBLA, from the
+            quotation pass: tick, read the diffs, approve. -#}
+        <a class="card-menu-item" href="/quotations/{{ project_id }}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.76-2-2-2H4c-1.25 0-2 .75-2 1.97V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .01-1 1.03V20c0 1 0 1 1 1z"/>
+                <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.76-2-2-2h-4c-1.25 0-2 .75-2 1.97V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+            </svg>
+            <span>{{ t.quotations_link }}</span>
+        </a>
+        {{ dashboard_item(project_id, t) }}
+    </div>
+</div>
+{%- endmacro %}
+
+{% macro dashboard_item(project_id, t) -%}
+<a class="card-menu-item" href="/project/{{ project_id }}">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+    <span>{{ t.dashboard_btn }}</span>
+</a>
+{%- endmacro %}

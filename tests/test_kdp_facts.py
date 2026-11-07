@@ -263,3 +263,107 @@ def test_record_with_no_rows_carries_no_notice(tmp_path, monkeypatch):
     _record(project, rows=[], verses_unique=0, verse_occurrences=0)
     facts = kdp_facts.gather(project, today=TODAY, fetch=False)
     assert "Escrituras" not in facts["edition"]["notice_draft"]["body"]
+
+
+# ── a collection volume ───────────────────────────────────────────────────────
+
+from tests.test_collections.conftest import library, make_project  # noqa: E402,F401  (fixture)
+
+_VOLUME_DEFAULTS = {
+    "translator": "Ana Perez", "publisher": "Libros",
+    "descriptors": {"translated": "(Traducido)"},
+    "edition_notice": {"heading": "Créditos", "lines": [
+        "Título original: {source_title}", "Publicado originalmente en {original_year}.",
+        "{scripture_notice}",
+        "Traducción © {year} {translator}. La obra original es de dominio público.",
+        "{publisher}"]},
+    "_source": "test",
+}
+
+
+def _volume(library):
+    from src import collection as collection_mod
+
+    bambi = make_project(
+        library, "bambi", chapters=[("Deer.", "Venado uno dos.")],
+        project={"spanish_title": "Bambi", "author": "Felix Salten", "translator": "Ana Perez",
+                 "original_year": 1923,
+                 "gutenberg_url": "https://www.gutenberg.org/cache/epub/72577/pg72577-images.html"})
+    (bambi / ".harness" / "kdp").mkdir(parents=True)
+    shutil.copy(FIXTURES / "gutenberg_72577.rdf", bambi / ".harness" / "kdp" / "gutenberg_72577.rdf")
+    story = make_project(
+        library, "story", chapters=[("Tale.", "Cuento.")],
+        project={"spanish_title": "El cuento", "author": "Felix Salten", "translator": "Ana Perez"},
+        harness={"title": "A Tale"})
+    for book, words in ((bambi, 600), (story, 400)):
+        (book / "chapters").mkdir()
+        (book / "chapters" / "chapter_01.txt").write_text("p " * words, encoding="utf-8")
+    coll, _ = collection_mod.create("volumen", members=["bambi", "story"], title="Dos obras")
+    return coll, bambi, story
+
+
+def test_gather_collection_loops_the_members(library, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_VOLUME_DEFAULTS))
+    coll, _, _ = _volume(library)
+    facts = kdp_facts.gather(coll.path, today=TODAY)
+
+    assert facts["collection"] is True
+    assert facts["author"] == "Felix Salten" and facts["authors"] == ["Felix Salten"]
+    assert [w["slug"] for w in facts["works"]] == ["bambi", "story"]
+    assert facts["works"][0]["original_title"] == "Bambi: A life in the woods"
+    assert facts["works"][1]["original_title"] == "A Tale"
+    # Every credited person of every work: Bambi's four, tagged with their work.
+    codes = sorted(f["code"] for f in facts["rights_flags"])
+    assert codes == ["life_plus_70", "life_plus_70", "mexico_life_plus_100", "mexico_life_plus_100"]
+    assert all(f["work"] == "bambi" and f["detail"].startswith("[bambi] ")
+               for f in facts["rights_flags"])
+    assert facts["size"]["works"] == 2 and facts["size"]["translated_words"] == 4
+    # Only the story lacks a year.
+    assert {n["field"] for n in facts["needs_input"]} == {"original_year.story"}
+    body = facts["edition"]["notice_draft"]["body"].split("\n\n")
+    assert body == [
+        "Títulos originales: _Bambi: A life in the woods_ (1923); _A Tale_.",
+        "Traducción © 2026 Ana Perez. Las obras originales son de dominio público.",
+        "Libros",
+    ]
+    assert (coll.path / ".harness" / "kdp" / "facts.json").exists()
+
+
+def test_gather_collection_aggregates_the_quotation_records(library, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_VOLUME_DEFAULTS))
+    coll, bambi, story = _volume(library)
+    _record(bambi, verses_unique=2, verse_occurrences=3, quoted_words=100,
+            rows=[{"key": "a", "verses": ["43:3:16", "19:23:1"]},
+                  {"key": "b", "verses": ["43:3:16"]}])
+    _record(story, verses_unique=1, verse_occurrences=1, quoted_words=50,
+            rows=[{"key": "c", "verses": ["43:3:16"]}])
+
+    facts = kdp_facts.gather(coll.path, today=TODAY, fetch=False)
+    q = facts["quotations"]
+    # Unique verses are the union, occurrences and words are summed, and the
+    # share is over the whole volume's 1000 words.
+    assert (q["verses_unique"], q["verse_occurrences"]) == (2, 4)
+    assert q["share"] == 0.15 and q["quotations"] == 3
+    record = json.loads((coll.path / "quotations.json").read_text(encoding="utf-8"))
+    assert record["quoted_words"] == 150 and record["book_words"] == 1000
+    assert [r["work"] for r in record["rows"]] == ["bambi", "bambi", "story"]
+    # The volume's record carries the version's own notice.
+    assert "Escrituras tomadas de la Nueva Biblia" in facts["edition"]["notice_draft"]["body"]
+
+
+def test_gather_collection_asks_for_a_members_missing_record(library, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: dict(_VOLUME_DEFAULTS))
+    coll, _, story = _volume(library)
+    (story / "source.txt").write_text("He that cometh to God must believe.—Heb. 11:6\n",
+                                      encoding="utf-8")
+    facts = kdp_facts.gather(coll.path, today=TODAY, fetch=False)
+    assert "quotations.story" in {n["field"] for n in facts["needs_input"]}
+    assert facts["quotations"] is None
+    # Offline, Bambi has no catalog title and no source_title: asked, not dropped silently.
+    assert "source_title.bambi" in {n["field"] for n in facts["needs_input"]}
+
+
+def test_collection_notice_keeps_a_line_with_both_title_and_year():
+    lines = kdp_facts._collection_notice_lines(
+        ["Título original: {source_title} ({original_year})", "{publisher}"])
+    assert lines == ["Títulos originales: {original_titles}.", "{publisher}"]

@@ -73,6 +73,30 @@ The working files live in `.harness/kdp/`: `facts.json`, `seeds.txt`,
 it they exit with that hint. Fall back to WebSearch for comparable editions and mark
 the category evidence **inferred** in the listing's rationale.
 
+## A collection (several works, one volume)
+
+A volume bound from several projects (`harness.py collection-create`) is listed like a book:
+pass the **collection slug** as `--project` to every command. Everything reads and writes the
+collection folder (its `project.json`, `edition_notice.json`, `kdp_listing.json`,
+`.harness/kdp/`), never a member's, so each member keeps its own listing. What differs:
+
+- **`facts`** loops the members. `facts.works` has each one's original title, year, author,
+  catalog and rights flags; `rights_flags` is the union, each tagged `[slug]` (the life+70
+  and Mexico checks must hold for every author). `needs_input` asks per work
+  (`original_year.<slug>`, `quotations.<slug>`): set `original_year` in that member's own
+  `project.json`. `quotations.json` in the collection folder is rewritten as the members'
+  records added together; the share is over the whole volume.
+- **The notice draft** is plural: "Títulos originales: _A_ (1848); _B_ (1850)." and "Las
+  obras originales son de dominio público."
+- **Authors.** One distinct author is the Author; for several, the first is Author and the
+  rest go in `contributors` with role `Author`. `verify-epub` checks one `dc:creator` per
+  member author.
+- **`copyright_basis.original_content`** collects what the translator wrote across the
+  volume: the volume's translator note, each member's translator note
+  (`facts.translator_notes_by_work`) and the editorial endnotes (`facts.footnotes.editorial`).
+- **Build** with `python scripts/harness.py collection-epub <slug>` instead of `harness.py
+  epub`.
+
 ## Flow
 
 ### 1. Facts
