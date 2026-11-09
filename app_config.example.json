@@ -33,6 +33,7 @@
       "flag"
     ],
     "confidence_floor": "high",
+    "confidence_floor_by_type": {},
     "max_targets_per_run": 400,
     "deadline_minutes": 120,
     "concurrency": 5

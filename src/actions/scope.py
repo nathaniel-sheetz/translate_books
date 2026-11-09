@@ -53,6 +53,8 @@ AUTOMATION_DEFAULTS: dict[str, Any] = {
     "auto_apply_types": ["word_choice", "inconsistency", "flag"],
     # Minimum reviewer confidence for an unattended write.
     "confidence_floor": "high",
+    # Per-type overrides of ``confidence_floor``, e.g. {"word_choice": "medium"}.
+    "confidence_floor_by_type": {},
     # Ceilings for one pass.
     "max_targets_per_run": 400,
     "deadline_minutes": 120,
@@ -123,6 +125,7 @@ class ScopeResult:
 # any single-character grouping folder — while `auto_apply_types` as a string
 # stops matching any type at all. Opposite failures, both silent.
 _AUTOMATION_LIST_KEYS = ("exclude_groups", "auto_apply_types")
+_AUTOMATION_DICT_KEYS = ("confidence_floor_by_type",)
 
 
 def _coerce_automation(values: dict[str, Any], source: str) -> dict[str, Any]:
@@ -132,6 +135,12 @@ def _coerce_automation(values: dict[str, Any], source: str) -> dict[str, Any]:
         if key in _AUTOMATION_LIST_KEYS and not isinstance(value, (list, tuple)):
             _log.warning(
                 "%s: automation.%s must be a list, got %s — using the default",
+                source, key, type(value).__name__,
+            )
+            continue
+        if key in _AUTOMATION_DICT_KEYS and not isinstance(value, dict):
+            _log.warning(
+                "%s: automation.%s must be an object, got %s — using the default",
                 source, key, type(value).__name__,
             )
             continue

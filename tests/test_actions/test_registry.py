@@ -106,6 +106,32 @@ def test_a_recognised_floor_is_kept_verbatim():
     assert Policy(confidence_floor="  Medium  ").confidence_floor == "medium"
 
 
+def test_a_per_type_floor_lowers_only_that_type():
+    policy = Policy(confidence_floor_by_type={"word_choice": "medium"})
+    assert policy.accepts(_item(type="word_choice", confidence="medium")) is True
+    assert policy.accepts(_item(type="word_choice", confidence="low")) is False
+    assert policy.accepts(_item(type="inconsistency", confidence="medium")) is False
+    assert policy.accepts(_item(type="flag", confidence="medium")) is False
+
+
+@pytest.mark.parametrize("floor", ["meduim", "", None])
+def test_an_unrecognised_per_type_floor_fails_closed(floor):
+    policy = Policy(confidence_floor_by_type={"word_choice": floor})
+    assert policy.floor_for("word_choice") == "high"
+    assert policy.accepts(_item(type="word_choice", confidence="medium")) is False
+
+
+def test_a_non_dict_per_type_floor_is_ignored():
+    policy = Policy(confidence_floor_by_type="medium")
+    assert policy.confidence_floor_by_type == {}
+    assert policy.accepts(_item(confidence="medium")) is False
+
+
+def test_per_type_floor_is_in_the_payload():
+    payload = Policy(confidence_floor_by_type={"word_choice": "Medium"}).to_payload()
+    assert payload["confidence_floor_by_type"] == {"word_choice": "medium"}
+
+
 def test_rejects_a_type_outside_the_list():
     assert Policy().accepts(_item(type="footnote")) is False
 

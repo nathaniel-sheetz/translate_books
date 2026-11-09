@@ -120,10 +120,14 @@ Three consequences worth knowing:
 The pass writes back only what is both **recoverable** and **confident**:
 
 ```
-writable  AND  type ∈ auto_apply_types  AND  mode == "append"  AND  confidence ≥ floor
+writable  AND  type ∈ auto_apply_types  AND  mode == "append"  AND  confidence ≥ floor(type)
 ```
 
-Defaults: `word_choice`, `inconsistency`, `flag`, at `high`.
+Defaults: `word_choice`, `inconsistency`, `flag`, at `high`. `confidence_floor_by_type`
+lowers (or raises) the floor for the types it names, e.g. `{"word_choice": "medium"}`
+lets medium-confidence word-choice comments through while inconsistency and flag
+verdicts still need `high`. An unrecognised value falls back to `high`, like the
+global floor.
 
 Those three are *append-only* writes after an `— IA:` marker into an append-only
 log — the reader can see them, and the original record survives untouched.
@@ -155,6 +159,7 @@ when the night's `run` errored, off whatever `results.json` is on disk.
   "default_cli": "claude",
   "auto_apply_types": ["word_choice", "inconsistency", "flag"],
   "confidence_floor": "high",
+  "confidence_floor_by_type": {},
   "max_targets_per_run": 400,
   "deadline_minutes": 120,
   "concurrency": 5

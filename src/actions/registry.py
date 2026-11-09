@@ -180,10 +180,16 @@ class Policy:
     ``mode: "replace"`` and its text is published into the EPUB by
     :mod:`src.endnotes`, so it is a human's call forever. ``confidence_floor``
     excludes individual results the reviewer itself was unsure of.
+
+    ``confidence_floor_by_type`` overrides the floor for the types it names (a
+    word-choice comment is cheaper to get wrong than an inconsistency verdict).
+    Each value is validated like the global floor, so a typo fails closed to
+    ``high`` rather than open.
     """
 
     types: tuple[str, ...] = ("word_choice", "inconsistency", "flag")
     confidence_floor: str = "high"
+    confidence_floor_by_type: dict[str, str] = field(default_factory=dict)
     dry_run: bool = False
 
     def __post_init__(self) -> None:
@@ -191,6 +197,19 @@ class Policy:
         object.__setattr__(
             self, "confidence_floor", resolve_confidence_floor(self.confidence_floor)
         )
+        by_type = self.confidence_floor_by_type
+        object.__setattr__(
+            self,
+            "confidence_floor_by_type",
+            {
+                str(t): resolve_confidence_floor(f)
+                for t, f in (by_type.items() if isinstance(by_type, dict) else ())
+            },
+        )
+
+    def floor_for(self, item_type: str | None) -> str:
+        """The floor that applies to one annotation type."""
+        return self.confidence_floor_by_type.get(str(item_type), self.confidence_floor)
 
     def accepts(self, item: dict[str, Any]) -> bool:
         """True when one ``review.apply`` plan entry clears both gates.
@@ -205,13 +224,14 @@ class Policy:
         if item.get("type") not in self.types:
             return False
         return confidence_rank(item.get("confidence")) >= confidence_rank(
-            self.confidence_floor
+            self.floor_for(item.get("type"))
         )
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "types": list(self.types),
             "confidence_floor": self.confidence_floor,
+            "confidence_floor_by_type": dict(self.confidence_floor_by_type),
             "dry_run": self.dry_run,
         }
 

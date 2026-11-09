@@ -168,6 +168,9 @@ def _print_human(payload: dict) -> None:
         f"  default_cli={settings['default_cli']}  "
         f"exclude_groups={','.join(settings['exclude_groups']) or '(none)'}  "
         f"auto_apply={','.join(settings['auto_apply_types'])}@{settings['confidence_floor']}"
+        + "".join(
+            f" {t}@{f}" for t, f in (settings.get("confidence_floor_by_type") or {}).items()
+        )
     )
     print()
 
