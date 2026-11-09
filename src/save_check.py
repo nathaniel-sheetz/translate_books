@@ -61,7 +61,7 @@ _LETTERS = "A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
 _WORD = re.compile(rf"[{_LETTERS}]+(?:['’][{_LETTERS}]+)?")
 # « » is left out: a speech that runs on opens its next paragraph with a lone ».
 _PAIRS = (("¿", "?"), ("¡", "!"), ("(", ")"), ("‹", "›"), ("[", "]"))
-_TAG = re.compile(r"\[(?:CAPTION|IMAGE:[^\]]*)\]")
+_TAG = re.compile(r"\[(?:CAPTION|QUOTE|IMAGE:[^\]]*)\]")
 _DIALECT = re.compile(r"['’]\w+|\w+['’]")
 _GLOSSARY_TOKEN = re.compile(r"[^\W\d_]+")
 _ACCENTS = str.maketrans("áéíóúÁÉÍÓÚ", "aeiouAEIOU")

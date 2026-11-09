@@ -72,6 +72,29 @@ SKIP_CLASSES = {"pagenum", "page-number", "pageno", "toc", "footnote", "endnote"
 # enforces that regardless of what lands in this set.
 CAPTION_CLASSES = {"caption", "figcaption", "imgcaption", "ill-caption", "illustration-caption"}
 
+# CSS classes marking a block set off from the body -- verse, a letter, an
+# inscription. The element and everything inside it is emitted as [QUOTE]
+# blocks. Taken from the markup Gutenberg actually ships: home-geography
+# (pg12228) uses `div.verse`, stormy-misty-s-foal (pg67298) `div.poetry >
+# div.stanza > div.verse` for songs and the legacy `div.blockquot` for letters.
+# The outermost matching element wins; nested ones are walked inside it.
+#
+# Unclassed verse (a bare <p> with <br> line breaks, home-geography's other 48
+# stanzas) is deliberately NOT tagged: the EPUB builder's is_verse_block
+# already renders it, and the same rule would also tag copyright and
+# dedication pages.
+QUOTE_CLASSES = {"poem", "poetry", "stanza", "verse", "blockquot", "quote", "blockquote"}
+
+# Classes whose block children are LINES of one stanza, joined with "\n"
+# rather than separated by a blank line. pg67298 puts each line of a song in
+# its own <div class="verse"> under <div class="stanza">; walked as ordinary
+# blocks, every line became its own paragraph.
+STANZA_CLASSES = {"stanza", "poem", "poetry", "verse"}
+
+# A "quote" longer than this is markup misuse (an EPUB that wraps a whole
+# chapter in <blockquote>), not a set-off passage; it is walked as body text.
+QUOTE_MAX_WORDS = 1500
+
 # PG boilerplate markers (case-insensitive substrings)
 PG_START_MARKERS = [
     "start of the project gutenberg",
@@ -312,6 +335,10 @@ class Converter:
         self._images_skipped = 0
         self._images_linked = 0
         self._images_unlike: list[str] = []
+        # Inside a [QUOTE] container (see _handle_quote).
+        self._in_quote = False
+        # Inside a stanza: block children are lines, joined with "\n".
+        self._line_mode = False
 
     # ------------------------------------------------------------------
     def convert(self, root: Tag) -> str:
@@ -406,10 +433,36 @@ class Converter:
             self._handle_caption(node)
             return
 
+        # Set-off passage (verse, letter, inscription) -> [QUOTE] blocks. Checked
+        # after captions, so a caption inside a poem stays a caption, and before
+        # the BLOCK_TAGS branch, which would drop the class.
+        if not self._in_quote and self._is_quote_container(node, tag, classes):
+            self._handle_quote(node)
+            return
+
         if tag in BLOCK_TAGS or tag in ("body", "article", "section", "main"):
+            if self._line_mode:
+                # A line of a stanza: its own line, not its own paragraph. Open
+                # with "\n" only when the previous line did not already end
+                # with one -- two in a row would read as a blank line.
+                if self.parts and not self.parts[-1].endswith("\n"):
+                    self.parts.append("\n")
+                for child in node.children:
+                    self._walk(child)
+                self.parts.append("\n")
+                return
+            stanza = self._in_quote and bool(classes & STANZA_CLASSES) and self._children_are_lines(node)
             self.parts.append("\n\n")
-            for child in node.children:
-                self._walk(child)
+            if stanza:
+                self._line_mode = True
+                try:
+                    for child in node.children:
+                        self._walk(child)
+                finally:
+                    self._line_mode = False
+            else:
+                for child in node.children:
+                    self._walk(child)
             self.parts.append("\n\n")
             return
 
@@ -496,6 +549,71 @@ class Converter:
         self.parts = saved
         if inner:
             self.parts.append(f"\n\n[CAPTION] {inner}\n\n")
+
+    # ------------------------------------------------------------------
+    def _is_quote_container(self, node: Tag, tag: str, classes: set) -> bool:
+        """Whether *node* is a set-off passage to emit as [QUOTE] blocks.
+
+        A ``<blockquote>``, or a block element carrying a QUOTE_CLASSES class.
+        Declined when it holds a heading (the splitter must still see it), when
+        it is empty, or when it is too long to be a quotation (QUOTE_MAX_WORDS).
+        """
+        if tag != "blockquote":
+            if tag not in BLOCK_TAGS and tag != "section":
+                return False
+            if not classes & QUOTE_CLASSES:
+                return False
+        if node.find(list(HEADING_TAGS)):
+            return False
+        words = len(node.get_text(" ", strip=True).split())
+        return 0 < words <= QUOTE_MAX_WORDS
+
+    @staticmethod
+    def _children_are_lines(node: Tag) -> bool:
+        """True when *node*'s block children are leaves -- lines of one stanza.
+
+        A stanza container (``div.stanza > div.verse`` per line) qualifies; a
+        poem container whose children are themselves stanzas does not, so its
+        stanzas stay separate blocks.
+        """
+        kids = [c for c in node.children
+                if isinstance(c, Tag) and (c.name or "").lower() in BLOCK_TAGS]
+        if not kids:
+            return False
+        return not any(k.find(list(BLOCK_TAGS)) for k in kids)
+
+    def _handle_quote(self, node: Tag):
+        # Render the container into a temporary buffer (the caption technique),
+        # walking it as an ordinary block with _in_quote set, so stanza lines
+        # join with "\n" (see the BLOCK_TAGS branch of _walk). Then prefix every
+        # resulting block with [QUOTE]. Blocks that are structure rather than
+        # quoted text -- an image, a caption, a `---` rule -- stay unmarked; a
+        # rule therefore splits the passage (pg67298's run of letters).
+        saved = self.parts
+        self.parts = []
+        self._in_quote = True
+        try:
+            self._walk(node)
+        finally:
+            self._in_quote = False
+            self._line_mode = False
+        inner = "".join(self.parts)
+        self.parts = saved
+
+        blocks: list[str] = []
+        for raw in re.split(r"\n\s*\n", inner):
+            lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in raw.split("\n")]
+            lines = [ln for ln in lines if ln]
+            if not lines:
+                continue
+            block = "\n".join(lines)
+            if (block == "---" or block.startswith("[IMAGE:")
+                    or block.startswith("[CAPTION]")):
+                blocks.append(block)
+            else:
+                blocks.append(f"[QUOTE] {block}")
+        if blocks:
+            self.parts.append("\n\n" + "\n\n".join(blocks) + "\n\n")
 
     # ------------------------------------------------------------------
     def _handle_image(self, img: Tag):

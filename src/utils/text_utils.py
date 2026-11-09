@@ -540,6 +540,179 @@ def caption_instruction(source_text: str, *, always_include: bool = False) -> st
 
 
 # ---------------------------------------------------------------------------
+# [QUOTE] block marker
+#
+# Tags a block that is set off from the body: a stanza of verse, a letter, an
+# inscription, a quoted passage. Same contract as [CAPTION] -- a leading atom
+# at the start of each `\n\n` block that is quoted, no closing half -- with one
+# difference: a quoted passage is a RUN of consecutive marked blocks (a poem's
+# stanzas, a letter's paragraphs), and a translator may legitimately merge or
+# split blocks inside a run (stormy-misty-s-foal's songs arrived one line per
+# block and were rejoined into stanzas). So parity is counted in runs, not
+# blocks: a run may not appear or vanish, but its block count may change.
+# ---------------------------------------------------------------------------
+
+QUOTE_MARKER = "[QUOTE]"
+
+_QUOTE_BLOCK_RE = re.compile(r"^\[QUOTE\][ \t]*")
+
+#: Per-line anchor; a quote marker always opens its block.
+_QUOTE_MARKER_LINE_RE = re.compile(r"^\[QUOTE\][ \t]*", re.MULTILINE)
+
+
+def is_quote_block(block: str) -> bool:
+    """
+    Return True when *block* is a quoted (set-off) block.
+
+    Example:
+        >>> is_quote_block("[QUOTE] Querida Misty:")
+        True
+        >>> is_quote_block("He typed [QUOTE] here.")
+        False
+    """
+    if not block:
+        return False
+    return bool(_QUOTE_BLOCK_RE.match(block.lstrip()))
+
+
+def strip_quote_marker(block: str) -> str:
+    """
+    Return *block* with a leading ``[QUOTE]`` marker removed; other blocks are
+    returned unchanged.
+
+    Example:
+        >>> strip_quote_marker("[QUOTE] «Querida Misty:")
+        '«Querida Misty:'
+    """
+    if not block:
+        return block
+    if not is_quote_block(block):
+        return block
+    return _QUOTE_BLOCK_RE.sub("", block.lstrip(), count=1)
+
+
+def quote_block_count(text: str) -> int:
+    """
+    Count blank-line-separated blocks in *text* that carry the quote marker.
+
+    Example:
+        >>> quote_block_count("Body.\\n\\n[QUOTE] A.\\n\\n[QUOTE] B.\\n\\nMore.")
+        2
+    """
+    if not text:
+        return 0
+    return sum(1 for block in _BLOCK_SPLIT_RE.split(text) if is_quote_block(block))
+
+
+def quote_run_count(text: str) -> int:
+    """
+    Count runs of consecutive ``[QUOTE]`` blocks in *text*.
+
+    This is the parity signal (see the section comment): merging or splitting
+    blocks inside a run keeps the count; dropping or adding a quote changes it.
+    Empty blocks do not break a run.
+
+    Example:
+        >>> quote_run_count("[QUOTE] A.\\n\\n[QUOTE] B.\\n\\nBody.\\n\\n[QUOTE] C.")
+        2
+        >>> quote_run_count("[QUOTE] A.\\nB.\\n\\nBody.\\n\\n[QUOTE] C.")
+        2
+    """
+    if not text:
+        return 0
+    runs = 0
+    in_run = False
+    for block in _BLOCK_SPLIT_RE.split(text):
+        if not block.strip():
+            continue
+        if is_quote_block(block):
+            if not in_run:
+                runs += 1
+            in_run = True
+        else:
+            in_run = False
+    return runs
+
+
+def quote_marker_ranges(text: str) -> list[tuple[int, int]]:
+    """
+    Return the (start, end) character ranges of all block-leading ``[QUOTE]``
+    markers (end exclusive). Same contract as :func:`caption_marker_ranges`.
+    """
+    if not text:
+        return []
+    return [(m.start(), m.end()) for m in _QUOTE_MARKER_LINE_RE.finditer(text)]
+
+
+def blank_quote_markers(text: str) -> str:
+    """
+    Replace block-leading ``[QUOTE]`` markers with equal-length whitespace,
+    preserving character offsets. Same contract as
+    :func:`blank_caption_markers`.
+
+    Example:
+        >>> blank_quote_markers("[QUOTE] El ganso.")
+        '        El ganso.'
+    """
+    if not text:
+        return text
+    return _QUOTE_MARKER_LINE_RE.sub(lambda m: " " * len(m.group()), text)
+
+
+def strip_block_markers(block: str) -> str:
+    """
+    Strip a leading ``[QUOTE]`` and/or ``[CAPTION]`` marker from one block.
+
+    For code that inspects a paragraph's first character (dialogue openers,
+    heading tests) and must see the text, not the marker.
+
+    Example:
+        >>> strip_block_markers("[QUOTE] «Querida Misty:")
+        '«Querida Misty:'
+    """
+    if not block:
+        return block
+    out = strip_quote_marker(block)
+    out = strip_caption_marker(out) if is_caption_block(out) else out
+    return out
+
+
+_QUOTE_INSTRUCTION = (
+    "   - A paragraph beginning with the [QUOTE] marker is set off from the body "
+    "(verse, a letter,\n"
+    "     an inscription, a quoted passage). Keep [QUOTE] followed by a space at the "
+    "very start of\n"
+    "     every paragraph of that passage in your translation. Lay the passage out as "
+    "the style\n"
+    "     guide's VERSE rule says; where it says nothing, keep the source's line and "
+    "stanza breaks.\n"
+    "     If the source puts each verse line in a paragraph of its own, you may join "
+    "those\n"
+    "     lines into multi-line stanzas, one line per verse line. Every resulting "
+    "paragraph keeps\n"
+    "     the marker. Never add [QUOTE] to a passage that does not carry it, and never "
+    "drop it from\n"
+    "     one that does."
+)
+
+
+def quote_instruction(source_text: str, *, always_include: bool = False) -> str:
+    """
+    Build the translation-prompt sub-bullet for ``[QUOTE]`` blocks.
+
+    Same contract as :func:`caption_instruction`: ``""`` when *source_text*
+    carries no quote blocks, the constant bullet otherwise, or always when
+    ``always_include`` is true (book-level constant for prompt-cache
+    stability).
+    """
+    if always_include:
+        return _QUOTE_INSTRUCTION
+    if not source_text:
+        return ""
+    return _QUOTE_INSTRUCTION if quote_block_count(source_text) else ""
+
+
+# ---------------------------------------------------------------------------
 # Accent/case-folded substring search
 #
 # Moved here from web_ui/app.py so non-web callers can reuse it: the annotation

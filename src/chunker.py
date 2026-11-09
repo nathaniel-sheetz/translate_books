@@ -19,7 +19,9 @@ from src.utils.text_utils import (
     normalize_newlines,
     extract_paragraphs,
     count_words,
-    count_paragraphs
+    count_paragraphs,
+    is_quote_block,
+    strip_block_markers,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,7 +169,8 @@ def _optimal_chunk_count(total_words: float, config: ChunkingConfig) -> int:
 
 def _is_dialogue(para: str) -> bool:
     """Detect if a paragraph is dialogue."""
-    stripped = para.lstrip()
+    # A letter read aloud is a [QUOTE] block whose text opens with a quote mark.
+    stripped = strip_block_markers(para.lstrip()).lstrip()
     if stripped and stripped[0] in DIALOGUE_STARTERS:
         return True
     if ATTRIBUTION_RE.search(para) and ('"' in para or '\u201c' in para or '\u201d' in para):
@@ -198,6 +201,10 @@ def _is_subchapter_heading(para: str) -> bool:
     """
     stripped = para.strip()
     if not stripped:
+        return False
+    # A quoted block is never a heading -- and "[QUOTE] JESUS SAVIOUR" would
+    # otherwise pass the all-caps test below on the marker's own letters.
+    if is_quote_block(stripped):
         return False
 
     if ROMAN_HEADING_RE.match(stripped) or ARABIC_HEADING_RE.match(stripped):
@@ -324,6 +331,12 @@ def _score_split_points(paragraphs: List[str]) -> List[float]:
                 last_sentence = sentences[-2].strip()
             if last_sentence and len(last_sentence.split()) < 15:
                 score += 0.15
+
+        # --- Inside a quoted passage ---
+        # Splitting between two [QUOTE] blocks cuts a poem or letter across
+        # chunks; the translator then sees half a passage.
+        if is_quote_block(curr_para) and is_quote_block(next_para):
+            score -= 0.5
 
         scores.append(max(0.0, min(1.0, score)))
 

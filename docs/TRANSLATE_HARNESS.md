@@ -245,6 +245,7 @@ makes it idempotent.
 | `epub` | no | Build the EPUB from translated chunks |
 | `footnotes` | depends | `translate` / `translate-prepare` / `translate-commit` / `apply` / `drop`. Follows the book's backend; `apply` and `drop` are free |
 | `captions` | no | Find image captions still rendering as body prose and mark them `[CAPTION]`. Dry-run unless `--apply` |
+| `quotes` | no | Pre-translation: list set-off passages in `source.txt` (indented blocks, plus any block containing a `--match` phrase) and mark the `--accept`ed ones `[QUOTE]`. Dry-run unless `--apply`; refused once any chunk is translated; re-run `setup` afterwards |
 
 ### Inspection and state
 

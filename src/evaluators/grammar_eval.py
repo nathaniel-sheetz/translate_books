@@ -30,8 +30,10 @@ except ImportError:
 from ..models import Chunk, EvalResult, Issue, IssueLevel, Glossary
 from ..utils.text_utils import (
     blank_caption_markers,
+    blank_quote_markers,
     caption_marker_ranges,
     image_placeholder_ranges,
+    quote_marker_ranges,
     strip_image_placeholders,
 )
 from .base import BaseEvaluator
@@ -253,11 +255,13 @@ class GrammarEvaluator(BaseEvaluator):
         placeholder_ranges = (
             image_placeholder_ranges(chunk.translated_text)
             + caption_marker_ranges(chunk.translated_text)
+            + quote_marker_ranges(chunk.translated_text)
         )
         text_to_check = strip_image_placeholders(chunk.translated_text)
-        # Same treatment for the [CAPTION] marker, or "CAPTION" is reported as a
-        # misspelling in every captioned paragraph. The caption's prose stays.
+        # Same treatment for the [CAPTION] and [QUOTE] markers, or the marker
+        # word is reported as a misspelling in every marked paragraph.
         text_to_check = blank_caption_markers(text_to_check)
+        text_to_check = blank_quote_markers(text_to_check)
 
         # Run LanguageTool check
         dialogue_ranges = self._dialogue_paragraph_ranges(text_to_check)

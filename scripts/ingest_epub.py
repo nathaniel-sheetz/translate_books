@@ -1107,7 +1107,7 @@ def normalize_chars(text: str) -> str:
 def _is_prose(block: str, headings: set) -> bool:
     return bool(block) and block != DOC_SENTINEL and block not in headings \
         and not _IMAGE_BLOCK_RE.match(block) and not _CAPTION_BLOCK_RE.match(block) \
-        and block != "---"
+        and not block.startswith("[QUOTE]") and block != "---"
 
 
 def join_split_paragraphs(text: str, headings: set) -> tuple[str, list[dict]]:

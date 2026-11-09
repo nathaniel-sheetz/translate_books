@@ -36,13 +36,20 @@ from src.utils.text_utils import (
     footnote_placeholder_instruction,
     image_filenames,
     image_placeholder_instruction,
+    quote_block_count,
+    quote_instruction,
     source_has_dialogue,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _structure_preservation_instructions(source_text: str, *, always_include_images: bool) -> str:
+def _structure_preservation_instructions(
+    source_text: str,
+    *,
+    always_include_images: bool,
+    always_include_quotes: bool | None = None,
+) -> str:
     """Combine the image + footnote + caption STRUCTURE PRESERVATION bullets.
 
     All three slot into the same prompt variable. The footnote bullet appears
@@ -54,11 +61,17 @@ def _structure_preservation_instructions(source_text: str, *, always_include_ima
     sits in the cacheable fixed prefix (ahead of _CACHE_PREFIX_SPLIT_MARKER), so
     varying it per chunk would fragment the prompt cache for every illustrated
     book. When the gate is off it still falls back to per-chunk detection.
+
+    The [QUOTE] bullet has its own book-level gate (quotes are not tied to
+    images): ``always_include_quotes`` true forces it; ``None`` or false falls
+    back to per-chunk detection. Callers that see the whole book derive it with
+    :func:`_book_has_quotes` so the prefix stays byte-identical.
     """
     bullets = [
         image_placeholder_instruction(source_text, always_include=always_include_images),
         footnote_placeholder_instruction(source_text),
         caption_instruction(source_text, always_include=always_include_images),
+        quote_instruction(source_text, always_include=bool(always_include_quotes)),
     ]
     return "\n".join(b for b in bullets if b)
 
@@ -653,6 +666,14 @@ def _book_has_images(chunks: list[Chunk]) -> bool:
     return any(image_filenames(chunk.source_text) for chunk in chunks)
 
 
+def _book_has_quotes(chunks: list[Chunk]) -> bool:
+    """True when any chunk in the book/batch carries a ``[QUOTE]`` block.
+
+    The book-level gate for the quote bullet, same role as :func:`_book_has_images`.
+    """
+    return any(quote_block_count(chunk.source_text) for chunk in chunks)
+
+
 def summarize_chunk_features(
     chunks: list[Chunk],
     target_language: str = "Spanish",
@@ -683,6 +704,7 @@ def build_translation_prompt(
     *,
     always_include_dialogue: bool = False,
     always_include_image_instructions: bool = False,
+    always_include_quote_instructions: bool | None = None,
     house: Optional["TranslatorHouse"] = None,
 ) -> str:
     """Render the translation prompt for a single chunk.
@@ -703,6 +725,8 @@ def build_translation_prompt(
     book-level opt-ins that force the (conditional) dialogue block and image bullet
     into the fixed prefix so it stays byte-identical across every chunk of a book.
     Both default off, preserving the historical per-chunk behavior.
+    ``always_include_quote_instructions`` does the same for the [QUOTE] bullet
+    (``None`` = per-chunk detection).
 
     ``house`` is the book's house rules (:func:`src.house.prompt.load_translator_house`).
     Its global rules go into the fixed prefix as HOUSE RULES, identical in every
@@ -726,7 +750,9 @@ def build_translation_prompt(
         "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
         "previous_chapter_context": previous_chapter_context,
         "image_placeholder_instructions": _structure_preservation_instructions(
-            chunk.source_text, always_include_images=always_include_image_instructions
+            chunk.source_text,
+            always_include_images=always_include_image_instructions,
+            always_include_quotes=always_include_quote_instructions,
         ),
         "dialogue_instructions": dialogue_instruction(
             chunk.source_text, target_language, always_include=always_include_dialogue
@@ -801,6 +827,7 @@ def build_translation_prompt_parts(
     *,
     always_include_dialogue: bool = False,
     always_include_image_instructions: bool = False,
+    always_include_quote_instructions: bool | None = None,
     house: Optional["TranslatorHouse"] = None,
 ) -> tuple[str, str]:
     """Render the translation prompt split into ``(prefix, suffix)`` for caching.
@@ -824,6 +851,7 @@ def build_translation_prompt_parts(
         previous_chapter_context=previous_chapter_context,
         always_include_dialogue=always_include_dialogue,
         always_include_image_instructions=always_include_image_instructions,
+        always_include_quote_instructions=always_include_quote_instructions,
         house=house,
     )
     marker = _CACHE_PREFIX_SPLIT_MARKER
@@ -911,6 +939,7 @@ def estimate_cost(
     # Book-level constant so the image bullet matches translate-time rendering.
     if always_include_image_instructions is None:
         always_include_image_instructions = _book_has_images(chunks)
+    book_has_quotes = _book_has_quotes(chunks)
 
     features = summarize_chunk_features(chunks, target_language=target_language)
 
@@ -939,7 +968,9 @@ def estimate_cost(
             "chapter_info": f"Chapter {chunk.chapter_id}, Chunk {chunk.position}",
             "previous_chapter_context": "",
             "image_placeholder_instructions": _structure_preservation_instructions(
-                chunk.source_text, always_include_images=always_include_image_instructions
+                chunk.source_text,
+                always_include_images=always_include_image_instructions,
+                always_include_quotes=book_has_quotes,
             ),
             "dialogue_instructions": dialogue_instruction(
                 chunk.source_text, target_language, always_include=always_include_dialogue
@@ -1300,6 +1331,7 @@ def translate_chunk_realtime(
     enable_thinking: bool | None = None,
     always_include_dialogue: bool = False,
     always_include_image_instructions: bool = False,
+    always_include_quote_instructions: bool | None = None,
     house: Optional["TranslatorHouse"] = None,
 ) -> Chunk:
     """
@@ -1342,6 +1374,7 @@ def translate_chunk_realtime(
         previous_chapter_context=previous_chapter_context,
         always_include_dialogue=always_include_dialogue,
         always_include_image_instructions=always_include_image_instructions,
+        always_include_quote_instructions=always_include_quote_instructions,
         house=house,
     )
     prompt = cache_prefix + suffix
@@ -1464,6 +1497,7 @@ def _submit_anthropic_batch(
 
     # Book-level constant so the image bullet is byte-identical across the batch.
     book_has_images = _book_has_images(chunks)
+    book_has_quotes = _book_has_quotes(chunks)
     # One house per batch: the global rules are the same for every chunk.
     house = load_translator_house(project_dir_for(project_slug)) if project_slug else None
 
@@ -1481,6 +1515,7 @@ def _submit_anthropic_batch(
             previous_chapter_context=context_map.get(chunk.id, ""),
             always_include_dialogue=always_include_dialogue,
             always_include_image_instructions=book_has_images,
+            always_include_quote_instructions=book_has_quotes,
             house=house,
         )
 
@@ -1580,6 +1615,7 @@ def _submit_openai_batch(
 
     # Book-level constant so the image bullet is byte-identical across the batch.
     book_has_images = _book_has_images(chunks)
+    book_has_quotes = _book_has_quotes(chunks)
     # One house per batch: the global rules are the same for every chunk.
     house = load_translator_house(project_dir_for(project_slug)) if project_slug else None
 
@@ -1597,6 +1633,7 @@ def _submit_openai_batch(
             previous_chapter_context=context_map.get(chunk.id, ""),
             always_include_dialogue=always_include_dialogue,
             always_include_image_instructions=book_has_images,
+            always_include_quote_instructions=book_has_quotes,
             house=house,
         )
 

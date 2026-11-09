@@ -20,6 +20,7 @@ from ..models import Chunk, EvalResult, Issue, IssueLevel, Glossary
 from ..utils.text_utils import (
     blank_caption_markers,
     blank_footnote_markers,
+    blank_quote_markers,
     strip_image_placeholders,
 )
 from .base import BaseEvaluator
@@ -179,6 +180,7 @@ class DictionaryEvaluator(BaseEvaluator):
         # Blank the [CAPTION] marker too (offsets preserved) so it is not
         # tokenized as an unknown word. The caption's own prose is still checked.
         text_to_check = blank_caption_markers(text_to_check)
+        text_to_check = blank_quote_markers(text_to_check)
         # And [FOOTNOTE:N], for the same reason: without this, "FOOTNOTE" is
         # reported as an unknown word once per footnote reference in the book.
         text_to_check = blank_footnote_markers(text_to_check)

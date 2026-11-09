@@ -35,6 +35,7 @@ from src.utils.text_utils import (
     caption_block_count,
     footnote_token_counts,
     image_filename_counts,
+    quote_run_count,
 )
 
 
@@ -440,6 +441,19 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
         problems.append(
             f"caption-marker-parity: source has {src_caps} [CAPTION] block(s), "
             f"translation has {out_caps}"
+        )
+
+    # [QUOTE] parity counts RUNS of consecutive marked blocks, not blocks: the
+    # translator may merge a quoted passage's lines or split its paragraphs
+    # (stormy-misty-s-foal's songs arrived one line per block and came back as
+    # stanzas), but a quoted passage may not appear or vanish.
+    src_quotes = quote_run_count(chunk.source_text or "")
+    out_quotes = quote_run_count(prose or "")
+    if src_quotes != out_quotes:
+        problems.append(
+            f"quote-marker-parity: source has {src_quotes} [QUOTE] passage(s), "
+            f"translation has {out_quotes} (keep [QUOTE] at the start of every "
+            f"paragraph of each quoted passage, and add it nowhere else)"
         )
 
     # Reuse the existing evaluators; only ERROR-severity issues block the commit.

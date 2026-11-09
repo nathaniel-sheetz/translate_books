@@ -696,6 +696,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicit no-op form of the default behaviour",
     )
 
+    # quotes (backfill [QUOTE] markers into source.txt before translation) ---
+    quo = sub.add_parser(
+        "quotes",
+        help="Find set-off passages (indented verse, named phrases) in source.txt "
+             "and mark them [QUOTE]; pre-translation only (dry-run unless --apply)",
+    )
+    add_project(quo)
+    quo.add_argument(
+        "--match", action="append", default=None,
+        help="A phrase from a passage ingest could not tag (an inscription, a "
+             "letter); every block containing it becomes a candidate. Repeatable.",
+    )
+    quo.add_argument(
+        "--accept", default=None,
+        help="'all', or comma-separated candidate numbers to mark. Nothing is "
+             "marked without it.",
+    )
+    quo.add_argument(
+        "--reject", default=None,
+        help="Comma-separated candidate numbers to drop from the selection",
+    )
+    quo.add_argument(
+        "--apply", action="store_true",
+        help="Write the markers into source.txt (backup at source.txt.bak-quotes). "
+             "Refused once any chunk is translated. Re-run setup afterwards.",
+    )
+    quo.add_argument(
+        "--dry-run", action="store_true",
+        help="Explicit no-op form of the default behaviour",
+    )
+
     # --schema on every leaf subcommand. The blocks cost real tokens on every
     # call (status alone is ~2KB), so they are opt-in on success — and, per
     # _stamp_schema, automatic on any error, where the caller most needs the
@@ -942,6 +973,9 @@ def _dispatch(args: argparse.Namespace):
         return flow.captions(args.project, accept_tiers=args.accept_tiers,
                              accept=args.accept, reject=args.reject,
                              apply=args.apply and not args.dry_run)
+    if cmd == "quotes":
+        return flow.quotes(args.project, match=args.match, accept=args.accept,
+                           reject=args.reject, apply=args.apply and not args.dry_run)
     raise SystemExit(f"unknown command: {cmd}")
 
 

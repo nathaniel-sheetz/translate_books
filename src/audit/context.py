@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Optional
 
-from src.utils.text_utils import is_caption_block
+from src.utils.text_utils import is_caption_block, strip_quote_marker
 
 #: Stripped from both ends of a sentence before it becomes a search key, so a
 #: raya or guillemet the edit added or removed does not stop the match.
@@ -70,8 +70,17 @@ _PUNCTUATION = re.compile(r"[.,;:!?¡¿“”\"«»—]")
 
 
 def paragraphs(text: Optional[str]) -> list[str]:
-    """Paragraphs split at blank lines, including lines holding only whitespace."""
-    return [p.strip() for p in _PARAGRAPH_BREAK.split(text or "") if p.strip()]
+    """Paragraphs split at blank lines, including lines holding only whitespace.
+
+    A leading ``[QUOTE]`` marker is dropped: a quoted paragraph is prose, and
+    its opening (a guillemet, a raya) is what the continuation rule reads.
+    """
+    out = []
+    for p in _PARAGRAPH_BREAK.split(text or ""):
+        p = strip_quote_marker(p.strip()).strip()
+        if p:
+            out.append(p)
+    return out
 
 
 def tail(text: str, limit: int = CONTEXT_CHARS, head: int = CONTEXT_HEAD_CHARS) -> str:
