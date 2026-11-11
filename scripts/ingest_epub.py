@@ -1104,10 +1104,20 @@ def normalize_chars(text: str) -> str:
     return _LIGATURE_RE.sub(lambda m: unicodedata.normalize("NFKC", m.group(0)), text)
 
 
+def _is_quote(block: str) -> bool:
+    return block.startswith("[QUOTE]")
+
+
 def _is_prose(block: str, headings: set) -> bool:
     return bool(block) and block != DOC_SENTINEL and block not in headings \
         and not _IMAGE_BLOCK_RE.match(block) and not _CAPTION_BLOCK_RE.match(block) \
-        and not block.startswith("[QUOTE]") and block != "---"
+        and not _is_quote(block) and block != "---"
+
+
+def _is_movable(block: str) -> bool:
+    """A block a rejoin may carry past: a document boundary, an image, a caption."""
+    return block == DOC_SENTINEL or bool(_IMAGE_BLOCK_RE.match(block)) \
+        or bool(_CAPTION_BLOCK_RE.match(block))
 
 
 def join_split_paragraphs(text: str, headings: set) -> tuple[str, list[dict]]:
@@ -1133,8 +1143,9 @@ def join_split_paragraphs(text: str, headings: set) -> tuple[str, list[dict]]:
             if _is_prose(prev, headings) and "\n" not in prev and not _TERMINAL_RE.search(prev):
                 k = i + 1
                 between = []
-                while k < len(blocks) and not _is_prose(blocks[k], headings) \
-                        and blocks[k] not in headings:
+                # Only images and captions are carried past; any other block (a
+                # quote, a rule, a heading) ends the scan, so text is never reordered.
+                while k < len(blocks) and _is_movable(blocks[k]):
                     if blocks[k] != DOC_SENTINEL:
                         between.append(blocks[k])
                     k += 1
@@ -1185,7 +1196,8 @@ def anchor_boundary_images(text: str, headings: set) -> tuple[str, list[dict]]:
         k = j
         while k >= 0 and blocks[k] == DOC_SENTINEL:
             k -= 1
-        if k < 0 or not _is_prose(blocks[k], headings):
+        # A chapter may end on a quoted passage; the plate still belongs to it.
+        if k < 0 or not (_is_prose(blocks[k], headings) or _is_quote(blocks[k])):
             h += 1
             continue
         group = blocks[start:end + 1]

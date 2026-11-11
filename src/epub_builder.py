@@ -194,12 +194,13 @@ def _first_nonempty_line(text: str) -> str:
     so after translation this line *is* the translated heading (e.g. 'Prólogo').
     Skip ``[IMAGE:...]`` placeholder lines, which the splitter may prepend ahead
     of the heading, and ``[CAPTION]`` lines belonging to such an image: neither
-    is ever a valid section label.
+    is ever a valid section label. A ``[QUOTE]`` line means the section opens on
+    a quoted passage, not a heading, so the answer is ''.
     """
     for line in (text or '').split('\n'):
         stripped = line.strip()
         if stripped and not _IMAGE_RE.match(stripped) and not is_caption_block(stripped):
-            return stripped
+            return '' if is_quote_block(stripped) else stripped
     return ''
 
 
@@ -509,11 +510,26 @@ def _render_inline(text: str) -> str:
 def _render_quote_block(text: str) -> str:
     """Render one block of a quoted passage (marker already stripped).
 
-    A block with line breaks is verse and keeps each line, exactly as the
-    unmarked verse branch renders it, so a tagged stanza and an untagged one
-    look alike. Anything else is one paragraph.
+    A block with line breaks is verse and keeps each line, with the same markup
+    as the unmarked verse branch, so a tagged stanza and an untagged one look
+    alike (no line-length test: the marker already says it is set off). An
+    ``[IMAGE:...]`` line is rendered as an image, never as escaped text.
+    Anything else is one paragraph.
     """
     lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+    if any(_IMAGE_RE.fullmatch(ln) for ln in lines):
+        parts: List[str] = []
+        for ln in lines:
+            m = _IMAGE_RE.fullmatch(ln)
+            if m:
+                filename = Path(m.group(1)).name
+                parts.append(
+                    f'<div class="image"><img src="images/{escape(filename)}" '
+                    f'alt="{escape(m.group(2) or "")}"/></div>'
+                )
+            else:
+                parts.append(f'<p>{_render_inline(ln)}</p>')
+        return '\n'.join(parts)
     if len(lines) > 1:
         verse_lines = [f'  <p class="verse-line">{_render_inline(ln)}</p>' for ln in lines]
         return '<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>'
@@ -529,6 +545,7 @@ def _render_body_blocks(body: str) -> List[str]:
         - [IMAGE:...] placeholders (sole-block) -> <img> inside <div class="image">
         - An [IMAGE:...] block followed by a [CAPTION] block -> paired <figure>
         - A [CAPTION] block with no image above it -> <p class="caption">
+        - A run of consecutive [QUOTE] blocks -> one <blockquote class="quote">
         - --- lines -> <hr />
     """
     out: List[str] = []

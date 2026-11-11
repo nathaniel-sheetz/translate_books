@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.85.0.0] - 2026-11-10
+
+### Added
+- **A `[QUOTE]` block marker for set-off passages: verse, songs, spells, letters, inscriptions.** It works like `[CAPTION]`: one leading marker on each `\n\n` block of the passage, with no closing half.
+  - Ingest: Gutenberg and EPUB imports tag `<blockquote>` and `poem`/`poetry`/`stanza`/`verse`/`blockquot`/`quote` containers. Lines of a stanza are joined with `\n` and stanzas stay separate blocks, whether the lines are `div.verse` per line (with or without a trailing `<br/>`), `<br>`-broken `<p>` stanzas, or `span` + `<br>`. A container is declined when it holds a heading (including the EPUB importer's nav-resolved headings), is empty, or runs past 1,500 words. Images, captions and `---` rules inside a container stay unmarked, so a rule splits two letters.
+  - `harness quotes` backfills markers into `source.txt` before translation, for books ingest can't reach. Candidates are indented blocks (from plain-text sources) and blocks containing a `--match` phrase. Indented one-line headings (`CHAPTER I`, `II.`, short all-caps lines) are not candidates. It is a dry run unless `--apply` is given, nothing is marked without `--accept`, and it is refused once any chunk is translated. It keeps a `source.txt.bak-quotes` backup and fails clearly when there is no `source.txt`.
+  - Translation: a `[QUOTE]` bullet tells the translator to keep the marker on every paragraph of the passage, to follow the style guide's VERSE rule, and that a quoted passage is never a dialogue turn. A book with any quotes gets it in the fixed prefix, so the cache stays byte-identical.
+  - Guard: `quote-marker-parity` compares runs of consecutive marked blocks, so a translator may merge or split blocks inside a passage. `quote-marker-shape` rejects a marker standing alone in its paragraph and a marker opening a line inside a paragraph.
+  - EPUB: each run of `[QUOTE]` blocks becomes one `<blockquote class="quote">`. A block with line breaks keeps its `verse-line` markup, and an `[IMAGE:…]` line inside it renders as an image. A quote is never taken as a subtitle or a section heading.
+  - Reader: the marker is hidden and the passage shown as one indented block. Merged verse rows keep their line breaks.
+  - The chunker avoids splitting inside a run and sees dialogue through the marker. The dictionary, grammar, paragraph and save checks, the audit context and the dictionary-mark replay ignore the marker, and the EPUB importer never rejoins a split paragraph across a quote.
+  - The dialogue judges (`judge_dialogue.txt` v1.7, batch v1.6) report nothing on a `[QUOTE]` paragraph except English quotation marks.
+
+### Changed
+- **The house verse option "Prose translation" is now "Meaning, line for line"**, and its text says to translate verse line for line, keeping every line and stanza break, with no rhyme or meter. It keeps the id `prose_translation`: style-guide options can now pin an explicit `"id"` (`option_ids`), so a label can be reworded without orphaning stored answers. Books that stored `prose_translation` get the new VERSE text on their next render.
+
 ## [0.84.0.0] - 2026-11-06
 
 ### Added

@@ -170,7 +170,8 @@ def locate(
     for candidate in candidates:
         # Only the first line: an edit that split a paragraph carries the break,
         # and no single paragraph of the chunk contains text across it.
-        line = (candidate or "").strip().split("\n", 1)[0].strip()
+        # paragraphs() drops the [QUOTE] marker, so the key must not carry it.
+        line = strip_quote_marker((candidate or "").strip().split("\n", 1)[0].strip()).strip()
         sentence = line.strip(MARKS)
         key = sentence[:KEY_CHARS]
         if not key or (len(key) < MIN_KEY_CHARS and sum(p.count(key) for p in paras) != 1):

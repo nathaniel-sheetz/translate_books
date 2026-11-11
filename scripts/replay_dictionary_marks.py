@@ -191,7 +191,7 @@ def collect_labeled_terms(project_dir: Path) -> tuple[list[tuple[str, str]], col
 #: token is therefore the only way ``still_flagged`` can agree with the
 #: evaluator, and agreeing is the whole point -- a harness that reports a
 #: finding the evaluator no longer emits cannot attribute the removal.
-_BLANKED_MARKER_TOKENS = frozenset({"IMAGE", "CAPTION", "FOOTNOTE"})
+_BLANKED_MARKER_TOKENS = frozenset({"IMAGE", "CAPTION", "FOOTNOTE", "QUOTE"})
 
 
 def still_flagged(evaluator: DictionaryEvaluator, term: str) -> bool:

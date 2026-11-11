@@ -47,7 +47,6 @@ class Candidate:
 
     index: int          # 1-based, stable for an unchanged source.txt and match list
     start: int          # offset of the block's first character in source.txt
-    end: int
     reason: str         # "indented" | "match: <phrase>"
     text: str           # the block, stripped
     passage: int        # 1-based; consecutive candidates share a passage
@@ -73,6 +72,39 @@ def _raw_blocks(text: str):
         yield line_start, end, text[line_start:start] + block.split("\n", 1)[0], block
 
 
+_HEADING_PATTERNS: List[re.Pattern] | None = None
+
+
+def _heading_like(block: str) -> bool:
+    """A one-line block that reads as a heading, not a quotation.
+
+    Plain-text books often centre headings with leading spaces, so an indented
+    ``CHAPTER I`` looks like a stanza. Marking it would hide it from the chapter
+    regex and the chapter would vanish on the setup re-run. Heading-like: any
+    named split pattern matches the line, or the line is short and has no
+    lowercase letter.
+    """
+    global _HEADING_PATTERNS
+    if "\n" in block:
+        return False
+    line = block.strip()
+    if _HEADING_PATTERNS is None:
+        from src.book_splitter import get_chapter_pattern, get_pattern_names
+        pats: List[re.Pattern] = []
+        try:
+            for name in get_pattern_names():
+                try:
+                    pats.append(get_chapter_pattern(name))
+                except ValueError:
+                    continue
+        except (OSError, ValueError, KeyError):
+            pass
+        _HEADING_PATTERNS = pats
+    if any(p.match(line) for p in _HEADING_PATTERNS):
+        return True
+    return len(line.split()) <= 8 and not any(ch.islower() for ch in line)
+
+
 def _eligible(block: str) -> bool:
     return bool(block) and not (
         is_quote_block(block) or is_caption_block(block)
@@ -90,7 +122,9 @@ def scan_text(text: str, matches: Iterable[str] = ()) -> List[Candidate]:
         if not _eligible(block):
             continue
         reason = ""
-        if _INDENT_RE.match(first_line):
+        # A named --match is the user pointing at the block; only the indent
+        # tier needs the heading guard.
+        if _INDENT_RE.match(first_line) and not _heading_like(block):
             reason = "indented"
         else:
             folded = fold(block)
@@ -103,7 +137,7 @@ def scan_text(text: str, matches: Iterable[str] = ()) -> List[Candidate]:
         if prev_block_i is None or block_i != prev_block_i + 1:
             passage += 1
         prev_block_i = block_i
-        found.append(Candidate(len(found) + 1, start, end, reason, block, passage))
+        found.append(Candidate(len(found) + 1, start, reason, block, passage))
     return found
 
 

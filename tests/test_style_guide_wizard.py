@@ -148,6 +148,17 @@ class TestOptionIds:
         q = {"options": [{"label": "Keep it"}, {"label": "keep  it!"}, {"label": "Keep it"}]}
         assert option_ids(q) == ["keep_it", "keep_it_2", "keep_it_3"]
 
+    def test_explicit_id_survives_a_relabel(self):
+        # A stored answer keeps resolving after the option's label is reworded.
+        q = {"options": [
+            {"label": "Preserve meter only", "style_guide_effect": "M"},
+            {"id": "prose_translation", "label": "Meaning, line for line",
+             "style_guide_effect": "L"},
+        ]}
+        assert option_ids(q) == ["preserve_meter_only", "prose_translation"]
+        assert resolve_answer(q, "prose_translation") == ("Meaning, line for line", "L", True)
+        assert resolve_answer(q, "meaning, line for line") == ("Meaning, line for line", "L", True)
+
 
 class TestResolveAnswer:
     def test_int_index(self):

@@ -726,7 +726,7 @@ def build_translation_prompt(
     into the fixed prefix so it stays byte-identical across every chunk of a book.
     Both default off, preserving the historical per-chunk behavior.
     ``always_include_quote_instructions`` does the same for the [QUOTE] bullet
-    (``None`` = per-chunk detection).
+    (``None`` or false = per-chunk detection; the two behave the same).
 
     ``house`` is the book's house rules (:func:`src.house.prompt.load_translator_house`).
     Its global rules go into the fixed prefix as HOUSE RULES, identical in every

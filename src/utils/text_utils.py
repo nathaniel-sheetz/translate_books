@@ -554,10 +554,13 @@ def caption_instruction(source_text: str, *, always_include: bool = False) -> st
 
 QUOTE_MARKER = "[QUOTE]"
 
-_QUOTE_BLOCK_RE = re.compile(r"^\[QUOTE\][ \t]*")
+_QUOTE_BLOCK_RE = re.compile(r"^" + re.escape(QUOTE_MARKER) + r"[ \t]*")
 
-#: Per-line anchor; a quote marker always opens its block.
-_QUOTE_MARKER_LINE_RE = re.compile(r"^\[QUOTE\][ \t]*", re.MULTILINE)
+#: Per-line anchor; a quote marker always opens its block. Leading spaces are
+#: allowed (and blanked with the marker), matching is_quote_block.
+_QUOTE_MARKER_LINE_RE = re.compile(
+    r"^[ \t]*" + re.escape(QUOTE_MARKER) + r"[ \t]*", re.MULTILINE
+)
 
 
 def is_quote_block(block: str) -> bool:
@@ -672,9 +675,12 @@ def strip_block_markers(block: str) -> str:
     """
     if not block:
         return block
-    out = strip_quote_marker(block)
-    out = strip_caption_marker(out) if is_caption_block(out) else out
-    return out
+    out = block
+    # Either order: two passes cover [QUOTE] [CAPTION] and [CAPTION] [QUOTE].
+    for _ in range(2):
+        out = strip_quote_marker(out)
+        out = strip_caption_marker(out) if is_caption_block(out) else out
+    return out.lstrip()
 
 
 _QUOTE_INSTRUCTION = (
@@ -692,7 +698,9 @@ _QUOTE_INSTRUCTION = (
     "paragraph keeps\n"
     "     the marker. Never add [QUOTE] to a passage that does not carry it, and never "
     "drop it from\n"
-    "     one that does."
+    "     one that does. A [QUOTE] passage is not a dialogue turn: it never opens with "
+    "a raya or »,\n"
+    "     even when spoken or sung; its quotation marks follow the style guide."
 )
 
 

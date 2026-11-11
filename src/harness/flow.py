@@ -5210,6 +5210,10 @@ def quotes(
     from src.harness_guard import HarnessValidationError
 
     project_dir = state.resolve_project_dir(project)
+    if not (project_dir / "source.txt").exists():
+        raise HarnessValidationError(
+            f"{project_dir.name}: no source.txt to scan (run setup first)"
+        )
     found = quotes_mod.scan_project(project_dir, match or [])
     valid = {c.index for c in found}
     if accept and accept.strip().lower() == "all":
@@ -5241,7 +5245,8 @@ def quotes(
             raise HarnessValidationError(str(e)) from e
         result["next_steps"] = [
             "re-run setup so chapters/ and chunks/ are rebuilt from the marked "
-            "source.txt (pass the same --chapter-pattern flags as the first run)",
+            "source.txt (pass the same --chapter-pattern flags as the first run, "
+            "but NOT --url/--epub: those re-fetch source.txt and erase the marks)",
         ]
     else:
         result["next_steps"] = (

@@ -83,6 +83,17 @@ class TestHelpers:
         assert "QUOTE" not in blanked
         assert quote_marker_ranges(text) == [(7, 15)]
 
+    def test_strip_block_markers_either_order(self):
+        assert strip_block_markers("[CAPTION] [QUOTE] x") == "x"
+        assert strip_block_markers("[QUOTE] [CAPTION] x") == "x"
+        assert strip_block_markers("[QUOTE]\n—x") == "—x"
+
+    def test_blank_an_indented_marker(self):
+        text = "  [QUOTE] x"
+        blanked = blank_quote_markers(text)
+        assert len(blanked) == len(text)
+        assert "QUOTE" not in blanked and blanked.endswith("x")
+
     def test_instruction_gating(self):
         assert quote_instruction("No quotes here.") == ""
         assert "[QUOTE]" in quote_instruction("[QUOTE] A stanza.")
@@ -136,6 +147,34 @@ class TestIngest:
             "[QUOTE] In the heart of a seed buried deep, so deep, A dear little "
             'plant lay fast asleep.\n"Wake!" said the sunshine, "and creep to the light."'
         ]
+
+    def test_p_stanzas_with_br_keep_their_stanza_break(self):
+        html = '<body><div class="poem"><p>a1<br/>a2</p><p>b1<br/>b2</p></div></body>'
+        assert _blocks(_convert(html)) == ["[QUOTE] a1\na2", "[QUOTE] b1\nb2"]
+
+    def test_verse_lines_with_trailing_br_stay_one_stanza(self):
+        html = (
+            '<body><div class="stanza"><div class="verse">a<br/></div>'
+            '<div class="verse">b<br/></div></div></body>'
+        )
+        assert _blocks(_convert(html)) == ["[QUOTE] a\nb"]
+
+    def test_span_br_stanzas_stay_two_stanzas(self):
+        html = (
+            '<body><div class="poem">'
+            '<div class="stanza"><span>a</span><br/><span>b</span><br/></div>'
+            '<div class="stanza"><span>c</span><br/><span>d</span><br/></div>'
+            '</div></body>'
+        )
+        assert _blocks(_convert(html)) == ["[QUOTE] a\nb", "[QUOTE] c\nd"]
+
+    def test_container_with_a_nav_heading_is_not_a_quote(self):
+        # The EPUB importer marks nav-resolved headings on ordinary elements.
+        html = (
+            '<body><blockquote><p data-ingest-level="1">Chapter One</p>'
+            '<p>A short chapter wrapped in a blockquote.</p></blockquote></body>'
+        )
+        assert "[QUOTE]" not in _convert(html)
 
     def test_br_lines_inside_a_poem_paragraph(self):
         html = '<body><p class="poem">"Light of spirit, by my charms,<br/>Light of body, every part,</p></body>'
@@ -219,6 +258,32 @@ class TestGuard:
         problems = guard_translation_draft(_chunk(src), out)
         assert any("quote-marker-parity" in p for p in problems)
 
+    def test_bare_marker_block_fails(self):
+        out = (
+            "El abuelo recitó en voz baja:\n\n[QUOTE]\n\n"
+            "«Si el ganso se lava en el bebedero\nmañana nos irá muy mal».\n\n"
+            "Paul se rio de la vieja rima y volvió al establo."
+        )
+        problems = guard_translation_draft(_chunk(_SRC), out)
+        assert any("quote-marker-shape" in p and "stands alone" in p for p in problems)
+
+    def test_marker_on_an_inner_line_fails(self):
+        out = (
+            "El abuelo recitó en voz baja:\n\n"
+            "[QUOTE] «Si el ganso se lava en el bebedero\n[QUOTE] mañana nos irá muy mal».\n\n"
+            "Paul se rio de la vieja rima y volvió al establo."
+        )
+        problems = guard_translation_draft(_chunk(_SRC), out)
+        assert any("quote-marker-shape" in p and "inside a paragraph" in p for p in problems)
+
+    def test_one_leading_marker_has_no_shape_problem(self):
+        out = (
+            "El abuelo recitó en voz baja:\n\n"
+            "[QUOTE] «Si el ganso se lava en el bebedero\nmañana nos irá muy mal».\n\n"
+            "Paul se rio de la vieja rima y volvió al establo."
+        )
+        assert not any("quote-marker-shape" in p for p in guard_translation_draft(_chunk(_SRC), out))
+
 
 # --------------------------------------------------------------------------- #
 # EPUB builder
@@ -245,6 +310,16 @@ class TestBuilder:
     def test_rule_splits_two_quotes(self):
         out = _render_body_blocks("[QUOTE] Uno.\n\n---\n\n[QUOTE] Dos.")
         assert [o.split("\n")[0] for o in out] == ['<blockquote class="quote">', "<hr/>", '<blockquote class="quote">']
+
+    def test_image_line_inside_a_quote_renders_as_an_image(self):
+        out = _render_body_blocks("[QUOTE] Mira:\n[IMAGE:images/x.png]")
+        assert '<img src="images/x.png"' in out[0]
+        assert "[IMAGE:" not in out[0]
+
+    def test_text_opening_on_a_quote_has_no_heading_line(self):
+        from src.epub_builder import _first_nonempty_line
+        assert _first_nonempty_line("[QUOTE] Luz de espíritu\nluz de cuerpo") == ""
+        assert _first_nonempty_line("[IMAGE:images/a.png]\nPrólogo\n\nTexto.") == "Prólogo"
 
     def test_quote_is_never_a_subtitle(self):
         _heading, subtitle, body = detect_chapter_heading(
@@ -342,3 +417,36 @@ class TestBackfill:
         assert report == {"marked": 2, "passages": 1, "backup": "source.txt.bak-quotes"}
         assert (tmp_path / "source.txt.bak-quotes").read_text(encoding="utf-8") == _PLAIN
         assert quote_block_count((tmp_path / "source.txt").read_text(encoding="utf-8")) == 2
+
+    def test_indented_headings_are_not_candidates(self):
+        text = (
+            "Intro.\n\n    CHAPTER I\n\nBody text.\n\n    The owl sang low,\n\n"
+            "    The lark sang high.\n\n    II.\n\n    THE GIANT\n\nMore."
+        )
+        assert [c.text for c in quotes_mod.scan_text(text)] == [
+            "The owl sang low,", "The lark sang high.",
+        ]
+        # A named --match still reaches a heading-shaped block.
+        found = quotes_mod.scan_text(text, ["the giant"])
+        assert found[-1].text == "THE GIANT" and found[-1].reason.startswith("match:")
+
+    def test_harness_quotes_without_source_fails_clearly(self, tmp_path, monkeypatch):
+        import pytest
+        from src.harness import flow
+        from src.harness_guard import HarnessValidationError
+        monkeypatch.setattr(flow.state, "resolve_project_dir", lambda p: tmp_path)
+        with pytest.raises(HarnessValidationError, match="no source.txt"):
+            flow.quotes(str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# Audit context
+# --------------------------------------------------------------------------- #
+
+class TestAuditContext:
+    def test_locate_sees_through_the_marker(self):
+        from src.audit.context import locate
+        text = "Narración.\n\n[QUOTE] «Si el ganso se lava en el bebedero\nmañana nos irá muy mal»."
+        hit = locate(text, ["[QUOTE] «Si el ganso se lava en el bebedero"])
+        assert hit is not None
+        assert hit["starts_paragraph"] is True

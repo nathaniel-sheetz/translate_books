@@ -86,13 +86,15 @@ def option_ids(question: dict) -> list[str]:
     """Stable per-option ids for a question, aligned to ``question["options"]``.
 
     Ids are slugs derived from each option's label (order-independent and
-    human-meaningful, unlike positional indices). Collisions within a single
+    human-meaningful, unlike positional indices). An option may pin its id with
+    an explicit ``"id"`` so its label can be reworded without orphaning the
+    answers already stored under the old slug. Collisions within a single
     question are disambiguated with a ``_2``, ``_3`` … suffix.
     """
     ids: list[str] = []
     seen: dict[str, int] = {}
     for opt in question.get("options", []):
-        base = _slug(opt.get("label", ""))
+        base = str(opt.get("id") or "").strip() or _slug(opt.get("label", ""))
         n = seen.get(base, 0) + 1
         seen[base] = n
         ids.append(base if n == 1 else f"{base}_{n}")

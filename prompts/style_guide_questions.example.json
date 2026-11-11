@@ -121,8 +121,9 @@
           "style_guide_effect": "VERSE\nWhen translating verse passages, preserve the original rhyme scheme but allow meter to flex as needed for natural target-language phrasing."
         },
         {
-          "label": "Prose translation",
-          "style_guide_effect": "VERSE\nTranslate verse passages as prose, preserving meaning and imagery rather than form. Set the prose rendering as a block quote in the target text."
+          "id": "prose_translation",
+          "label": "Meaning, line for line",
+          "style_guide_effect": "VERSE\nTranslate verse line for line, keeping every line and stanza break; carry the meaning and imagery of each line, with no attempt at rhyme or meter."
         },
         {
           "label": "Side-by-side bilingual",

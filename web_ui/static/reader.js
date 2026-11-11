@@ -382,16 +382,17 @@
     const QUOTE_MARKER_RE = /^\s*\[QUOTE\][ \t]*/;
 
     // Display form of a sentence: identical to the stored text except on a
-    // caption, where the structural marker is hidden. Used everywhere sentence
-    // text reaches the DOM, including the post-correction repaint — otherwise
-    // saving an edit to a caption would make the marker reappear.
+    // caption or quote, where the structural marker is hidden. Used everywhere
+    // sentence text reaches the DOM, including the post-correction repaint —
+    // otherwise saving an edit to a caption would make the marker reappear.
     function displayEsOf(alignment, text) {
         if (!alignment) return text;
         if (alignment.caption) return text.replace(CAPTION_MARKER_RE, '');
-        if (alignment.quote) text = text.replace(QUOTE_MARKER_RE, '');
         // Verse lines the aligner merged into one row: the joining spaces become
         // newlines (same length, so finding offsets still line up). The offsets
-        // only hold for the text they were computed on, so a Save drops them.
+        // only hold for the text they were computed on (the raw `es`, marker
+        // included), so they are applied before the marker is stripped, and a
+        // Save drops them.
         const breaks = alignment.verse_inner_breaks;
         if (breaks && breaks.length) {
             // Array.from walks code points, matching the server's offsets.
@@ -399,8 +400,9 @@
             for (const off of breaks) {
                 if (chars[off] === ' ') chars[off] = '\n';
             }
-            return chars.join('');
+            text = chars.join('');
         }
+        if (alignment.quote) text = text.replace(QUOTE_MARKER_RE, '');
         return text;
     }
 

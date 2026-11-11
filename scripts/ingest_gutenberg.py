@@ -415,6 +415,11 @@ class Converter:
             return
 
         if tag == "br":
+            # In a stanza a line already ends with "\n"; a <br> after it (the
+            # `div.verse` + trailing `<br/>` shape) must not make a blank line,
+            # which would split the stanza into one block per line.
+            if self._line_mode and self.parts and self.parts[-1].endswith("\n"):
+                return
             self.parts.append("\n")
             return
 
@@ -449,7 +454,8 @@ class Converter:
                     self.parts.append("\n")
                 for child in node.children:
                     self._walk(child)
-                self.parts.append("\n")
+                if not (self.parts and self.parts[-1].endswith("\n")):
+                    self.parts.append("\n")
                 return
             stanza = self._in_quote and bool(classes & STANZA_CLASSES) and self._children_are_lines(node)
             self.parts.append("\n\n")
@@ -565,6 +571,12 @@ class Converter:
                 return False
         if node.find(list(HEADING_TAGS)):
             return False
+        # The EPUB importer marks nav-resolved headings, subtitles and document
+        # starts on ordinary elements; they are structure the splitter needs, so
+        # a container holding one is not a quote either (no-op for Gutenberg HTML).
+        for attr in ("data-ingest-level", "data-ingest-subtitle", "data-ingest-doc"):
+            if node.find(attrs={attr: True}):
+                return False
         words = len(node.get_text(" ", strip=True).split())
         return 0 < words <= QUOTE_MAX_WORDS
 
@@ -574,13 +586,30 @@ class Converter:
 
         A stanza container (``div.stanza > div.verse`` per line) qualifies; a
         poem container whose children are themselves stanzas does not, so its
-        stanzas stay separate blocks.
+        stanzas stay separate blocks. A child is a stanza when it holds block
+        children of its own, or a ``<br>`` with text after it (``<p>a<br/>b</p>``,
+        ``<div class="stanza"><span>a</span><br/>…``); a ``<br>`` that only ends
+        the line does not count.
         """
         kids = [c for c in node.children
                 if isinstance(c, Tag) and (c.name or "").lower() in BLOCK_TAGS]
         if not kids:
             return False
-        return not any(k.find(list(BLOCK_TAGS)) for k in kids)
+        return not any(
+            k.find(list(BLOCK_TAGS)) or Converter._has_inner_break(k) for k in kids
+        )
+
+    @staticmethod
+    def _has_inner_break(node: Tag) -> bool:
+        """True when *node* has a ``<br>`` followed by more text inside it."""
+        seen_br = False
+        for d in node.descendants:
+            if isinstance(d, Tag):
+                if (d.name or "").lower() == "br":
+                    seen_br = True
+            elif seen_br and not isinstance(d, Comment) and str(d).strip():
+                return True
+        return False
 
     def _handle_quote(self, node: Tag):
         # Render the container into a temporary buffer (the caption technique),
