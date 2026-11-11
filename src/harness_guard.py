@@ -25,6 +25,7 @@ loaders and the one parse boundary the loaders don't cover.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from src.evaluators.completeness_eval import CompletenessEvaluator
@@ -35,6 +36,9 @@ from src.utils.text_utils import (
     caption_block_count,
     footnote_token_counts,
     image_filename_counts,
+    is_quote_block,
+    quote_run_count,
+    strip_quote_marker,
 )
 
 
@@ -441,6 +445,34 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
             f"caption-marker-parity: source has {src_caps} [CAPTION] block(s), "
             f"translation has {out_caps}"
         )
+
+    # [QUOTE] parity counts RUNS of consecutive marked blocks, not blocks: the
+    # translator may merge a quoted passage's lines or split its paragraphs
+    # (stormy-misty-s-foal's songs arrived one line per block and came back as
+    # stanzas), but a quoted passage may not appear or vanish.
+    src_quotes = quote_run_count(chunk.source_text or "")
+    out_quotes = quote_run_count(prose or "")
+    if src_quotes != out_quotes:
+        problems.append(
+            f"quote-marker-parity: source has {src_quotes} [QUOTE] passage(s), "
+            f"translation has {out_quotes} (keep [QUOTE] at the start of every "
+            f"paragraph of each quoted passage, and add it nowhere else)"
+        )
+    # Shapes run parity cannot see: a marker with nothing after it in its block
+    # (the passage renders outside the blockquote) and a marker opening a line
+    # inside a block (the EPUB prints it literally).
+    for block in re.split(r"\n\s*\n", prose or ""):
+        lines = block.strip().split("\n")
+        if is_quote_block(lines[0]) and not strip_quote_marker(block.strip()).strip():
+            problems.append(
+                "quote-marker-shape: a [QUOTE] marker stands alone in its paragraph; "
+                "put it directly before the passage's text"
+            )
+        if any(is_quote_block(ln) for ln in lines[1:]):
+            problems.append(
+                "quote-marker-shape: [QUOTE] opens a line inside a paragraph; it goes "
+                "only at the start of a paragraph (one per paragraph)"
+            )
 
     # Reuse the existing evaluators; only ERROR-severity issues block the commit.
     eval_chunk = chunk.model_copy(update={"translated_text": text})

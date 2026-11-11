@@ -2420,7 +2420,7 @@ def translate_prepare(
     from src.api_translator import build_translation_prompt_parts
     from src.translator import extract_previous_chapter_context
     from src.utils.file_io import load_chunk, load_glossary, load_style_guide
-    from src.utils.text_utils import image_filenames, source_has_dialogue
+    from src.utils.text_utils import image_filenames, quote_block_count, source_has_dialogue
 
     chunks_dir = project_dir / "chunks"
     if not chunks_dir.exists():
@@ -2462,16 +2462,18 @@ def translate_prepare(
     # which is what makes `config-set` safe to use mid-book.
     cfg_dialogue = cfg.get("always_include_dialogue")
     cfg_images = cfg.get("always_include_image_instructions")
-    book_dialogue = book_images = False
-    if cfg_dialogue is None or cfg_images is None:
-        # One pass for both — either alone is a whole-book scan that re-loads
-        # every chunk off disk, so do not run two.
-        for cp in (c for cps in all_discovered.values() for c in cps):
-            if book_dialogue and book_images:
-                break  # nothing left to learn from the rest of the book
-            text = load_chunk(cp).source_text
-            book_dialogue = book_dialogue or source_has_dialogue(text, target_lang)
-            book_images = book_images or bool(image_filenames(text))
+    book_dialogue = book_images = book_quotes = False
+    # One whole-book pass for all three -- each alone re-loads every chunk off
+    # disk, so do not run several. The [QUOTE] bullet has no config key: it is
+    # always derived from the whole book, so a quote-bearing first chunk cannot
+    # fix the shared preamble for every other chunk.
+    for cp in (c for cps in all_discovered.values() for c in cps):
+        if book_dialogue and book_images and book_quotes:
+            break  # nothing left to learn from the rest of the book
+        text = load_chunk(cp).source_text
+        book_dialogue = book_dialogue or source_has_dialogue(text, target_lang)
+        book_images = book_images or bool(image_filenames(text))
+        book_quotes = book_quotes or bool(quote_block_count(text))
     always_include_dialogue = book_dialogue if cfg_dialogue is None else bool(cfg_dialogue)
     book_has_images = book_images if cfg_images is None else bool(cfg_images)
     prefix_source = {
@@ -2525,6 +2527,7 @@ def translate_prepare(
                 previous_chapter_context=prev_context,
                 always_include_dialogue=always_include_dialogue,
                 always_include_image_instructions=book_has_images,
+                always_include_quote_instructions=book_quotes,
                 house=house,
             )
             prompt = prefix + suffix
@@ -5185,6 +5188,72 @@ def captions(
         result["next_steps"] = [
             "re-run with --apply to write the markers",
         ]
+    return result
+
+
+def quotes(
+    project: str,
+    *,
+    match: list[str] | None = None,
+    accept: str | None = None,
+    reject: str | None = None,
+    apply: bool = False,
+) -> dict:
+    """Find set-off passages in ``source.txt`` and, with ``apply``, mark them
+    ``[QUOTE]``. Pre-translation only; see :mod:`src.quotes`.
+
+    Candidates are indented blocks plus blocks containing a ``--match``
+    phrase. Nothing is selected unless named: ``--accept all`` or numbers,
+    less ``--reject``. Dry-run by default.
+    """
+    from src import quotes as quotes_mod
+    from src.harness_guard import HarnessValidationError
+
+    project_dir = state.resolve_project_dir(project)
+    if not (project_dir / "source.txt").exists():
+        raise HarnessValidationError(
+            f"{project_dir.name}: no source.txt to scan (run setup first)"
+        )
+    found = quotes_mod.scan_project(project_dir, match or [])
+    valid = {c.index for c in found}
+    if accept and accept.strip().lower() == "all":
+        accept_idx = set(valid)
+    else:
+        accept_idx = _parse_captions_indices(accept, valid, flag="--accept")
+    reject_idx = _parse_captions_indices(reject, valid, flag="--reject")
+    selected = [c for c in found if c.index in accept_idx and c.index not in reject_idx]
+    done = quotes_mod.translated_chunks(project_dir)
+
+    result = {
+        "project": project_dir.name,
+        "applied": bool(apply),
+        "total_candidates": len(found),
+        "passages": len({c.passage for c in found}),
+        "selected": len(selected),
+        "selected_indices": [c.index for c in selected],
+        "candidates": [c.to_dict() for c in found],
+        "translated_chunks": len(done),
+    }
+    if apply:
+        if not selected:
+            raise HarnessValidationError(
+                "nothing selected: pass --accept all or --accept 1,2 (see the dry run)"
+            )
+        try:
+            result["report"] = quotes_mod.apply_marks(project_dir, selected)
+        except ValueError as e:
+            raise HarnessValidationError(str(e)) from e
+        result["next_steps"] = [
+            "re-run setup so chapters/ and chunks/ are rebuilt from the marked "
+            "source.txt (pass the same --chapter-pattern flags as the first run, "
+            "but NOT --url/--epub: those re-fetch source.txt and erase the marks)",
+        ]
+    else:
+        result["next_steps"] = (
+            [f"refused on --apply: {len(done)} chunk(s) already translated"]
+            if done else
+            ["re-run with --accept all|N,M --apply to write the markers"]
+        )
     return result
 
 

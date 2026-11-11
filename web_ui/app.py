@@ -77,6 +77,7 @@ from src.utils.text_utils import (
     fold_with_map,
     image_placeholder_instruction,
     is_caption_block,
+    is_quote_block,
     kwic_window,
 )
 from src.utils.verse import is_verse_block
@@ -2447,6 +2448,20 @@ def _enrich_alignment(alignment_data: dict, chapter_text_path: Path, project_id:
             in_caption = False
         if in_caption:
             a["caption"] = True
+
+    # Tag quoted paragraphs ([QUOTE] block marker) the same way: the flag runs
+    # from a marked paragraph's first sentence to the next unmarked paragraph,
+    # so every sentence of a quoted passage lands in one indented block. `es`
+    # stays byte-identical for the same offset reason; reader.js strips the
+    # marker for display.
+    in_quote = False
+    for a in alignments:
+        if is_quote_block(a.get("es", "")):
+            in_quote = True
+        elif a.get("para_start"):
+            in_quote = False
+        if in_quote:
+            a["quote"] = True
 
     # Insert image records (reverse order to preserve indices)
     for insert_idx, img_record in reversed(insert_queue):

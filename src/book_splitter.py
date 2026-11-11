@@ -19,7 +19,7 @@ from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.utils.text_utils import is_caption_block
+from src.utils.text_utils import is_caption_block, is_quote_block
 
 
 SectionKind = Literal["front_matter", "chapter", "back_matter"]
@@ -170,6 +170,8 @@ def _looks_like_subtitle(candidate: str) -> bool:
         candidate
         and not _HEADER_IMAGE_LINE_RE.fullmatch(candidate)
         and not is_caption_block(candidate)
+        # A quoted line (an epigraph's verse) is body text, never a subtitle.
+        and not is_quote_block(candidate)
         and len(candidate) <= 100
         and len(candidate.split()) <= 12
         and re.search(r'[A-Za-z]', candidate)

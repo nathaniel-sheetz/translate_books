@@ -377,17 +377,22 @@
     // — a.es itself stays byte-identical because chunk_offset_start/end and the
     // edit path are computed against the real chunk text.
     const CAPTION_MARKER_RE = /^\s*\[CAPTION\][ \t]*/;
+    // Leading [QUOTE] marker, same display-only treatment. Only the first
+    // sentence of a quoted paragraph carries it; the anchor leaves the rest alone.
+    const QUOTE_MARKER_RE = /^\s*\[QUOTE\][ \t]*/;
 
     // Display form of a sentence: identical to the stored text except on a
-    // caption, where the structural marker is hidden. Used everywhere sentence
-    // text reaches the DOM, including the post-correction repaint — otherwise
-    // saving an edit to a caption would make the marker reappear.
+    // caption or quote, where the structural marker is hidden. Used everywhere
+    // sentence text reaches the DOM, including the post-correction repaint —
+    // otherwise saving an edit to a caption would make the marker reappear.
     function displayEsOf(alignment, text) {
         if (!alignment) return text;
         if (alignment.caption) return text.replace(CAPTION_MARKER_RE, '');
         // Verse lines the aligner merged into one row: the joining spaces become
         // newlines (same length, so finding offsets still line up). The offsets
-        // only hold for the text they were computed on, so a Save drops them.
+        // only hold for the text they were computed on (the raw `es`, marker
+        // included), so they are applied before the marker is stripped, and a
+        // Save drops them.
         const breaks = alignment.verse_inner_breaks;
         if (breaks && breaks.length) {
             // Array.from walks code points, matching the server's offsets.
@@ -395,8 +400,9 @@
             for (const off of breaks) {
                 if (chars[off] === ' ') chars[off] = '\n';
             }
-            return chars.join('');
+            text = chars.join('');
         }
+        if (alignment.quote) text = text.replace(QUOTE_MARKER_RE, '');
         return text;
     }
 
@@ -407,11 +413,15 @@
         // .para-break spacers. A caption paragraph instead gets its own block
         // wrapper so it can be centered as a unit under its image.
         let captionBox = null;
+        // A quoted passage ([QUOTE] run) likewise shares one indented block;
+        // its paragraph breaks go inside the block.
+        let quoteBox = null;
 
         for (const a of alignments) {
             // Render image records
             if (a.type === 'image') {
                 captionBox = null;
+                quoteBox = null;
                 const div = document.createElement('div');
                 div.className = 'reader-image';
                 const img = document.createElement('img');
@@ -432,14 +442,27 @@
             } else {
                 captionBox = null;
             }
-            const container = captionBox || content;
+            // Opening a quote box: the box's own margin is the break, so the
+            // passage's first paragraph adds no spacer.
+            let quoteOpened = false;
+            if (a.quote && !a.caption) {
+                if (!quoteBox) {
+                    quoteBox = document.createElement('div');
+                    quoteBox.className = 'reader-quote';
+                    content.appendChild(quoteBox);
+                    quoteOpened = true;
+                }
+            } else {
+                quoteBox = null;
+            }
+            const container = captionBox || quoteBox || content;
 
             // Insert paragraph break when alignment record is tagged. Captions
             // skip it — the wrapper div already provides the block break.
-            if (a.para_start && !a.caption) {
+            if (a.para_start && !a.caption && !quoteOpened) {
                 const br = document.createElement('span');
                 br.className = 'para-break';
-                content.appendChild(br);
+                (quoteBox || content).appendChild(br);
             } else if (a.verse_line_break) {
                 const br = document.createElement('span');
                 br.className = 'verse-break';

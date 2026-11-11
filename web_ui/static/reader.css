@@ -1922,6 +1922,15 @@ body {
     margin-top: -1.1em;
 }
 
+/* Quoted passages ([QUOTE] marker): a poem, a letter, an inscription. The run
+   of quoted paragraphs shares one indented block, matching the EPUB's
+   blockquote.quote margins. */
+
+.reader-quote {
+    display: block;
+    margin: 1em 1.5em;
+}
+
 /* Paragraph breaks between sentence groups */
 
 .para-break {

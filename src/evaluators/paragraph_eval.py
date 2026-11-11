@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from ..models import Chunk, EvalResult, Issue, IssueLevel
+from ..utils.text_utils import is_quote_block, strip_quote_marker
 from .base import BaseEvaluator
 
 
@@ -152,7 +153,17 @@ class ParagraphEvaluator(BaseEvaluator):
         # Filter out empty paragraphs (whitespace-only)
         non_empty_paragraphs = [p for p in paragraphs if p.strip()]
 
-        return len(non_empty_paragraphs)
+        # A run of consecutive [QUOTE] blocks counts once: the translator may
+        # join a quoted passage's lines or split its paragraphs (see
+        # text_utils.quote_run_count), so only the passage itself is compared.
+        count = 0
+        in_quote = False
+        for p in non_empty_paragraphs:
+            quoted = is_quote_block(p)
+            if not (quoted and in_quote):
+                count += 1
+            in_quote = quoted
+        return count
 
     def _count_dialogue_paragraphs(self, text: str) -> int:
         """
@@ -169,7 +180,10 @@ class ParagraphEvaluator(BaseEvaluator):
         """
         paragraphs = re.split(r'\n\s*\n', text.strip())
         non_empty = [p for p in paragraphs if p.strip()]
-        return sum(1 for p in non_empty if p.strip().startswith('\u2014'))
+        return sum(
+            1 for p in non_empty
+            if strip_quote_marker(p.strip()).startswith('\u2014')
+        )
 
     def _create_paragraph_issue(
         self,

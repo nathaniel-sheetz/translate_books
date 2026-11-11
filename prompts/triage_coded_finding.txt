@@ -25,7 +25,7 @@ These two checkers are wrong far more often than they are right — roughly nine
 - Words correctly left in another language: English, French, Latin, a scientific binomial.
 - Archaisms and literary register a modern dictionary does not carry, which are deliberate in this prose.
 - Dialect, regional forms, and deliberately non-standard speech inside dialogue.
-- Artifacts of the source text: OCR damage, hyphenation, chapter numbering, and markup such as [IMAGE:...] or [CAPTION].
+- Artifacts of the source text: OCR damage, hyphenation, chapter numbering, and markup such as [IMAGE:...], [CAPTION] or [QUOTE].
 - Grammar rules misfiring on Spanish dialogue punctuation: the raya (—), guillemets (« »), and a quotation continuing into a new paragraph with ».
 
 Suppress those. Keep a finding when the flagged word looks like a genuine misspelling, a real agreement or tense error, or a word that exists in no language and is none of the above.

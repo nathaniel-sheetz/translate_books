@@ -19,7 +19,12 @@ from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 from ebooklib import epub
 
 from src.book_splitter import roman_to_int
-from src.utils.text_utils import is_caption_block, strip_caption_marker
+from src.utils.text_utils import (
+    is_caption_block,
+    is_quote_block,
+    strip_caption_marker,
+    strip_quote_marker,
+)
 from src.utils.verse import is_verse_block
 
 logger = logging.getLogger(__name__)
@@ -189,12 +194,13 @@ def _first_nonempty_line(text: str) -> str:
     so after translation this line *is* the translated heading (e.g. 'Prólogo').
     Skip ``[IMAGE:...]`` placeholder lines, which the splitter may prepend ahead
     of the heading, and ``[CAPTION]`` lines belonging to such an image: neither
-    is ever a valid section label.
+    is ever a valid section label. A ``[QUOTE]`` line means the section opens on
+    a quoted passage, not a heading, so the answer is ''.
     """
     for line in (text or '').split('\n'):
         stripped = line.strip()
         if stripped and not _IMAGE_RE.match(stripped) and not is_caption_block(stripped):
-            return stripped
+            return '' if is_quote_block(stripped) else stripped
     return ''
 
 
@@ -307,6 +313,10 @@ div.verse p.verse-line {
     margin: 0;
     line-height: 1.35;
 }
+blockquote.quote { margin: 1em 1.5em; }
+blockquote.quote p { text-indent: 0; }
+blockquote.quote div.verse { margin: 0 0 0.75em 0; }
+blockquote.quote div.verse:last-child { margin-bottom: 0; }
 nav ol { list-style: none; padding-left: 0; }
 nav ol ol { padding-left: 1.5em; }
 sup.endnote-ref { vertical-align: super; font-size: 0.75em; line-height: 0; }
@@ -468,6 +478,7 @@ def detect_chapter_heading(
             candidate
             and not _IMAGE_RE.match(candidate)
             and not is_caption_block(candidate)
+            and not is_quote_block(candidate)
             and len(candidate) < 200
         ):
             subtitle = candidate
@@ -496,6 +507,35 @@ def _render_inline(text: str) -> str:
     return _ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(_EM_REPL, escape(text)))
 
 
+def _render_quote_block(text: str) -> str:
+    """Render one block of a quoted passage (marker already stripped).
+
+    A block with line breaks is verse and keeps each line, with the same markup
+    as the unmarked verse branch, so a tagged stanza and an untagged one look
+    alike (no line-length test: the marker already says it is set off). An
+    ``[IMAGE:...]`` line is rendered as an image, never as escaped text.
+    Anything else is one paragraph.
+    """
+    lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+    if any(_IMAGE_RE.fullmatch(ln) for ln in lines):
+        parts: List[str] = []
+        for ln in lines:
+            m = _IMAGE_RE.fullmatch(ln)
+            if m:
+                filename = Path(m.group(1)).name
+                parts.append(
+                    f'<div class="image"><img src="images/{escape(filename)}" '
+                    f'alt="{escape(m.group(2) or "")}"/></div>'
+                )
+            else:
+                parts.append(f'<p>{_render_inline(ln)}</p>')
+        return '\n'.join(parts)
+    if len(lines) > 1:
+        verse_lines = [f'  <p class="verse-line">{_render_inline(ln)}</p>' for ln in lines]
+        return '<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>'
+    return f'<p>{_render_inline(lines[0] if lines else "")}</p>'
+
+
 def _render_body_blocks(body: str) -> List[str]:
     """
     Render a plain-text body into a list of XHTML block strings.
@@ -505,6 +545,7 @@ def _render_body_blocks(body: str) -> List[str]:
         - [IMAGE:...] placeholders (sole-block) -> <img> inside <div class="image">
         - An [IMAGE:...] block followed by a [CAPTION] block -> paired <figure>
         - A [CAPTION] block with no image above it -> <p class="caption">
+        - A run of consecutive [QUOTE] blocks -> one <blockquote class="quote">
         - --- lines -> <hr />
     """
     out: List[str] = []
@@ -549,6 +590,18 @@ def _render_body_blocks(body: str) -> List[str]:
             caption = _render_inline(strip_caption_marker(block))
             out.append(f'<p class="caption">{caption}</p>')
             i += 1
+            continue
+
+        # Quoted passage: a run of consecutive [QUOTE] blocks becomes one
+        # <blockquote>. Verse blocks inside keep their line breaks; prose blocks
+        # are ordinary unindented paragraphs. A `---` (or any unmarked block)
+        # ends the run, so letters separated by a rule stay separate quotes.
+        if is_quote_block(block):
+            inner: List[str] = []
+            while i < len(blocks) and is_quote_block(blocks[i]):
+                inner.append(_render_quote_block(strip_quote_marker(blocks[i])))
+                i += 1
+            out.append('<blockquote class="quote">\n' + '\n'.join(inner) + '\n</blockquote>')
             continue
 
         # Check for horizontal rule
@@ -798,6 +851,7 @@ def _matter_subtitle_from_text(
             and next_blank
             and not _IMAGE_RE.match(candidate)
             and not is_caption_block(candidate)
+            and not is_quote_block(candidate)
             and len(candidate) <= 100
             and len(candidate.split()) <= 12
             and re.search(r'[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]', candidate)

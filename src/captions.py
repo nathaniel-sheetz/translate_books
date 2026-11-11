@@ -48,7 +48,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from src.utils.text_utils import CAPTION_MARKER, is_caption_block, strip_caption_marker
+from src.utils.text_utils import (
+    CAPTION_MARKER,
+    is_caption_block,
+    is_quote_block,
+    strip_caption_marker,
+)
 
 # Same shape as epub_builder._IMAGE_RE -- an image block is a sole token.
 _IMAGE_RE = re.compile(r'\[IMAGE:(images/[^:\]]+)(?::([^\]]*))?\]')
@@ -109,7 +114,7 @@ def _norm(s: str) -> str:
 
 def _is_candidate_text(block: str) -> bool:
     """Could *block* be a caption at all? (shape only, no confidence)"""
-    if not block or is_caption_block(block):
+    if not block or is_caption_block(block) or is_quote_block(block):
         return False
     if _IMAGE_RE.fullmatch(block) or _HR_RE.match(block):
         return False

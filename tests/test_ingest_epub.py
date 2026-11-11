@@ -481,6 +481,21 @@ class TestHelpers:
         assert text.startswith("[IMAGE:images/p.jpg]\n\nLast para.")
         assert len(moved) == 1
 
+    def test_join_never_carries_text_past_a_quote(self):
+        # A [QUOTE] between the halves ends the scan: text is never reordered.
+        s = DOC_SENTINEL
+        cut = f"the old sign still read\n\n{s}\n\n[QUOTE] KEEP OUT\n\nand nobody had dared"
+        text, joins = join_split_paragraphs(cut, set())
+        assert joins == []
+        assert text.index("[QUOTE] KEEP OUT") < text.index("and nobody had dared")
+
+    def test_plate_after_a_chapter_ending_on_a_quote_stays_with_it(self):
+        s = DOC_SENTINEL
+        own_doc = f"[QUOTE] The end.\n\n{s}\n\n[IMAGE:images/p.jpg]\n\n{s}\n\nTITLE\n\nBody."
+        text, moved = anchor_boundary_images(own_doc, {"TITLE"})
+        assert text.startswith("[IMAGE:images/p.jpg]\n\n[QUOTE] The end.")
+        assert len(moved) == 1
+
     def test_assign_image_names(self):
         names = assign_image_names(["A/img.jpg", "B/img.jpg", "A/cover.jpg"])
         assert names == {"A/img.jpg": "img.jpg", "B/img.jpg": "B_img.jpg",
