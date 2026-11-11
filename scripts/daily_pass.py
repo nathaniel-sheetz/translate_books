@@ -277,7 +277,11 @@ def _policy_line(payload: dict) -> str:
     policy = payload.get("policy")
     if not policy:
         return "review only (--no-apply)"
-    return f"{'/'.join(policy['types'])} @ {policy['confidence_floor']}"
+    line = f"{'/'.join(policy['types'])} @ {policy['confidence_floor']}"
+    overrides = policy.get("confidence_floor_by_type") or {}
+    if overrides:
+        line += " (" + ", ".join(f"{t} @ {f}" for t, f in overrides.items()) + ")"
+    return line
 
 
 def _write_digest(payload: dict) -> Path:
@@ -429,6 +433,7 @@ def _execute(args, run_id: str) -> dict:
     policy = None if args.no_apply else Policy(
         types=tuple(settings["auto_apply_types"]),
         confidence_floor=settings["confidence_floor"],
+        confidence_floor_by_type=settings["confidence_floor_by_type"],
         dry_run=args.dry_run,
     )
 

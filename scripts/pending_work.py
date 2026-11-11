@@ -160,6 +160,12 @@ def _print_human(payload: dict) -> None:
     """A per-book table. The JSON is authoritative; this is the reading copy."""
     totals = payload["totals"]
     settings = payload["settings"]
+    # Print the floors that will actually apply, not the raw config values.
+    policy = registry.Policy(
+        types=tuple(settings["auto_apply_types"]),
+        confidence_floor=settings["confidence_floor"],
+        confidence_floor_by_type=settings.get("confidence_floor_by_type") or {},
+    )
     print(
         f"{totals['books']} book(s) in scope · {totals['books_with_work']} with work "
         f"· {totals['pending']} pending annotation(s) · {totals['blocked']} blocked"
@@ -167,7 +173,8 @@ def _print_human(payload: dict) -> None:
     print(
         f"  default_cli={settings['default_cli']}  "
         f"exclude_groups={','.join(settings['exclude_groups']) or '(none)'}  "
-        f"auto_apply={','.join(settings['auto_apply_types'])}@{settings['confidence_floor']}"
+        f"auto_apply={','.join(policy.types)}@{policy.confidence_floor}"
+        + "".join(f" {t}@{f}" for t, f in policy.confidence_floor_by_type.items())
     )
     print()
 

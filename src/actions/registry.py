@@ -22,7 +22,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ def confidence_rank(value: str | None) -> int:
         return 0
 
 
-def resolve_confidence_floor(value: str | None) -> str:
+def resolve_confidence_floor(value: str | None, key: str = "confidence_floor") -> str:
     """Validate a configured floor, falling back to the strictest label.
 
     ``confidence_floor`` is the gate that keeps a reviewer's unsure prose out of
@@ -58,8 +59,8 @@ def resolve_confidence_floor(value: str | None) -> str:
     if label in CONFIDENCE_ORDER:
         return label
     _log.warning(
-        "unrecognised confidence_floor %r; falling back to %r",
-        value, CONFIDENCE_ORDER[-1],
+        "unrecognised %s %r; falling back to %r",
+        key, value, CONFIDENCE_ORDER[-1],
     )
     return CONFIDENCE_ORDER[-1]
 
@@ -180,10 +181,20 @@ class Policy:
     ``mode: "replace"`` and its text is published into the EPUB by
     :mod:`src.endnotes`, so it is a human's call forever. ``confidence_floor``
     excludes individual results the reviewer itself was unsure of.
+
+    ``confidence_floor_by_type`` overrides the floor for the types it names (a
+    word-choice comment is cheaper to get wrong than an inconsistency verdict).
+    Each value is validated like the global floor, so a typo fails closed to
+    ``high`` rather than open. Type names are trimmed and lowercased; a name
+    outside ``types`` is logged and dropped, since the type gate would reject it
+    anyway and keeping it would only make the status lines misleading. The
+    result is a read-only mapping, so nothing can skip the validation after
+    construction.
     """
 
     types: tuple[str, ...] = ("word_choice", "inconsistency", "flag")
     confidence_floor: str = "high"
+    confidence_floor_by_type: Mapping[str, str] = field(default_factory=dict, hash=False)
     dry_run: bool = False
 
     def __post_init__(self) -> None:
@@ -191,6 +202,32 @@ class Policy:
         object.__setattr__(
             self, "confidence_floor", resolve_confidence_floor(self.confidence_floor)
         )
+        by_type = self.confidence_floor_by_type
+        if not isinstance(by_type, Mapping):
+            if by_type:
+                _log.warning(
+                    "confidence_floor_by_type must be an object, got %s; ignoring it",
+                    type(by_type).__name__,
+                )
+            by_type = {}
+        resolved: dict[str, str] = {}
+        for raw, value in by_type.items():
+            name = str(raw).strip().lower()
+            if name not in self.types:
+                _log.warning(
+                    "confidence_floor_by_type names %r, which is not in "
+                    "auto_apply_types %s; ignoring it",
+                    raw, list(self.types),
+                )
+                continue
+            resolved[name] = resolve_confidence_floor(
+                value, f"confidence_floor_by_type.{name}"
+            )
+        object.__setattr__(self, "confidence_floor_by_type", MappingProxyType(resolved))
+
+    def floor_for(self, item_type: str | None) -> str:
+        """The floor that applies to one annotation type."""
+        return self.confidence_floor_by_type.get(str(item_type), self.confidence_floor)
 
     def accepts(self, item: dict[str, Any]) -> bool:
         """True when one ``review.apply`` plan entry clears both gates.
@@ -205,13 +242,14 @@ class Policy:
         if item.get("type") not in self.types:
             return False
         return confidence_rank(item.get("confidence")) >= confidence_rank(
-            self.confidence_floor
+            self.floor_for(item.get("type"))
         )
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "types": list(self.types),
             "confidence_floor": self.confidence_floor,
+            "confidence_floor_by_type": dict(self.confidence_floor_by_type),
             "dry_run": self.dry_run,
         }
 

@@ -183,6 +183,40 @@ def test_no_apply_reviews_without_writing(driver, monkeypatch):
     assert payload["policy"] is None
 
 
+def test_per_type_floors_reach_the_policy(driver, monkeypatch):
+    make_book(driver, "a")
+    monkeypatch.setattr(
+        "src.actions.scope.load_app_config",
+        lambda: {"automation": {"confidence_floor_by_type": {"word_choice": "medium"}}},
+    )
+    fake = FakeAction()
+    seen = []
+    original = fake.auto_apply
+
+    def recording(project_dir, policy):
+        seen.append(policy)
+        return original(project_dir, policy)
+
+    fake.auto_apply = recording
+    install(monkeypatch, fake)
+
+    payload = run([])
+
+    assert [p.floor_for("word_choice") for p in seen] == ["medium"]
+    assert seen[0].floor_for("flag") == "high"
+    assert payload["policy"]["confidence_floor_by_type"] == {"word_choice": "medium"}
+
+
+def test_policy_line_shows_per_type_overrides():
+    base = {"types": ["word_choice", "flag"], "confidence_floor": "high"}
+    assert daily_pass._policy_line({"policy": base}) == "word_choice/flag @ high"
+    with_override = {**base, "confidence_floor_by_type": {"word_choice": "medium"}}
+    assert (
+        daily_pass._policy_line({"policy": with_override})
+        == "word_choice/flag @ high (word_choice @ medium)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dry run
 # ---------------------------------------------------------------------------

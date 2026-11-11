@@ -154,6 +154,24 @@ def test_a_string_where_a_list_belongs_is_refused(monkeypatch, key):
     assert settings[key] == ascope.AUTOMATION_DEFAULTS[key]
 
 
+def test_a_non_object_per_type_floor_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        "src.actions.scope.load_app_config",
+        lambda: {"automation": {"confidence_floor_by_type": "medium"}},
+    )
+    assert ascope.automation_config()["confidence_floor_by_type"] == {}
+
+
+def test_a_per_type_floor_object_overrides(monkeypatch):
+    monkeypatch.setattr(
+        "src.actions.scope.load_app_config",
+        lambda: {"automation": {"confidence_floor_by_type": {"word_choice": "medium"}}},
+    )
+    settings = ascope.automation_config()
+    assert settings["confidence_floor_by_type"] == {"word_choice": "medium"}
+    assert settings["confidence_floor"] == "high"
+
+
 def test_a_real_list_still_overrides(monkeypatch):
     monkeypatch.setattr(
         "src.actions.scope.load_app_config",
