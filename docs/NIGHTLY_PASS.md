@@ -127,7 +127,8 @@ Defaults: `word_choice`, `inconsistency`, `flag`, at `high`. `confidence_floor_b
 lowers (or raises) the floor for the types it names, e.g. `{"word_choice": "medium"}`
 lets medium-confidence word-choice comments through while inconsistency and flag
 verdicts still need `high`. An unrecognised value falls back to `high`, like the
-global floor.
+global floor. Type names are trimmed and lowercased; a name outside
+`auto_apply_types` is logged and ignored.
 
 Those three are *append-only* writes after an `— IA:` marker into an append-only
 log — the reader can see them, and the original record survives untouched.

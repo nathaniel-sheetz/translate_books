@@ -132,6 +132,33 @@ def test_per_type_floor_is_in_the_payload():
     assert payload["confidence_floor_by_type"] == {"word_choice": "medium"}
 
 
+def test_per_type_names_are_normalised_and_unknown_ones_dropped(caplog):
+    policy = Policy(
+        confidence_floor_by_type={" Word_Choice ": "medium", "footnote": "low"}
+    )
+    assert dict(policy.confidence_floor_by_type) == {"word_choice": "medium"}
+    assert policy.accepts(_item(type="word_choice", confidence="medium")) is True
+    assert "footnote" in caplog.text
+
+
+def test_per_type_floor_cannot_be_changed_after_construction():
+    policy = Policy(confidence_floor_by_type={"word_choice": "medium"})
+    with pytest.raises(TypeError):
+        policy.confidence_floor_by_type["flag"] = "low"
+
+
+def test_policy_is_hashable_with_per_type_floors():
+    hash(Policy())
+    hash(Policy(confidence_floor_by_type={"word_choice": "medium"}))
+
+
+def test_a_per_type_floor_can_raise_above_the_global_floor():
+    policy = Policy(confidence_floor="medium", confidence_floor_by_type={"flag": "high"})
+    assert policy.accepts(_item(type="flag", confidence="medium")) is False
+    assert policy.accepts(_item(type="flag", confidence="high")) is True
+    assert policy.accepts(_item(type="word_choice", confidence="medium")) is True
+
+
 def test_rejects_a_type_outside_the_list():
     assert Policy().accepts(_item(type="footnote")) is False
 

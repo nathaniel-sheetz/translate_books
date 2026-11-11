@@ -341,6 +341,27 @@ def test_auto_apply_holds_below_the_confidence_floor(project, budget, confidence
     assert len(result.held) == 1
 
 
+def test_a_per_type_floor_lets_only_that_type_through(project, budget):
+    write_annotations(project, [
+        _ann(es_idx=0, sub_id="u1"),
+        _ann(es_idx=1, ann_type="inconsistency", content="¿Ana o Anita?", sub_id="u2"),
+    ])
+    _reviewed(project, budget, confidence="medium")
+
+    policy = Policy(confidence_floor_by_type={"word_choice": "medium"})
+    result = action.auto_apply(project, policy)
+
+    assert len(result.applied) == 1
+    assert len(result.held) == 1
+    live = [
+        json.loads(line)
+        for line in (project / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    written = [a for a in live if "texto de la IA" in a["content"]]
+    assert [a["type"] for a in written] == ["word_choice"]
+
+
 def test_auto_apply_dry_run_writes_nothing(project, budget):
     write_annotations(project, [_ann(sub_id="u1")])
     _reviewed(project, budget)

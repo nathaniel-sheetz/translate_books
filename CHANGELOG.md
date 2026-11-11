@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.85.1.0] - 2026-11-11
+
+### Added
+- **A per-type confidence floor for the nightly pass's unattended annotation writes.** `automation.confidence_floor_by_type` in `app_config.json` overrides `confidence_floor` for the types it names. For example, `{"word_choice": "medium"}` lets medium-confidence word-choice comments through while inconsistency and flag verdicts still need `high`. An override can also raise a floor above the global one.
+  - Each value is checked like the global floor, so an unrecognised one falls back to `high` and the log warning names the key it came from. Type names are trimmed and lowercased. A name outside `auto_apply_types` is logged and ignored. A value that isn't an object is replaced by the default.
+  - The resolved overrides appear in the nightly digest's policy line, in the run's `policy` payload, and in `pending_work.py`'s status line, which now prints the floors that will actually apply rather than the raw config values.
+
 ## [0.85.0.0] - 2026-11-10
 
 ### Added
