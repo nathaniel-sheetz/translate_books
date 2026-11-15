@@ -1,5 +1,5 @@
 # Dialogue Compliance Judge
-# Version: 1.7
+# Version: 1.8
 # Checks whether a Spanish translation follows the project's house dialogue
 # rules. Variables: dialogue_rules, source_text, translation_text
 
@@ -20,6 +20,17 @@ song, a spell, a letter, an inscription), not a dialogue turn, even when a
 character speaks or sings it. It takes no raya or », and its quotation marks
 follow the book's style guide, which you do not see. Report nothing on a [QUOTE]
 paragraph except English quotation marks ("..." or “...”) inside it.
+
+A speech tag (an inciso that begins with a verb of saying: dijo, respondió,
+exclamó…) may run on in the same sentence with y, e or pero and a further
+action by the same speaker, after a comma or a semicolon (both are correct; do
+not report the choice): —Sí, te besaré —respondió la princesa, y lo besó.
+That is correct Spanish, not an inciso-punctuation error: the rule about an
+action after a complete spoken sentence applies only to an inciso with no verb
+of saying. Do not suggest splitting it into —dijo X. Y…. What follows such a
+tag can still be a finding when it brings in a different actor or becomes an
+extended sequence of actions: report that under narration-separation, as a
+warning.
 
 <dialogue_rules>
 {{dialogue_rules}}
