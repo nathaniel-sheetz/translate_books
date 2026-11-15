@@ -2,7 +2,12 @@
 
 import json
 
-from src.book_metadata import epub_kwargs, load_book_metadata
+import pytest
+
+from src.book_metadata import (
+    epub_kwargs, export_site_texts, load_book_metadata, load_site_metadata, normalize_forms,
+    unknown_forms,
+)
 
 
 def _write(path, data):
@@ -86,3 +91,87 @@ def test_epub_kwargs_override_wins_and_blanks_become_none(tmp_path):
     assert kwargs["language"] == "es"
     assert kwargs["translator"] is None
     assert kwargs["subjects"] is None
+
+
+def test_normalize_forms_orders_dedupes_and_drops_unknown():
+    assert normalize_forms(["III/IV", "ii", "II", "Form 7"]) == ["II", "III/IV"]
+    assert normalize_forms("v/vi") == ["V/VI"]
+    assert normalize_forms(None) == []
+    assert unknown_forms(["I", "Form 7"]) == ["Form 7"]
+
+
+def test_site_metadata_blank_when_unset(tmp_path):
+    assert load_site_metadata(tmp_path) == {"forms": [], "adaptations": "", "parent_notes": ""}
+
+
+def test_site_metadata_reads_project_json(tmp_path):
+    _write(tmp_path / "project.json",
+           {"forms": ["II", "I", "bogus"], "adaptations": "Notas.", "parent_notes": "Cuidado."})
+    assert load_site_metadata(tmp_path) == {
+        "forms": ["I", "II"], "adaptations": "Notas.", "parent_notes": "Cuidado."}
+
+
+def test_site_fields_stay_out_of_epub_kwargs(tmp_path):
+    _write(tmp_path / "project.json", {"spanish_title": "Bambi", "forms": ["I"],
+                                       "adaptations": "A", "parent_notes": "P"})
+    kwargs = epub_kwargs(tmp_path)
+    assert not {"forms", "adaptations", "parent_notes"} & set(kwargs)
+
+
+def _site_book(tmp_path, slug="bambi"):
+    book_dir = tmp_path / "site" / "libros" / slug
+    book_dir.mkdir(parents=True)
+    (book_dir / "libro.toml").write_text('titulo = "Bambi"\n', encoding="utf-8")
+    return book_dir
+
+
+def test_export_site_texts_writes_both_files_into_the_slug_folder(tmp_path):
+    proj = tmp_path / "proj"
+    _write(proj / "project.json", {"spanish_title": "Bambi", "adaptations": "- Sin abreviar.",
+                                   "parent_notes": "**Muerte.** Cap. II."})
+    book_dir = _site_book(tmp_path)
+    result = export_site_texts(proj, tmp_path / "site")
+    assert result["site_slug"] == "bambi"
+    assert [(f["file"], f["action"]) for f in result["files"]] == [
+        ("adaptaciones.md", "created"), ("padres.md", "created")]
+    assert (book_dir / "adaptaciones.md").read_text(encoding="utf-8") == "- Sin abreviar.\n"
+    assert (book_dir / "padres.md").read_text(encoding="utf-8") == "**Muerte.** Cap. II.\n"
+
+
+def test_export_site_texts_reports_unchanged_and_updated(tmp_path):
+    proj = tmp_path / "proj"
+    _write(proj / "project.json", {"spanish_title": "Bambi", "adaptations": "A", "parent_notes": "P"})
+    book_dir = _site_book(tmp_path)
+    (book_dir / "adaptaciones.md").write_bytes(b"A\r\n")  # a CRLF checkout of the same text
+    (book_dir / "padres.md").write_text("old\n", encoding="utf-8")
+    actions = {f["file"]: f["action"] for f in export_site_texts(proj, tmp_path / "site")["files"]}
+    assert actions == {"adaptaciones.md": "unchanged", "padres.md": "updated"}
+    assert (book_dir / "padres.md").read_text(encoding="utf-8") == "P\n"
+
+
+def test_export_site_texts_blank_field_leaves_the_file_alone(tmp_path):
+    proj = tmp_path / "proj"
+    _write(proj / "project.json", {"spanish_title": "Bambi", "adaptations": "A"})
+    book_dir = _site_book(tmp_path)
+    (book_dir / "padres.md").write_text("escrito a mano\n", encoding="utf-8")
+    files = export_site_texts(proj, tmp_path / "site")["files"]
+    assert files[1]["action"] == "skipped"
+    assert (book_dir / "padres.md").read_text(encoding="utf-8") == "escrito a mano\n"
+
+
+def test_export_site_texts_dry_run_writes_nothing(tmp_path):
+    proj = tmp_path / "proj"
+    _write(proj / "project.json", {"spanish_title": "Bambi", "adaptations": "A", "parent_notes": "P"})
+    book_dir = _site_book(tmp_path)
+    result = export_site_texts(proj, tmp_path / "site", dry_run=True)
+    assert [f["action"] for f in result["files"]] == ["created", "created"]
+    assert not (book_dir / "adaptaciones.md").exists()
+
+
+def test_export_site_texts_uses_site_slug_and_needs_the_folder(tmp_path):
+    proj = tmp_path / "proj"
+    _write(proj / "project.json", {"spanish_title": "Bambi", "site_slug": "bambi-vida",
+                                   "adaptations": "A"})
+    _site_book(tmp_path)  # folder "bambi", not "bambi-vida"
+    with pytest.raises(FileNotFoundError, match="bambi-vida"):
+        export_site_texts(proj, tmp_path / "site")

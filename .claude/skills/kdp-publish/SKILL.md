@@ -316,6 +316,19 @@ has errors.
 file that still carries the name. That text is in the book's body and must be removed
 from the translation, not from the metadata.
 
+`verify-epub` checks the **Kindle** build, the default `harness.py epub` target. The
+free-library build (`--target libre`, written to `libre/<site_slug>.epub`) is never
+uploaded to KDP. It fails `no_external_links` by design. A failed
+`no_leftover_markup` means a `[LIBRE]`/`[KINDLE]` tag or a `{{SITIO}}`/`{{COMENTARIOS}}`
+variable reached a page that does not resolve them, usually a chapter. Optional
+pages the build also reads:
+- **`about_book.json`:** «Sobre este libro».
+- **`project.json` `edition`:** `{version, status}`, shown on the title page.
+
+`project.json` `forms`, `adaptations` and `parent_notes` are for the website only.
+They are not in either EPUB. The KDP reading age is set on its own and never derived
+from `forms`.
+
 ### 7. Hand-off
 
 Give the user the `kdp_listing.json` path and the manual checklist:

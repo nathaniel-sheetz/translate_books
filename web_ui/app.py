@@ -306,14 +306,25 @@ def _load_translator_note(project_id: str) -> dict:
     On corrupt JSON, the bad file is moved aside as ``.bak.<unix-ts>`` and
     defaults are returned (ENG REVIEW decision 1B).
     """
+    return _load_page_sidecar(project_id, "translator_note.json", _read_translator_note_template())
+
+
+def _save_translator_note(project_id: str, heading: str, body: str) -> None:
+    """Persist the translator note to projects/<id>/translator_note.json."""
+    _save_page_sidecar(project_id, "translator_note.json", heading, body)
+
+
+def _load_page_sidecar(project_id: str, filename: str, default_body: str = "") -> dict:
+    """``{heading, body}`` from a generated page's sidecar (translator note,
+    Sobre este libro), with ``default_body`` when the file is missing or corrupt."""
     import logging
     import time
 
     log = logging.getLogger(__name__)
-    note_path = _resolve_project_dir(project_id) / "translator_note.json"
+    note_path = _resolve_project_dir(project_id) / filename
 
     def _defaults() -> dict:
-        return {"heading": "", "body": _read_translator_note_template()}
+        return {"heading": "", "body": default_body}
 
     if not note_path.exists():
         return _defaults()
@@ -326,14 +337,13 @@ def _load_translator_note(project_id: str) -> dict:
             backup = note_path.with_suffix(f".json.bak.{int(time.time())}")
             note_path.rename(backup)
             log.warning(
-                "Corrupt translator_note.json renamed to %s; returning defaults",
-                backup.name,
+                "Corrupt %s renamed to %s; returning defaults", filename, backup.name,
             )
         except OSError as exc:
-            log.warning("Failed to rename corrupt translator_note.json: %s", exc)
+            log.warning("Failed to rename corrupt %s: %s", filename, exc)
         return _defaults()
     except OSError as exc:
-        log.warning("Could not read translator_note.json: %s", exc)
+        log.warning("Could not read %s: %s", filename, exc)
         return _defaults()
 
     return {
@@ -342,9 +352,9 @@ def _load_translator_note(project_id: str) -> dict:
     }
 
 
-def _save_translator_note(project_id: str, heading: str, body: str) -> None:
-    """Persist the translator note to projects/<id>/translator_note.json."""
-    note_path = _resolve_project_dir(project_id) / "translator_note.json"
+def _save_page_sidecar(project_id: str, filename: str, heading: str, body: str) -> None:
+    """Persist a generated page's ``{heading, body}`` sidecar in the project folder."""
+    note_path = _resolve_project_dir(project_id) / filename
     note_path.parent.mkdir(parents=True, exist_ok=True)
     with open(note_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -9942,8 +9952,9 @@ def epub_status(project_id):
     config = _load_project_config(project_id)
 
     # Find existing epub (filename may be based on title, not folder name)
-    epub_files = list(project_dir.glob("*.epub"))
-    epub_file = max(epub_files, key=lambda p: p.stat().st_mtime) if epub_files else None
+    epub_file = _built_epub(project_dir, "kindle")
+    libre_file = _built_epub(project_dir, "libre")
+    edition = config.get("edition") if isinstance(config.get("edition"), dict) else {}
 
     # Surface the cover image that ``src.epub_builder._resolve_cover`` will
     # auto-pick at build time, so the Export tab can render a thumbnail
@@ -9968,6 +9979,9 @@ def epub_status(project_id):
         "chapters": chapters,
         "epub_exists": epub_file is not None,
         "epub_filename": epub_file.name if epub_file else None,
+        "libre_epub_filename": libre_file.name if libre_file else None,
+        "edition_version": str(edition.get("version") or ""),
+        "edition_status": str(edition.get("status") or ""),
         "title": config.get("title", ""),
         "spanish_title": config.get("spanish_title", ""),
         "author": config.get("author", ""),
@@ -10015,9 +10029,112 @@ def save_translator_note(project_id):
     return jsonify({"ok": True})
 
 
+_ABOUT_BOOK_FILE = "about_book.json"
+
+
+@app.route("/api/project/<project_id>/about-book", methods=["GET"])
+def get_about_book(project_id):
+    """Return the per-book «Sobre este libro» page (heading + body; blank when unset)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify(_load_page_sidecar(project_id, _ABOUT_BOOK_FILE))
+
+
+@app.route("/api/project/<project_id>/about-book", methods=["POST"])
+def save_about_book(project_id):
+    """Persist the per-book «Sobre este libro» page (heading + body)."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    heading = "" if data.get("heading") is None else str(data.get("heading"))
+    body = "" if data.get("body") is None else str(data.get("body"))
+    if len(body.encode("utf-8")) > _TRANSLATOR_NOTE_BODY_MAX_BYTES:
+        return jsonify({"error": "Body exceeds 100KB limit"}), 400
+    _save_page_sidecar(project_id, _ABOUT_BOOK_FILE, heading, body)
+    return jsonify({"ok": True})
+
+
+_SITE_TEXT_KEYS = ("adaptations", "parent_notes")
+
+
+@app.route("/api/project/<project_id>/site-metadata", methods=["GET"])
+def get_site_metadata(project_id):
+    """Return the book page's site-only fields (forms, adaptations, parent notes)
+    and the form choices the Export tab offers."""
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    from src.book_metadata import FORMS, load_site_metadata
+    return jsonify({
+        **load_site_metadata(project_dir),
+        "form_choices": [{"code": code, "label": label} for code, label in FORMS],
+    })
+
+
+@app.route("/api/project/<project_id>/site-metadata", methods=["POST"])
+def save_site_metadata(project_id):
+    """Persist any of ``forms``, ``adaptations``, ``parent_notes`` to project.json.
+
+    A key left out of the request is left alone; a blank text or an empty
+    ``forms`` removes the key. An unknown form code is refused.
+    """
+    if not _safe_id(project_id):
+        return jsonify({"error": "Bad request"}), 400
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return jsonify({"error": "Project not found"}), 404
+    from src.book_metadata import normalize_forms, unknown_forms
+
+    data = request.get_json(silent=True) or {}
+    updates: dict = {}
+    if "forms" in data:
+        forms = data.get("forms") or []
+        if not isinstance(forms, list):
+            return jsonify({"error": "forms must be a list"}), 400
+        bad = unknown_forms(forms)
+        if bad:
+            return jsonify({"error": f"Unknown forms: {', '.join(bad)}"}), 400
+        updates["forms"] = normalize_forms(forms)
+    for key in _SITE_TEXT_KEYS:
+        if key in data:
+            text = "" if data.get(key) is None else str(data.get(key)).strip()
+            if len(text.encode("utf-8")) > _TRANSLATOR_NOTE_BODY_MAX_BYTES:
+                return jsonify({"error": f"{key} exceeds 100KB limit"}), 400
+            updates[key] = text
+
+    config = _load_project_config(project_id)
+    before = dict(config)
+    for key, value in updates.items():
+        if value:
+            config[key] = value
+        else:
+            config.pop(key, None)
+    if config != before:
+        _save_project_config(project_id, config)
+    return jsonify({"ok": True})
+
+
 # Shared with src.epub_builder's default output path, so the CLI builds and
-# this route write the same <Spanish title>.epub.
-from src.epub_builder import epub_filename as _epub_filename  # noqa: E402
+# this route write the same <Spanish title>.epub (or libre/<site_slug>.epub).
+from src.epub_builder import TARGETS as _EPUB_TARGETS, default_epub_path as _default_epub_path  # noqa: E402
+from src.epub_builder import epub_filename as _epub_filename  # noqa: E402,F401
+
+
+def _built_epub(project_dir: Path, target: str) -> Optional[Path]:
+    """The newest EPUB of ``target``: ``*.epub`` in the project folder for
+    Kindle, ``libre/*.epub`` for the free-library build."""
+    folder = project_dir / "libre" if target == "libre" else project_dir
+    epub_files = list(folder.glob("*.epub"))
+    return max(epub_files, key=lambda p: p.stat().st_mtime) if epub_files else None
 
 
 @app.route("/api/project/<project_id>/build-epub", methods=["POST"])
@@ -10029,6 +10146,11 @@ def build_epub_route(project_id):
             -> _save_translator_note(...)            # disk = source of truth
             -> _load_translator_note(...)            # round-trip back
             -> build_epub(..., translator_note_*)    # appended as final chapter
+
+    Everything else the form sends (metadata, «Sobre este libro», the
+    edition) is written to disk first, then the build reads it back through
+    ``src.book_metadata.epub_kwargs`` like every other build path.
+    ``target`` is ``kindle`` (default) or ``libre``.
     """
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
@@ -10037,6 +10159,9 @@ def build_epub_route(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     data = request.get_json(silent=True) or {}
+    target = str(data.get("target") or "kindle")
+    if target not in _EPUB_TARGETS:
+        return jsonify({"error": f"Unknown target {target!r}"}), 400
     config = _load_project_config(project_id)
     # Same resolver every other build path uses (src.book_metadata): the
     # request wins, then project.json, then the harness config / ingest report.
@@ -10050,7 +10175,6 @@ def build_epub_route(project_id):
     # project.json. Persist whatever the form submitted so re-exports keep the
     # same metadata without retyping (mirrors the translator-note pattern).
     metadata_keys = ("translator", "description", "rights", "source_title", "publisher")
-    metadata: dict[str, str] = {}
     config_dirty = False
     for key in metadata_keys:
         if key in data:
@@ -10058,9 +10182,17 @@ def build_epub_route(project_id):
             if config.get(key, "") != val:
                 config[key] = val
                 config_dirty = True
-            metadata[key] = val
-        else:
-            metadata[key] = str(config.get(key, "") or "").strip()
+    # The edition: a blank version clears it.
+    if isinstance(data.get("edition"), dict):
+        version = str(data["edition"].get("version") or "").strip()
+        status = str(data["edition"].get("status") or "").strip()
+        edition = {"version": version, "status": status} if version else None
+        if config.get("edition") != edition:
+            if edition is None:
+                config.pop("edition", None)
+            else:
+                config["edition"] = edition
+            config_dirty = True
     # Also persist author/Spanish title when supplied so the form is the source of truth.
     # Only what the form sent: a resolver fallback must not get written back.
     # The form's Title is the EPUB's (Spanish) title, so it lands in
@@ -10092,6 +10224,12 @@ def build_epub_route(project_id):
         if len(b.encode("utf-8")) > _TRANSLATOR_NOTE_BODY_MAX_BYTES:
             return jsonify({"error": "Translator note body exceeds 100KB limit"}), 400
         _save_translator_note(project_id, h, b)
+    if "about_heading" in data or "about_body" in data:
+        h = "" if data.get("about_heading") is None else str(data.get("about_heading"))
+        b = "" if data.get("about_body") is None else str(data.get("about_body"))
+        if len(b.encode("utf-8")) > _TRANSLATOR_NOTE_BODY_MAX_BYTES:
+            return jsonify({"error": "Sobre este libro body exceeds 100KB limit"}), 400
+        _save_page_sidecar(project_id, _ABOUT_BOOK_FILE, h, b)
 
     coll = _collection_at(project_dir)
     if coll is not None:
@@ -10101,7 +10239,7 @@ def build_epub_route(project_id):
         from src.epub_builder import build_collection_epub
         try:
             built = build_collection_epub(
-                coll.path, allow_partial=bool(data.get("allow_partial")))
+                coll.path, allow_partial=bool(data.get("allow_partial")), target=target)
         except (ValueError, FileNotFoundError) as e:
             return jsonify({"error": str(e)}), 400
         except Exception as e:
@@ -10119,29 +10257,23 @@ def build_epub_route(project_id):
     note = _load_translator_note(project_id)
 
     try:
+        from src.book_metadata import epub_kwargs
         from src.epub_builder import build_epub_from_chunks
-        epub_filename = _epub_filename(title, project_id)
-        epub_output = project_dir / epub_filename
-        result = build_epub_from_chunks(
-            project_path=project_dir,
-            title=title,
-            author=author,
-            language=language,
-            output_path=epub_output,
-            chapter_heading_config=chapter_heading_config,
+        # Disk is current now, so the shared resolver sees what the form sent.
+        # The note still comes from _load_translator_note, whose template
+        # fallback the resolver does not have.
+        kwargs = epub_kwargs(
+            project_dir, title=title, author=author, language=language,
             translator_note_heading=note.get("heading", ""),
             translator_note_body=note.get("body", ""),
-            translator=metadata["translator"] or None,
-            description=metadata["description"] or None,
-            rights=metadata["rights"] or None,
-            source_title=metadata["source_title"] or None,
-            publisher=metadata["publisher"] or None,
-            subtitle=book_meta["subtitle"] or None,
-            subjects=book_meta["subjects"] or None,
-            date=book_meta["date"] or None,
-            front_matter=book_meta["front_matter"],
-            edition_notice_heading=book_meta["edition_notice_heading"] or None,
-            edition_notice_body=book_meta["edition_notice_body"] or None,
+        )
+        result = build_epub_from_chunks(
+            project_path=project_dir,
+            output_path=_default_epub_path(
+                project_dir, kwargs["title"], target=target, site_slug=kwargs.get("site_slug")),
+            chapter_heading_config=chapter_heading_config,
+            target=target,
+            **kwargs,
         )
         epub_path = result.path
 
@@ -10149,6 +10281,7 @@ def build_epub_route(project_id):
 
         return jsonify({
             "ok": True,
+            "target": target,
             "filename": epub_path.name,
             "size_bytes": size_bytes,
             "chapters_included": len(result.included),
@@ -10163,16 +10296,18 @@ def build_epub_route(project_id):
 
 @app.route("/api/project/<project_id>/download-epub")
 def download_epub(project_id):
-    """Serve the built EPUB file for download."""
+    """Serve the built EPUB file for download (``?target=libre`` for the free build)."""
     if not _safe_id(project_id):
         return jsonify({"error": "Bad request"}), 400
     project_dir = _resolve_project_dir(project_id)
-    epub_files = list(project_dir.glob("*.epub"))
-    if not epub_files:
+    target = request.args.get("target", "kindle")
+    if target not in _EPUB_TARGETS:
+        return jsonify({"error": f"Unknown target {target!r}"}), 400
+    # The most recently modified epub of that target
+    epub_file = _built_epub(project_dir, target)
+    if epub_file is None:
         return jsonify({"error": "EPUB not found. Build it first."}), 404
-    # Use the most recently modified epub
-    epub_file = max(epub_files, key=lambda p: p.stat().st_mtime)
-    return send_from_directory(str(project_dir), epub_file.name, as_attachment=True)
+    return send_from_directory(str(epub_file.parent), epub_file.name, as_attachment=True)
 
 
 # ============================================================================

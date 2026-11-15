@@ -250,6 +250,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cep.add_argument("collection")
     cep.add_argument("--allow-partial", dest="allow_partial", action="store_true",
                      help="Build even when a member has untranslated chapters (they are left out)")
+    cep.add_argument("--target", choices=("kindle", "libre"), default="kindle",
+                     help="kindle (default, the KDP upload) or libre (the free-library download)")
 
     def add_split_opts(p):
         """Shared chapter-split controls for the split-preview / split commands."""
@@ -516,6 +518,21 @@ def _build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--title", default=None)
     ep.add_argument("--author", default=None)
     ep.add_argument("--language", default=None)
+    ep.add_argument("--target", choices=("kindle", "libre"), default="kindle",
+                    help="kindle (default): the KDP upload, links as plain text. libre: the "
+                         "free-library download (live links, house license, edition version), "
+                         "written under libre/")
+
+    # site-export -----------------------------------------------------------
+    sxp = sub.add_parser("site-export",
+                         help="Copy project.json adaptations and parent_notes into the site "
+                              "repo's libros/<site_slug>/ (adaptaciones.md, padres.md)")
+    add_project(sxp)
+    sxp.add_argument("--site-dir", default=None,
+                     help="The site repo checkout (default: site.repo_dir in "
+                          "prompts/publish_defaults.json)")
+    sxp.add_argument("--dry-run", action="store_true",
+                     help="Report what would change without writing")
 
     # footnotes <action> ----------------------------------------------------
     fn = sub.add_parser("footnotes",
@@ -830,7 +847,8 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "collection-status":
         return flow.collection_status(args.collection)
     if cmd == "collection-epub":
-        return flow.collection_epub(args.collection, allow_partial=args.allow_partial)
+        return flow.collection_epub(args.collection, allow_partial=args.allow_partial,
+                                    target=args.target)
     if cmd == "style-rule":
         if args.action == "list":
             return flow.style_rule_list(args.project)
@@ -930,7 +948,10 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "combine":
         return flow.combine(args.project, chapters=args.chapters)
     if cmd == "epub":
-        return flow.epub(args.project, title=args.title, author=args.author, language=args.language)
+        return flow.epub(args.project, title=args.title, author=args.author, language=args.language,
+                         target=args.target)
+    if cmd == "site-export":
+        return flow.site_export(args.project, site_dir=args.site_dir, dry_run=args.dry_run)
     if cmd == "footnotes":
         if args.action == "translate":
             backend = None if args.backend == "auto" else args.backend

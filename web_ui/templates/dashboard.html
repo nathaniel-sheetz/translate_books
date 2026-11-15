@@ -797,6 +797,45 @@
                        placeholder="e.g. Translation © 2026 …; original in the public domain">
             </div>
 
+            <div class="dash-field" style="max-width:400px; margin-bottom:16px;">
+                <label>Edition</label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="epub-edition-version" placeholder="Version, e.g. 1.0" style="flex:1;">
+                    <select id="epub-edition-status">
+                        <option value="beta">beta</option>
+                        <option value="revisada">revisada</option>
+                    </select>
+                </div>
+                <small style="color:#666;">Shown on the title page («Versión 1.0 (beta)»). Required for the Libre build.</small>
+            </div>
+
+            <!-- Cross-reference: placeholder mirrors src.epub_builder._DEFAULT_ABOUT_BOOK_HEADING -->
+            <div class="dash-field" style="max-width:400px; margin-bottom:8px;">
+                <label>Sobre este libro heading</label>
+                <input type="text" id="epub-about-heading" placeholder="Sobre este libro">
+            </div>
+            <div class="dash-field" style="margin-bottom:16px;">
+                <label>Sobre este libro</label>
+                <textarea id="epub-about-body" rows="6" style="width:100%;"
+                          placeholder="Optional. The first page after the contents, before chapter 1. Leave blank to omit."></textarea>
+                <span class="status-msg" id="epub-about-status"></span>
+            </div>
+
+            <!-- Choices come from src.book_metadata.FORMS via /site-metadata -->
+            <fieldset class="dash-field" style="margin-bottom:16px; border:1px solid #ddd; padding:8px 12px;">
+                <legend>Website (mislibrosvivos.com)</legend>
+                <label>Recommended forms</label>
+                <div id="site-forms" style="display:flex; flex-wrap:wrap; gap:4px 16px; margin-bottom:12px;"></div>
+                <label for="site-adaptations">Adaptations and additions</label>
+                <textarea id="site-adaptations" rows="4" style="width:100%; margin-bottom:12px;"
+                          placeholder="What this edition adapted or added (notes, new illustrations, translated maps…)."></textarea>
+                <label for="site-parent-notes">Parent notes</label>
+                <textarea id="site-parent-notes" rows="6" style="width:100%;"
+                          placeholder="What parents should know before reading it with their children (the book page's «Lo que los padres deben saber»)."></textarea>
+                <span class="status-msg" id="site-meta-status"></span>
+                <small style="color:#666; display:block;">Site-only: not in either EPUB. Markdown allowed.</small>
+            </fieldset>
+
             <!-- Cross-reference: placeholder mirrors src.epub_builder._DEFAULT_TRANSLATOR_HEADING -->
             <div class="dash-field" style="max-width:400px; margin-bottom:8px;">
                 <label>Translator note heading</label>
@@ -809,9 +848,20 @@
                 <textarea id="epub-translator-note" rows="10" style="width:100%;"
                           placeholder="Optional. Leave blank to omit this chapter."></textarea>
                 <span class="status-msg" id="epub-translator-note-status"></span>
+                <small style="color:#666; display:block;">
+                    In the note, copyright page and Sobre este libro: a paragraph starting
+                    <code>[LIBRE]</code> or <code>[KINDLE]</code> appears only in that build;
+                    <code>[texto](https://…)</code> is a live link in Libre and plain text in Kindle;
+                    <code>{{ '{{SITIO}}' }}</code> and <code>{{ '{{COMENTARIOS}}' }}</code> are the site and feedback links
+                    from <code>prompts/publish_defaults.json</code>.
+                </small>
             </div>
 
             <div class="btn-row">
+                <select id="epub-target" title="Kindle: the KDP upload. Libre: the free-library download (live links, license, version).">
+                    <option value="kindle">Kindle (KDP)</option>
+                    <option value="libre">Libre (free library)</option>
+                </select>
                 <button class="btn-primary" id="btn-build-epub">Build EPUB</button>
                 <a class="btn-secondary" id="btn-download-epub" style="display:none; text-decoration:none;" download>Download EPUB</a>
                 <span class="status-msg" id="epub-status"></span>

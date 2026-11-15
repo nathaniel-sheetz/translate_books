@@ -39,8 +39,26 @@ Two problems, one tool:
 - **Language:** `target_lang_code`, then `language_code`, then `es`.
 - **Everything else** comes from `project.json` alone: `subtitle`, `translator`,
   `description`, `rights`, `source_title`, `publisher`, `subjects`,
-  `publication_date`, `front_matter`.
-- **Sidecars:** `translator_note.json` and `edition_notice.json`.
+  `publication_date`, `front_matter`, `edition` (`{version, status}`), `site_slug`
+  (else the slugified title).
+- **Sidecars:** `translator_note.json`, `edition_notice.json` and `about_book.json`
+  («Sobre este libro»).
+- **`publish`:** the house settings from `prompts/publish_defaults.json` (gitignored;
+  the `.example` twin is the fallback): the license, the site and feedback links, the
+  edition-label format. A book's own `project.json` `license` overrides the house one
+  field by field, and `"license": null` opts it out.
+- **Site-only fields:** `forms`, `adaptations` and `parent_notes` are for the
+  mislibrosvivos.com book page and never go into either EPUB.
+  `load_site_metadata(project_dir)` reads them, not `load_book_metadata`. The Export
+  tab's Website box edits them through `/api/project/<id>/site-metadata`.
+  - **`forms`:** one or more recommended forms, which the site shows instead of an age
+    range: `I` (years 1–3), `II` (4–6), `III/IV` (7–9), `V/VI` (10–12). They are
+    stored in that order, and `book_metadata.FORMS` is the list.
+  - **`adaptations`:** what this edition adapted or added.
+  - **`parent_notes`:** the page's «Lo que los padres deben saber» (`padres.md`).
+
+  Both texts are Markdown. The KDP reading age (`audience.reading_age_min/max`) is
+  separate and is not derived from `forms`.
 
 `epub_kwargs(project_dir, **overrides)` turns that into `build_epub` keyword
 arguments. A non-blank override wins. Callers:
@@ -75,6 +93,32 @@ Both generated pages come before `nav` in the spine and stay out of the TOC: the
 pages a reader turns past, not places they navigate to. Both are opt-in. A build with
 none of these arguments produces the same OPF and spine as before (covered by
 `tests/test_epub_builder.py::test_no_front_matter_keys_leaves_spine_unchanged`).
+
+## Build targets: `kindle` and `libre`
+
+`build_epub(..., target=...)`, `build_collection_epub(..., target=...)`, and
+`--target` on `build_epub.py`, `harness.py epub` and `harness.py collection-epub`. The
+Export tab has a picker beside Build EPUB.
+
+| | `kindle` (default) | `libre` |
+|---|---|---|
+| File | `<Spanish title>.epub` in the project folder | `libre/<site_slug>.epub` |
+| `[texto](https://…)` | `texto` | a live link |
+| `[KINDLE]` / `[LIBRE]` blocks | `[KINDLE]` kept | `[LIBRE]` kept |
+| Edition line («Versión 1.2 (beta)») | on the title page when `edition` is set | required; the title page is turned on |
+| House license | only if `license.targets` lists `kindle` | appended to the copyright page and `dc:rights`, with the Scripture carve-out when `quotations.json` has rows |
+| `quotations.json` over the limits | builds | refuses |
+
+The markup is read only in the generated pages: the translator note, the copyright
+page and «Sobre este libro» (`about_book.xhtml`, after `nav` and first in the TOC).
+Chapters are never touched. In those pages, `{{SITIO}}` and `{{COMENTARIOS}}` resolve
+to the house site and feedback URL. The feedback URL gets `libro=<site_slug>` and
+`edicion=<status>`. A blank one leaves its link as plain text and logs a warning.
+A page that is blank in a target (all `[LIBRE]`, say) is left out of that build.
+
+`verify-epub` adds two checks for the Kindle file:
+- **`no_external_links`:** fails on any live link.
+- **`no_leftover_markup`:** fails on any tag or variable that reached the output.
 
 ## Collections
 

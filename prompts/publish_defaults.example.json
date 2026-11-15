@@ -1,0 +1,16 @@
+{
+  "about": "Per-user settings for the free-library EPUB (build target `libre`). Copy to publish_defaults.json (gitignored) to make them your own; this example is what a clone without one reads. `license` is stated on the copyright page of every build whose target is listed in `targets`: `statement` takes {name} and {url}, and `scripture_carveout` is added when the book's quotations.json has NBLA rows. A book overrides any field with its own project.json `license`, or opts out with `\"license\": null`. `site.url` and `site.feedback_url` fill {{SITIO}} and {{COMENTARIOS}} in the translator note, the copyright page and Sobre este libro; the feedback link gets ?libro=<site_slug>&edicion=<status> appended. A blank one leaves its link as plain text. `site.repo_dir` is the local checkout of the site repo, where `harness.py site-export` writes a book's adaptaciones.md and padres.md. `edition_label` is the title-page line built from project.json `edition` {version, status}.",
+  "license": {
+    "name": "CC BY-NC-SA 4.0",
+    "url": "https://creativecommons.org/licenses/by-nc-sa/4.0/deed.es",
+    "targets": ["libre"],
+    "statement": "Esta traducción se publica bajo la licencia [{name}]({url}).",
+    "scripture_carveout": "Las citas de la NBLA quedan fuera de esta licencia y conservan el aviso de The Lockman Foundation."
+  },
+  "site": {
+    "url": "https://example.org",
+    "feedback_url": "",
+    "repo_dir": ""
+  },
+  "edition_label": "Versión {version} ({status})"
+}

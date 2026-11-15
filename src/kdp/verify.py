@@ -9,6 +9,7 @@ each thing ``apply`` asked for against what is actually in the file.
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -23,6 +24,9 @@ _NS = {
     "dc": "http://purl.org/dc/elements/1.1/",
     "c": "urn:oasis:names:tc:opendocument:xmlns:container",
 }
+
+_EXTERNAL_LINK_RE = re.compile(r'<a\b[^>]*\bhref="(?:https?:|mailto:)', re.IGNORECASE)
+_LEFTOVER_MARKUP_RE = re.compile(r'\[(?:LIBRE|KINDLE)\]|\{\{(?:SITIO|COMENTARIOS)\}\}', re.IGNORECASE)
 
 
 def newest_epub(project_dir: Path) -> Optional[Path]:
@@ -132,6 +136,15 @@ def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any
         _check("title_page_first", bool(spine) and spine[0] == "titlepage.xhtml", f"spine starts {spine[:3]}")
     if want["edition_notice_body"].strip():
         _check("edition_notice", "copyright.xhtml" in spine[:3], f"spine starts {spine[:3]}")
+
+    # The Kindle build renders [texto](url) as text; a live link here means the
+    # libre file was picked up, or markup slipped past the target switch.
+    linked = sorted(href for href, text in got["texts"].items() if _EXTERNAL_LINK_RE.search(text))
+    _check("no_external_links", not linked,
+           f"live links in {linked}" if linked else "none")
+    leftover = sorted(href for href, text in got["texts"].items() if _LEFTOVER_MARKUP_RE.search(text))
+    _check("no_leftover_markup", not leftover,
+           f"[LIBRE]/[KINDLE]/{{{{SITIO}}}}/{{{{COMENTARIOS}}}} left in {leftover}" if leftover else "none")
 
     named = sorted(href for href, text in got["texts"].items() if names_trademark(text))
     if names_trademark(got["description"] + "\n" + got["rights"]):

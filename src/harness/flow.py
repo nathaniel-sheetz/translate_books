@@ -717,16 +717,17 @@ def collection_status(slug: str) -> dict:
     }
 
 
-def collection_epub(slug: str, *, allow_partial: bool = False) -> dict:
+def collection_epub(slug: str, *, allow_partial: bool = False, target: str = "kindle") -> dict:
     """Build the volume EPUB (fails on an untranslated member unless ``allow_partial``)."""
     from src import collection as collection_mod
     from src.epub_builder import build_collection_epub
 
     cdir = collection_mod.resolve_collection_dir(slug)
-    result = build_collection_epub(cdir, allow_partial=allow_partial)
+    result = build_collection_epub(cdir, allow_partial=allow_partial, target=target)
     return {
         "collection": cdir.name,
         "collection_dir": str(cdir),
+        "target": target,
         "epub_path": str(result.path),
         "works": result.works,
         "endnotes": result.endnotes,
@@ -4031,13 +4032,15 @@ def translate(
     return _stream_result("translate", *_run_script(cmd))
 
 
-def epub(project: str, *, title: str | None = None, author: str | None = None, language: str | None = None) -> int | dict:
+def epub(project: str, *, title: str | None = None, author: str | None = None, language: str | None = None,
+         target: str = "kindle") -> int | dict:
     """Build the EPUB from translated chunks.
 
     Metadata resolves through ``src.book_metadata``: ``project.json``
     (``spanish_title``, translator, description, front matter...) first, the
     setup config's title/author only as a fallback — so a book whose Spanish
-    title is set no longer ships under its English one.
+    title is set no longer ships under its English one. ``target="libre"``
+    builds the free-library edition into ``libre/`` beside the Kindle one.
     """
     from src.book_metadata import load_book_metadata
 
@@ -4059,6 +4062,7 @@ def epub(project: str, *, title: str | None = None, author: str | None = None, l
         "--title", title,
         "--author", author,
         "--language", language,
+        "--target", target,
     ]))
 
 
@@ -5015,6 +5019,31 @@ _CONFIG_SET_KEYS = {
 }
 
 
+def site_export(project: str, *, site_dir: str | None = None, dry_run: bool = False) -> dict:
+    """Copy ``project.json`` ``adaptations`` and ``parent_notes`` into the site repo.
+
+    They land as ``libros/<site_slug>/adaptaciones.md`` and ``padres.md``, which
+    the site's ``build.py`` renders as «Sobre esta edición» and «Lo que los padres
+    deben saber». ``site_dir`` overrides the house ``site.repo_dir``. Commits and
+    pushes stay in the site repo.
+    """
+    from src.book_metadata import export_site_texts, site_repo_dir
+    from src.harness_guard import HarnessValidationError
+
+    project_dir = state.resolve_project_dir(project)
+    target = site_dir or site_repo_dir()
+    if not target:
+        raise HarnessValidationError(
+            "no site repo: pass --site-dir, or set site.repo_dir in prompts/publish_defaults.json")
+    if not Path(target).is_dir():
+        raise HarnessValidationError(f"site repo not found: {target}")
+    try:
+        result = export_site_texts(project_dir, Path(target), dry_run=dry_run)
+    except FileNotFoundError as exc:
+        raise HarnessValidationError(str(exc)) from exc
+    return {"project": project_dir.name, "site_dir": str(target), **result}
+
+
 def config_set(project: str, *, key: str, value: str) -> dict:
     """Persist one once-per-book skill decision into ``.harness/config.json``.
 
@@ -5872,6 +5901,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "collection-epub": {
         "collection": "the collection slug",
         "collection_dir": "the collection folder",
+        "target": "'kindle' or 'libre'",
         "epub_path": "the written volume EPUB",
         "works": "list of {slug, included, skipped}: chapter ids built and left out, per member",
         "endnotes": "total endnotes in the volume's Notas page",
@@ -6078,6 +6108,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "command": "the harness command ('epub')",
         "exit_code": "wrapped-script exit code (0 = ok)",
         "stage": "'epub'",
+        "target": "'kindle' (the KDP upload) or 'libre' (the free-library download, under libre/)",
         "path": "path to the built .epub",
         "size_kb": "EPUB size in KB",
         "included": "list of translated chapter_ids included",
@@ -6212,6 +6243,17 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
             "the on/off config keys; `last_review` is .harness/book_review/state.json"
         ),
         "suggested_reference": "translate-harness references/*.md path the skill should Read next",
+    },
+    "site-export": {
+        "project": "project slug",
+        "site_dir": "the site repo the texts were written into",
+        "site_slug": "the book's folder name under libros/",
+        "book_dir": "full path of that folder",
+        "dry_run": "true when nothing was written",
+        "files": (
+            "one row per file: {file, action: created|updated|unchanged|skipped, chars "
+            "(written text length) or reason (why skipped)}"
+        ),
     },
     "config-set": {
         "project": "project slug",
