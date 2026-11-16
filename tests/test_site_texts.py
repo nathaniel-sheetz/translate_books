@@ -89,6 +89,29 @@ def test_check_refuses_markup_the_epub_page_cannot_render(body, needle):
     assert any(needle in e for e in report["errors"]), report
 
 
+@pytest.mark.parametrize("body, needle", [
+    ("[LIBRE] Ver el [sitio]({{ SITIO }}).", "unknown variable"),
+    ("[LIBRE] Ver el [sitio]({{sitio}}).", "unknown variable"),
+    ("[LIBRE] Ver [aquí](www.x.org).", "not https://"),
+])
+def test_check_refuses_variables_and_links_the_build_prints_as_typed(body, needle):
+    # The builder replaces only {{SITIO}}/{{COMENTARIOS}} spelled exactly, and
+    # renders a link only to http(s), mailto or a variable.
+    report = site_texts.check({"about_book": {"body": body}}, endnotes=None)
+    assert any(needle in e for e in report["errors"]), report
+
+
+@pytest.mark.parametrize("body", [
+    "[LIBRE] Ver la [guía]({{SITIO}}/libros/mi-libro).",
+    "[LIBRE] Ver la [guía](https://ejemplo.org/guia).",
+    "[LIBRE] Escríbanos a [la casa](mailto:casa@ejemplo.org).",
+    "[LIBRE] Una [etiqueta]() sin enlace.",
+])
+def test_check_accepts_the_links_the_build_renders(body):
+    report = site_texts.check({"about_book": {"body": body}}, endnotes=None)
+    assert not report["errors"], report
+
+
 def test_check_warns_on_a_link_outside_a_libre_paragraph():
     body = "En [nuestro sitio]({{SITIO}}) hay una guía."
     report = site_texts.check({"about_book": {"body": body}}, endnotes=None)
@@ -151,7 +174,12 @@ def test_apply_writes_both_files_and_keeps_other_keys(tmp_path):
     assert project["adaptations"] == GOOD["adaptations"]
     assert project["parent_notes"] == GOOD["parent_notes"]
     assert project["spanish_title"] == "Mi libro"
-    assert "description" not in project and "resumen" not in project
+    # The description is the book's one description: plain text here (dc:description),
+    # Markdown on the site. The resumen is the site's alone.
+    assert project["description"] == (
+        "¿Por qué el río nunca se acaba?\nCada tarde, la abuela Inés cuenta algo verdadero.")
+    assert "resumen" not in project
+    assert not (project_dir / "edition_notice.json").exists()
     about = json.loads((project_dir / "about_book.json").read_text(encoding="utf-8"))
     assert about == GOOD["about_book"]
 

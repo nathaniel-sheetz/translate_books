@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.86.0.0] - 2026-11-16
+
+### Added
+- **A libre build target: the free-library EPUB.** `epub` and `collection-epub` now take `--target kindle|libre`. A libre build:
+  - writes to `libre/<site_slug>.epub` and has live links;
+  - puts the house license from `prompts/publish_defaults.json` (with a tracked `.example` twin) on the copyright page;
+  - always has a title page and needs an edition version on it («Versión 1.0 (beta)»);
+  - refuses to build when `quotations.json` is over the permission-to-quote limits.
+  
+  `[KINDLE]` and `[LIBRE]` at the start of a paragraph keep it in one build only, and `{{SITIO}}`/`{{COMENTARIOS}}` fill in the house URLs. The dashboard's Export tab gets a target picker, edition fields and a download link for each build. `harness site-export` copies the adaptations and parent notes into the site repo.
+- **The `book-metadata` skill and `scripts/book_metadata.py`.** They draft everything a finished book says about itself: the edition (title page, copyright page, version, description, subjects), the site page texts, «Lo que los padres deben saber», the recommended forms, and the EPUB's «Sobre este libro». The draft starts from the family or theology review.
+  - Commands: `status`, `facts`, `notes`, `changes`, `source-diff`, `draft` / `draft --pull`, `check`, `apply`, `site` and `verify`. `--project` also takes a collection.
+  - New modules: `src/edition.py` (the edition block's rules and what applying it writes), `src/edition_record.py` (the notes, the hand edits and the source diff) and `src/epub_readback.py` (pages, endnotes and stated note counts read back from a built EPUB).
+- `kdp_publish.py published --asin` records the live listing.
+
+### Changed
+- **The edition moved from `kdp_publish.py apply` to `book_metadata.py apply`.** KDP `apply` now writes only `kdp_listing.json`. KDP `check` holds the listing to the book: the same title and credits, and the note count of the built EPUB. It also refuses KDP Select for a book that is on the site.
+- KDP `check`, `apply` and the report now check whether the book is on the site when they run, instead of reading `facts.json`. A libre build made after `facts` ran now still blocks KDP Select.
+- `source-diff` matches sentences first and then compares only the sentences that differ, word by word. On a 91k-word book it takes 0.5 s instead of about 100 s, with the same result.
+- When a count «N notas» has no «del traductor» after it and is below the built EPUB's total, it is now a warning, not an error, because it may count some of the notes. A total («N notas del traductor», or the English forms) must still match exactly.
+- Dialogue judge prompt 1.8: a speech tag may run on with *y/e/pero* and an action by the same speaker.
+
+### Fixed
+- `check` now refuses markup that the build would print as typed. That covers a variable with spaces or the wrong case (`{{ SITIO }}`), and a link whose URL isn't https, mailto or a variable (a bare `www.x.org`).
+  - It checks the copyright page's body as well as «Sobre este libro».
+  - `verify` catches the same leftovers in a built EPUB.
+- Applying an edition no longer turns a book's title page back on when the block leaves `title_page` out.
+- The Export tab no longer overwrites a stored edition status that isn't one of its two options, and no longer turns a blank status into "beta".
+- A footnote added after the build (`annotations.jsonl`) now marks the EPUB as out of date before the note counts are checked.
+- A wrong placeholder in the house edition label or license statement now falls back to the default wording. Before, every build failed.
+- A `site_slug` that isn't a slug (`../x`, `Mi Libro`) is turned into one before it is used in a path.
+- `book_metadata.py draft --pull` reports a malformed `texts.json` as a JSON error instead of a traceback.
+
 ## [0.85.1.0] - 2026-11-11
 
 ### Added

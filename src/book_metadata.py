@@ -10,7 +10,7 @@ publisher, so the same book came out with different metadata depending on
 which button built it.
 
 ``load_book_metadata`` is the one resolver. ``project.json`` is the source of
-truth (the web UI's Export tab and ``kdp_publish.py apply`` both write it);
+truth (the web UI's Export tab and ``book_metadata.py apply`` both write it);
 the harness config and the ingest report are fallbacks for the title and the
 author (and the harness config for the language). Every field beyond those is opt-in: a book whose ``project.json``
 lacks a key builds without it, exactly as before.
@@ -90,6 +90,22 @@ def slugify(text: str) -> str:
     """``"Sermones cortos para niños"`` -> ``"sermones-cortos-para-ninos"``."""
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
+
+
+_SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _site_slug(raw: str) -> str:
+    """``project.json`` ``site_slug`` as one safe path component.
+
+    It names ``libros/<slug>/`` in the site repo and ``libre/<slug>.epub``, so
+    a hand-edited ``"../x"`` or ``"Mi Libro"`` is slugified rather than used.
+    """
+    if not raw or _SLUG_RE.fullmatch(raw):
+        return raw
+    safe = slugify(raw)
+    logger.warning("project.json site_slug %r is not a slug; using %r", raw, safe)
+    return safe
 
 
 def load_publish_defaults() -> dict[str, Any]:
@@ -225,7 +241,8 @@ def load_book_metadata(project_dir: Path) -> dict[str, Any]:
         "about_book_heading": about_heading,
         "about_book_body": about_body,
         "edition": _edition(project.get("edition")),
-        "site_slug": _text(project.get("site_slug")) or slugify(title) or project_dir.name,
+        "site_slug": _site_slug(_text(project.get("site_slug"))) or slugify(title)
+                     or project_dir.name,
         "publish": _publish_settings(project),
     }
 

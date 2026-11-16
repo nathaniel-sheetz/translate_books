@@ -65,6 +65,8 @@ _TARGET_TAG_RE = re.compile(r'^\[(LIBRE|KINDLE)\][ \t]*\n?', re.IGNORECASE)
 _LINK_RE = re.compile(r'\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()]+)\)')
 _EMPTY_LINK_RE = re.compile(r'\[([^\[\]\n]+)\]\(\s*\)')
 _PAGE_VAR_RE = re.compile(r'\{\{(SITIO|COMENTARIOS)\}\}')
+_DEFAULT_EDITION_LABEL = 'Versión {version} ({status})'
+_DEFAULT_LICENSE_STATEMENT = 'Esta traducción se publica bajo la licencia [{name}]({url}).'
 
 # Characters Windows reserves in a filename. ':' is the dangerous one here --
 # NTFS reads it as the alternate-data-stream separator, so a title like
@@ -219,8 +221,13 @@ def edition_label(edition: Optional[Dict[str, str]], fmt: Optional[str] = None) 
     """
     if not edition or not (edition.get('version') or '').strip():
         return ''
-    label = (fmt or 'Versión {version} ({status})').format(
-        version=edition['version'].strip(), status=(edition.get('status') or '').strip())
+    values = {'version': edition['version'].strip(),
+              'status': (edition.get('status') or '').strip()}
+    try:
+        label = (fmt or _DEFAULT_EDITION_LABEL).format(**values)
+    except (KeyError, IndexError, ValueError):
+        # A placeholder the house format names wrongly must not fail every build.
+        label = _DEFAULT_EDITION_LABEL.format(**values)
     return re.sub(r'\s*\(\s*\)', '', label).strip()
 
 
@@ -1668,9 +1675,12 @@ def _resolve_publication(
     license_ = publish.get('license')
     if license_ and target in (license_.get('targets') or [LIBRE]):
         name = str(license_['name']).strip()
-        statement = (license_.get('statement')
-                     or 'Esta traducción se publica bajo la licencia [{name}]({url}).')
-        statement = statement.format(name=name, url=(license_.get('url') or '').strip())
+        values = {'name': name, 'url': (license_.get('url') or '').strip()}
+        try:
+            statement = (license_.get('statement') or _DEFAULT_LICENSE_STATEMENT).format(**values)
+        except (KeyError, IndexError, ValueError):
+            # A placeholder the house statement names wrongly must not fail every build.
+            statement = _DEFAULT_LICENSE_STATEMENT.format(**values)
         carveout = (license_.get('scripture_carveout') or '').strip()
         if carveout and any(r.get('rows') for r in records):
             statement = f'{statement} {carveout}'

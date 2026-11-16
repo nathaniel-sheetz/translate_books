@@ -3,7 +3,8 @@
 
 Written after every apply, at the project root beside ``edition_notice.json`` and
 ``kdp_listing.json``, and read by :func:`src.kdp.facts.gather`. This pass records;
-kdp-publish decides what the numbers mean for the copyright page.
+book-metadata puts the version's notice on the copyright page, and kdp-publish decides
+what the numbers mean for selling the book.
 
 - **Every accepted NBLA-worded card counts**, whether or not it needed an edit.
   A book already corrected by hand (short-sermons) must not count close to zero.

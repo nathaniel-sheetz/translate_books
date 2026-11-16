@@ -214,7 +214,7 @@ python scripts/build_epub.py projects/my-book --title "My Book" --author "An Aut
 resolves through `src/book_metadata.py` (`project.json` first, then the harness setup
 config, then the ingest report), so `--title` and `--author` are overrides. The
 translator, description, rights, subjects, the translator note and any title or
-copyright page `kdp_publish.py apply` set up come along without flags.
+copyright page `book_metadata.py apply` set up come along without flags.
 
 *Harness equivalent:* `harness epub`
 *Dashboard equivalent:* Stage 8
@@ -442,39 +442,75 @@ python scripts/kdp_publish.py check       --project my-book
 python scripts/kdp_publish.py report      --project my-book
 python scripts/kdp_publish.py apply       --project my-book --dry-run
 python scripts/kdp_publish.py verify-epub --project my-book
+python scripts/kdp_publish.py published   --project my-book --asin B0XXXXXXXX
 ```
 
-Book facts (the catalog record, what the edition adds, rights flags), Amazon evidence
-(autocomplete phrases, comparable books' Best Sellers Rank ladders, the
-rank-to-sales signal of a category), KDP's listing rules, and the write to
-`project.json` / `edition_notice.json` / `kdp_listing.json`. `comps` and `category` need
-Playwright (`requirements-kdp.txt`). Full reference: [`KDP_PUBLISH.md`](KDP_PUBLISH.md).
+The store's half of a book, run after `book_metadata.py` (below) has written the
+edition. Book facts (the catalog record, what the edition adds, rights flags, whether
+the book is on the site), Amazon evidence (autocomplete phrases, comparable books' Best
+Sellers Rank ladders, the rank-to-sales signal of a category), KDP's listing rules, and
+the write to `kdp_listing.json`, the only file `apply` writes. `check` holds the listing
+to the book: the same title and credits, the note count of the built EPUB, and no KDP
+Select for a book that is on the site. `published` records the live listing's ASIN.
+`comps` and `category` need Playwright (`requirements-kdp.txt`). Each command's result
+is kept in `.harness/kdp/last_output.<command>.json`. Full reference:
+[`KDP_PUBLISH.md`](KDP_PUBLISH.md).
 
 *Skill equivalent:* `/kdp-publish`
 
-### `book_metadata.py` — the site texts and «Sobre este libro»
+### `book_metadata.py` — the edition, the site texts and «Sobre este libro»
 
 ```bash
-python scripts/book_metadata.py status --project my-book
-python scripts/book_metadata.py check  --project my-book
-python scripts/book_metadata.py apply  --project my-book --dry-run
-python scripts/book_metadata.py site   --project my-book --dry-run
+python scripts/book_metadata.py status      --project my-book
+python scripts/book_metadata.py notes       --project my-book
+python scripts/book_metadata.py changes     --project my-book
+python scripts/book_metadata.py source-diff --project my-book --against reviewed.txt --min-words 10
+python scripts/book_metadata.py draft       --project my-book
+python scripts/book_metadata.py check       --project my-book
+python scripts/book_metadata.py apply       --project my-book --dry-run
+python scripts/book_metadata.py site        --project my-book --dry-run
+python scripts/book_metadata.py verify      --project my-book
 ```
 
-The deterministic half of the `book-metadata` skill, which drafts a book's site
-description, «Sobre esta edición», «Lo que los padres deben saber», recommended forms
-and the EPUB's «Sobre este libro» page into `.harness/metadata/texts.json`.
+The deterministic half of the `book-metadata` skill, which drafts everything a book
+says about itself into `.harness/metadata/texts.json`: the edition (title, credits,
+copyright page, edition version), the description, «Sobre esta edición», «Lo que los
+padres deben saber», the recommended forms and the EPUB's «Sobre este libro» page. It
+runs before `kdp_publish.py`, and it is all a book needs when it goes to the site with
+no Kindle listing. `--project` takes a collection slug too.
 
-- `status`: the content review found, the built EPUB and its note count, what is
-  already written, whether the book has a folder in the site repo.
-- `check`: refuses markup «Sobre este libro» would show as typed characters (bold,
-  lists, subheadings, a misplaced `[LIBRE]`), an unknown form code, and a note count
-  that differs from the built EPUB.
-- `apply`: writes `forms`, `adaptations` and `parent_notes` to `project.json` and the
+- `status`: the content review found (and whether it was written on this project's
+  `source.txt`), the built EPUB and its note count, the edition as it stands, the
+  chapter numbers the EPUB shows, the book's facts and their open questions, whether
+  the book has a folder in the site repo. Writes every current text to
+  `.harness/metadata/current.json`.
+- `facts`: the same facts `kdp_publish.py facts` gathers (`.harness/kdp/facts.json`).
+- `notes`: every endnote of the built EPUB under the chapter heading the reader sees,
+  with the ones that read like memos named.
+- `changes`: the rows of `corrections_applied.jsonl` where a number or a proper noun
+  changed. Style edits and quotation-pass rows are counted, not listed.
+- `source-diff`: what `source.txt` changed against the text a content review read,
+  word by word, blind to case, punctuation and line breaks. `--min-words` lists the
+  rewrites and leaves the small fixes to the count.
+- `draft`: writes the texts into the marked fenced blocks of `metadata_draft.md`
+  (`<!-- text: KEY -->` above each); `--pull` reads a user's edited blocks back into
+  `texts.json` verbatim.
+- `check`: refuses markup «Sobre este libro» or the copyright page would show as typed
+  characters (bold, lists, subheadings, a misplaced `[LIBRE]`, a variable other than
+  `{{SITIO}}`/`{{COMENTARIOS}}` spelled exactly, a link that is not https, mailto or a
+  variable), an unknown form code, a note count that differs from the built EPUB (in any
+  text and on the copyright page; a bare «N notas» below the total is only a warning,
+  since it may count some of them), a chapter cited
+  past the last one, a copyright page without the quoted Bible version's notice, and the
+  Gutenberg name anywhere in the book.
+- `apply`: writes the edition, the plain-text description, `forms`, `adaptations` and
+  `parent_notes` to `project.json`, the copyright page to `edition_notice.json` and the
   page to `about_book.json`. A key left out of `texts.json` is left alone.
 - `site`: writes `adaptaciones.md`, `padres.md`, `descripcion.md` and the `resumen`
   line of `libro.toml` in the site repo's `libros/<site_slug>/` (`site.repo_dir` in
   `prompts/publish_defaults.json`). The folder must exist; commits stay in that repo.
+- `verify`: reads the built EPUBs back, the Kindle build and the libre build, each
+  under its own rules (`--target` picks one).
 
 The writing rules live in `prompts/book_metadata_guide.md` (per-user; tracked twin
 `book_metadata_guide.example.md`).

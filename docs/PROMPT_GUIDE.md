@@ -69,7 +69,7 @@ The overridable prompts, exactly as listed in `.gitignore`:
 | `prompts/kdp_defaults.json` | `kdp_defaults.example.json` | The KDP listing's house defaults: canonical translator name, imprint, title descriptors, rights and copyright-page templates (`docs/KDP_PUBLISH.md`) |
 | `prompts/publish_defaults.json` | `publish_defaults.example.json` | The free-library (`libre`) build's house settings: the license and its Scripture carve-out, the site and feedback links, the edition-label format (`docs/KDP_PUBLISH.md`, "Build targets") |
 | `prompts/kdp_description_examples.md` | `kdp_description_examples.example.md` | The Amazon descriptions the `kdp-publish` drafting step imitates, annotated |
-| `prompts/book_metadata_guide.md` | `book_metadata_guide.example.md` | The voice, the writing rules and the model texts the `book-metadata` skill follows when it drafts a book's site texts and «Sobre este libro» |
+| `prompts/book_metadata_guide.md` | `book_metadata_guide.example.md` | The voice, the writing rules and the model texts the `book-metadata` skill follows when it drafts a book's copyright page, description, site texts and «Sobre este libro» |
 | `prompts/quotation_judge_examples.json` | `quotation_judge_examples.example.json` | The worked cards the `quotation-pass` judge wave reads before ruling on proposed NBLA edits |
 
 Every other prompt in `prompts/` is tracked directly — edit it in place and the change is

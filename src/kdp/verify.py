@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Optional
 
+from src import epub_readback
 from src.book_metadata import load_book_metadata
 from src.kdp.gutenberg import names_trademark
 from src.kdp.validate import _DESCRIPTOR_RE
@@ -26,13 +27,18 @@ _NS = {
 }
 
 _EXTERNAL_LINK_RE = re.compile(r'<a\b[^>]*\bhref="(?:https?:|mailto:)', re.IGNORECASE)
-_LEFTOVER_MARKUP_RE = re.compile(r'\[(?:LIBRE|KINDLE)\]|\{\{(?:SITIO|COMENTARIOS)\}\}', re.IGNORECASE)
+# A tag, any {{…}} variable (spaced or misspelled ones too), or a Markdown link
+# the renderer left as typed because its URL was not http(s)/mailto.
+_LEFTOVER_MARKUP_RE = re.compile(
+    r'\[(?:LIBRE|KINDLE)\]|\{\{[^{}\n]*\}\}|\[[^\[\]\n<>]+\]\([^)\s<>]*\)', re.IGNORECASE)
 
 
-def newest_epub(project_dir: Path) -> Optional[Path]:
-    """The most recently written ``*.epub`` in the project folder (what the web UI serves)."""
-    epubs = sorted(Path(project_dir).glob("*.epub"), key=lambda p: p.stat().st_mtime)
-    return epubs[-1] if epubs else None
+KINDLE, LIBRE = "kindle", "libre"
+
+#: The generated pages whose stated note counts must match the notes page.
+_COUNTED_PAGES = (epub_readback.COPYRIGHT_PAGE, epub_readback.ABOUT_BOOK_PAGE)
+
+newest_epub = epub_readback.newest_epub
 
 
 def read_opf(epub_path: Path) -> dict[str, Any]:
@@ -94,12 +100,59 @@ def _authors_landed(project_dir: Path, author: str, creators: list[str]) -> bool
     return author in creators
 
 
-def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any]:
+def _note_checks(texts: dict[str, str]) -> list[tuple[str, bool, str]]:
+    """The notes page against the pages that count it, and against memo-like notes."""
+    by_name = {href.rsplit("/", 1)[-1]: text for href, text in texts.items()}
+    notes_page = by_name.get(epub_readback.ENDNOTES_PAGE, "")
+    notes = epub_readback.parse_endnotes(notes_page)
+    total = epub_readback.count_endnotes_in(notes_page)
+    wrong: list[str] = []
+    for name in _COUNTED_PAGES:
+        if name not in by_name:
+            continue
+        errors, _warnings = epub_readback.note_count_issues(
+            name, epub_readback.plain(by_name[name]), total, expect_count=False)
+        wrong.extend(errors)
+    kinds: dict[str, list[str]] = {"memo": [], "short": []}
+    for note in notes:
+        kind = epub_readback.memo_like(note["text"])
+        if kind:
+            kinds[kind].append(f"{note['number']} («{note['text']}»)")
+    # Only a memo fails the build; a short note is named so someone looks at it.
+    parts = []
+    if kinds["memo"]:
+        parts.append(f"read like memos, not notes: {', '.join(kinds['memo'])}")
+    if kinds["short"]:
+        parts.append(f"short and without a final period, worth a look: {', '.join(kinds['short'])}")
+    return [
+        ("note_counts_agree", not wrong,
+         "; ".join(wrong) if wrong else f"{total} notes, and no page says otherwise"),
+        ("footnotes_look_like_glosses", not kinds["memo"],
+         "; ".join(parts) if parts else f"{len(notes)} notes read"),
+    ]
+
+
+def verify(project_dir: Path, epub_path: Optional[Path] = None, *,
+           target: str = KINDLE) -> dict[str, Any]:
+    """Check a built EPUB against ``project.json``.
+
+    ``target`` is the build being checked. ``kindle`` (the default, what goes to
+    KDP) may carry no live link; ``libre`` (the free-library build) carries
+    them by design, so that one check is left out. With no ``epub_path`` the
+    newest build of that target is read.
+    """
     project_dir = Path(project_dir)
-    epub_path = Path(epub_path) if epub_path else newest_epub(project_dir)
+    if target not in (KINDLE, LIBRE):
+        return {"ok": False, "epub": None, "checks": [], "target": target,
+                "error": f"unknown target {target!r} (expected {KINDLE} or {LIBRE})"}
+    if epub_path is None:
+        epub_path = (epub_readback.libre_epub(project_dir) if target == LIBRE
+                     else newest_epub(project_dir))
+    epub_path = Path(epub_path) if epub_path else None
     if not epub_path or not epub_path.exists():
-        return {"ok": False, "epub": None, "checks": [],
-                "error": "no EPUB found; build one with harness.py epub first"}
+        hint = "harness.py epub --target libre" if target == LIBRE else "harness.py epub"
+        return {"ok": False, "epub": None, "checks": [], "target": target,
+                "error": f"no EPUB found; build one with {hint} first"}
     want = load_book_metadata(project_dir)
     got = read_opf(epub_path)
     checks: list[dict[str, Any]] = []
@@ -139,12 +192,15 @@ def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any
 
     # The Kindle build renders [texto](url) as text; a live link here means the
     # libre file was picked up, or markup slipped past the target switch.
-    linked = sorted(href for href, text in got["texts"].items() if _EXTERNAL_LINK_RE.search(text))
-    _check("no_external_links", not linked,
-           f"live links in {linked}" if linked else "none")
+    if target == KINDLE:
+        linked = sorted(href for href, text in got["texts"].items()
+                        if _EXTERNAL_LINK_RE.search(text))
+        _check("no_external_links", not linked,
+               f"live links in {linked}" if linked else "none")
     leftover = sorted(href for href, text in got["texts"].items() if _LEFTOVER_MARKUP_RE.search(text))
     _check("no_leftover_markup", not leftover,
-           f"[LIBRE]/[KINDLE]/{{{{SITIO}}}}/{{{{COMENTARIOS}}}} left in {leftover}" if leftover else "none")
+           f"[LIBRE]/[KINDLE], a {{{{…}}}} variable or a [text](url) link left in {leftover}"
+           if leftover else "none")
 
     named = sorted(href for href, text in got["texts"].items() if names_trademark(text))
     if names_trademark(got["description"] + "\n" + got["rights"]):
@@ -152,4 +208,8 @@ def verify(project_dir: Path, epub_path: Optional[Path] = None) -> dict[str, Any
     _check("no_gutenberg_trademark", not named,
            f"named in {named}" if named else "not named anywhere")
 
-    return {"ok": all(c["ok"] for c in checks), "epub": str(epub_path), "checks": checks}
+    for name, passed, detail in _note_checks(got["texts"]):
+        _check(name, passed, detail)
+
+    return {"ok": all(c["ok"] for c in checks), "epub": str(epub_path), "target": target,
+            "checks": checks}

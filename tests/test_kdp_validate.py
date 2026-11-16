@@ -193,9 +193,90 @@ def test_worldwide_sale_against_rights_flags():
     assert "territories_vs_rights" not in _codes(check(individual, facts=facts), "warnings")
 
 
-def test_gutenberg_in_the_edition_notice():
+def test_a_recorded_reason_settles_the_territories_warning():
+    facts = {"rights_flags": [{"code": "mexico_life_plus_100", "detail": "x"}]}
+    reasoned = _with(territories={"mode": "worldwide", "rationale": "Expired before the 1994 term."})
+    result = check(reasoned, facts=facts)
+    assert "territories_vs_rights" not in _codes(result, "warnings")
+    assert _codes(result, "info") == ["territories_vs_rights"]
+    assert "Expired before" in result["info"][0]["detail"]
+
+
+def test_the_epub_block_is_ignored_with_a_warning():
+    # The edition is book-metadata's: nothing in an old epub block is read or checked.
     listing = _with(epub={"edition_notice": {"body": "Texto fuente: Project Gutenberg."}})
-    assert "gutenberg_mention" in _codes(check(listing))
+    result = check(listing)
+    assert result["ok"] and "epub_block_ignored" in _codes(result, "warnings")
+    assert "epub_block_ignored" not in _codes(check(GOOD), "warnings")
+
+
+BOOK = {"title": "Bambi", "subtitle": "Una vida en el bosque", "author": "Felix Salten",
+        "translator": "Ana Pérez", "forms": ["II"], "edition_applied": True, "endnotes": 12,
+        "description": "En lo más hondo del bosque nace un cervatillo."}
+
+
+def test_a_listing_that_agrees_with_the_book_passes():
+    result = check(GOOD, book=BOOK)
+    assert result["ok"], result["errors"]
+    assert "description_diverges" not in _codes(result, "warnings")
+    assert "reading_age_vs_forms" not in _codes(result, "warnings")
+
+
+def test_the_listing_must_wait_for_the_edition():
+    result = check(GOOD, book={**BOOK, "edition_applied": False})
+    assert _codes(result) == ["edition_not_applied"]
+
+
+@pytest.mark.parametrize("field, changes", [
+    ("title", {"title": "Bambi, el cervatillo"}),
+    ("subtitle", {"subtitle": ""}),
+    ("author", {"author": "F. Salten"}),
+    ("translator", {"contributors": [{"role": "Translator", "name": "A. Pérez"}]}),
+])
+def test_the_listing_names_the_book_as_the_book_does(field, changes):
+    issues = [i for i in check(_with(**changes), book=BOOK)["errors"]
+              if i["code"] == "edition_mismatch"]
+    assert [i["field"] for i in issues] == [field]
+
+
+def test_a_collections_joined_author_is_not_compared():
+    assert check(_with(author="Otro Autor"), book={**BOOK, "author": None})["ok"]
+
+
+def test_a_description_that_drifted_from_the_books_is_a_warning():
+    listing = _with(description_html=GOOD["description_html"].replace("cervatillo", "ciervo"))
+    assert "description_diverges" in _codes(check(listing, book=BOOK), "warnings")
+    # A paragraph on this edition after the book's description is the store's to add.
+    longer = _with(description_html=GOOD["description_html"]
+                   + "<p><b>Esta edición</b> es para lectores de 10 años en adelante.</p>")
+    assert "description_diverges" not in _codes(check(longer, book=BOOK), "warnings")
+
+
+def test_stated_note_counts_follow_the_built_epub():
+    html = GOOD["description_html"].replace("Portada nueva", "11 notas del traductor")
+    result = check(_with(description_html=html), book=BOOK)
+    issue = next(i for i in result["errors"] if i["code"] == "note_count")
+    assert issue["field"] == "description_html" and "11" in issue["detail"] and "12" in issue["detail"]
+
+    right = html.replace("11 notas", "12 notas")
+    assert "note_count" not in _codes(check(_with(description_html=right), book=BOOK))
+    # No built EPUB: nothing to compare with, so nothing to refuse.
+    assert "note_count" not in _codes(check(_with(description_html=html),
+                                            book={**BOOK, "endnotes": None}))
+
+
+def test_reading_age_is_compared_with_the_forms():
+    old = _with(primary_audience={"reading_age_min": 15, "reading_age_max": 18})
+    assert "reading_age_vs_forms" in _codes(check(old, book=BOOK), "warnings")
+    assert "reading_age_vs_forms" not in _codes(check(old, book={**BOOK, "forms": []}), "warnings")
+
+
+def test_select_is_refused_for_a_book_on_the_site():
+    enrolled = _with(kdp_select=True)
+    assert "select_on_site" in _codes(check(enrolled, facts={"site": {"on_site": True}}))
+    off_site = check(enrolled, facts={"site": {"on_site": False}})
+    assert off_site["ok"] and "select_bars_site" in _codes(off_site, "warnings")
+    assert check(GOOD, facts={"site": {"on_site": True}})["ok"]
 
 
 def test_johannes_gutenberg_in_the_edition_notice():
@@ -299,14 +380,13 @@ def test_a_real_phone_number_still_fails():
     assert "description_phone" in _codes(check(listing))
 
 
-@pytest.mark.parametrize("text, code", [
-    ("Más en www.ejemplo.com", "description_url"),
-    ("Del Proyecto Gutenberg", "gutenberg_mention"),
-])
-def test_epub_description_override_is_checked(text, code):
-    listing = _with(epub={"description": text})
-    issues = [i for i in check(listing)["errors"] if i["code"] == code]
-    assert [i["field"] for i in issues] == ["epub.description"]
+def test_a_sentence_level_revision_claim_needs_a_measured_share():
+    claim = copy.deepcopy(OWNED)
+    claim["copyright_basis"]["statement"] = "El traductor revisó y corrigió frase por frase."
+    assert "revision_overclaim" in _codes(check(claim), "warnings")
+    measured = {"authorship": {"changed_fraction": 0.021}}
+    assert "revision_overclaim" not in _codes(check(claim, facts=measured), "warnings")
+    assert "revision_overclaim" not in _codes(check(OWNED), "warnings")
 
 
 def test_a_null_phrase_is_not_a_keyword():

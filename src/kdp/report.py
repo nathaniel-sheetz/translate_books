@@ -15,8 +15,41 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.kdp import work_dir
-from src.kdp.listing import kdp_form, planned_writes
+from src.kdp.listing import book_state, kdp_form, select_answer
 from src.kdp.validate import OWN_COPYRIGHT, check
+
+#: The section of metadata_draft.md that lists what the edition changed, with evidence.
+_RECORD_HEADING = "what the record shows"
+_RECORD_MAX_LINES = 60
+
+
+def record_of_changes(project_dir: Path) -> list[str]:
+    """The "What the record shows" section of ``metadata_draft.md``, without its heading.
+
+    book-metadata writes it: every change the edition made, where, and the
+    evidence. It is what an owned-copyright claim can point to.
+    """
+    try:
+        lines = (Path(project_dir) / "metadata_draft.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = _RECORD_HEADING in line.lower()
+            continue
+        if inside:
+            out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    while out and not out[0].strip():
+        out.pop(0)
+    if len(out) > _RECORD_MAX_LINES:
+        out = out[:_RECORD_MAX_LINES] + ["", "_(cut here; the rest is in metadata_draft.md)_"]
+    return out
 
 
 def _read(path: Path) -> Any:
@@ -51,12 +84,14 @@ def render(
 ) -> str:
     now = now or datetime.now()
     kdp = work_dir(project_dir)
-    facts = _read(kdp / "facts.json") or {}
+    from src.kdp.facts import with_live_site
+
+    facts = with_live_site(_read(kdp / "facts.json"), project_dir)
     comps = _read(kdp / "comps.json") or {}
     categories_evidence = _read(kdp / "categories.json") or {}
     suggestions = _read(kdp / "suggestions.json") or {}
-    verdict = check(listing, defaults, facts=facts)
-    plan = planned_writes(project_dir, listing, defaults)
+    book = book_state(project_dir)
+    verdict = check(listing, defaults, facts=facts, book=book)
 
     title = f"{listing.get('title') or project_dir.name} {listing.get('descriptor') or ''}".strip()
     out = [f"# KDP listing — {title}", "",
@@ -68,7 +103,12 @@ def render(
 
     # ── the form ──
     out += ["## KDP form", "", "Copy into KDP in this order (eBook Details, then Content, then Pricing).", ""]
-    for row in kdp_form(listing, defaults):
+    existing = facts.get("existing_listing") if isinstance(facts.get("existing_listing"), dict) else {}
+    if existing.get("asin"):
+        out += [f"**This book is already for sale as {existing['asin']}.** Edit that listing; "
+                "do not create a new title. Keep its live title and reading age unless the "
+                "change is intended.", ""]
+    for row in kdp_form(listing, defaults, facts=facts):
         out += [f"### {row['field']}", ""]
         if row["field"] == "Description":
             out += ["```html", str(row["value"]), "```", ""]
@@ -170,6 +210,10 @@ def render(
                 f"{authorship.get('reader_saves_from_finding', 0)} from a checker's finding; "
                 f"{authorship.get('model_fixes', 0)} applied by model judges.",
                 f"- Editorial footnotes: {footnotes.get('editorial', 0)}.", ""]
+        record = record_of_changes(project_dir)
+        if record:
+            out += ["What the record shows this edition changed (from `metadata_draft.md`):", ""]
+            out += record + [""]
 
     # ── compliance ──
     out += ["## Compliance", ""]
@@ -177,6 +221,8 @@ def render(
         out.append(f"- ❌ `{issue['code']}` ({issue['field']}): {issue['detail']}")
     for issue in verdict["warnings"]:
         out.append(f"- ⚠️ `{issue['code']}` ({issue['field']}): {issue['detail']}")
+    for issue in verdict.get("info") or []:
+        out.append(f"- ℹ️ `{issue['code']}` ({issue['field']}): {issue['detail']}")
     for flag in facts.get("rights_flags") or []:
         out.append(f"- ⚖️ `{flag['code']}`: {flag['detail']}")
     for item in listing.get("manual_checks") or []:
@@ -185,16 +231,22 @@ def render(
         out.append("- Nothing flagged.")
     out.append("")
 
-    # ── what apply writes ──
-    out += ["## What `apply` writes to the book", "", "`project.json`:", ""]
-    for key, value in plan["project_json"].items():
-        shown = json.dumps(value, ensure_ascii=False)
-        out.append(f"- `{key}`: {shown if len(shown) < 160 else shown[:157] + '…'}")
+    # ── what apply writes, and the book it lists ──
+    out += ["## What `apply` writes", "",
+            "`kdp_listing.json` only. The book is not changed here: its title page, copyright "
+            "page and `dc:description` were written by book-metadata, and this listing was "
+            "checked against them.", "",
+            f"- **KDP Select:** {select_answer(listing, facts)}"]
+    edition = book.get("edition") or {}
+    for label, value in (
+            ("Title in the book", book.get("title")),
+            ("Subtitle in the book", book.get("subtitle")),
+            ("Translator in the book", book.get("translator")),
+            ("Edition", " ".join(v for v in (edition.get("version"), edition.get("status")) if v)),
+            ("Notes in the built EPUB", book.get("endnotes"))):
+        if value not in (None, ""):
+            out.append(f"- **{label}:** {value}")
     out.append("")
-    if plan["edition_notice"]:
-        out += [f"`edition_notice.json` — {plan['edition_notice']['heading'] or 'Créditos'}:", ""]
-        out += ["> " + line if line else ">" for line in plan["edition_notice"]["body"].splitlines()]
-        out.append("")
     return "\n".join(out)
 
 

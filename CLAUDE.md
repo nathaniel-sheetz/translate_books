@@ -32,5 +32,5 @@ Key routing rules:
 - Redo/translate/clean book images, cover art → invoke image-pass
 - Write a friction log, log what wasted time/tokens in this run → invoke friction-log
 - Put the NBLA into a finished translation, fix the Bible quotes, standardize Scripture references → invoke quotation-pass
-- Publish to KDP, KDP listing, Amazon categories/keywords, book description, epub metadata → invoke kdp-publish
-- Draft a book's site page texts, parent notes, «Sobre esta edición», «Sobre este libro», recommended forms; get a book ready for the site → invoke book-metadata
+- Draft what a finished book says about itself: epub metadata, title page, copyright page, book description, site page texts, parent notes, «Sobre esta edición», «Sobre este libro», recommended forms; get a book ready for the site → invoke book-metadata (it runs before kdp-publish)
+- Publish to KDP, KDP listing, Amazon categories/keywords, Amazon description → invoke kdp-publish (after book-metadata, which writes the book itself)

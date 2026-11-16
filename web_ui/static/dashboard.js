@@ -5036,7 +5036,22 @@
             var versionEl = document.getElementById('epub-edition-version');
             if (versionEl && !versionEl.value && data.edition_version) versionEl.value = data.edition_version;
             var statusSel = document.getElementById('epub-edition-status');
-            if (statusSel && data.edition_status) statusSel.value = data.edition_status;
+            if (statusSel && (data.edition_version || data.edition_status)) {
+                // Keep a stored status the two stock options don't cover (or a
+                // blank one): selecting a missing value would blank the select,
+                // and the next Build would save the wrong status.
+                var stored = data.edition_status || '';
+                var known = Array.prototype.some.call(statusSel.options, function(o) {
+                    return o.value === stored;
+                });
+                if (!known) {
+                    var opt = document.createElement('option');
+                    opt.value = stored;
+                    opt.textContent = stored || '(no status)';
+                    statusSel.appendChild(opt);
+                }
+                statusSel.value = stored;
+            }
 
             // Show the download link for the selected target's existing build
             _builtEpubs.kindle = data.epub_filename || null;

@@ -143,6 +143,20 @@ def test_edition_label(edition, expected):
     assert edition_label(edition) == expected
 
 
+def test_edition_label_falls_back_when_the_house_format_names_a_wrong_placeholder():
+    assert edition_label(EDITION, "Versión {version} de {year}") == "Versión 1.2 (beta)"
+    assert edition_label(EDITION, "Versión {0}") == "Versión 1.2 (beta)"
+
+
+def test_license_statement_with_a_wrong_placeholder_still_builds(tmp_path):
+    project = _project(tmp_path)
+    publish = {**PUBLISH, "license": {**LICENSE, "statement": "© {year}: licencia [{name}]({url})."}}
+    out = build_epub(project_path=project, title="T", author="A", target=LIBRE,
+                     publish=publish, edition=EDITION)
+    notice = _read(out)["copyright.xhtml"]
+    assert "Esta traducción se publica bajo la licencia" in notice and "{year}" not in notice
+
+
 # --- whole builds ------------------------------------------------------------
 
 def test_kindle_default_build(tmp_path):
@@ -275,6 +289,20 @@ def test_site_slug_from_project_json(tmp_path):
     assert load_book_metadata(_project(tmp_path, site_slug="sermones"))["site_slug"] == "sermones"
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("../x", "x"),
+    ("Mi Libro", "mi-libro"),
+    ("a/b", "a-b"),
+    ("bambi-vida-2", "bambi-vida-2"),
+])
+def test_a_site_slug_that_is_not_a_slug_becomes_one(tmp_path, caplog, raw, expected):
+    # It names libros/<slug>/ in the site repo and libre/<slug>.epub.
+    with caplog.at_level(logging.WARNING):
+        slug = load_book_metadata(_project(tmp_path, site_slug=raw))["site_slug"]
+    assert slug == expected
+    assert ("not a slug" in caplog.text) == (raw != expected)
+
+
 def test_epub_kwargs_build_libre_end_to_end(tmp_path):
     project = _project(tmp_path, edition={"version": "1.0", "status": "beta"},
                        front_matter={"title_page": True})
@@ -310,3 +338,17 @@ def test_verify_catches_leftover_markup(tmp_path):
     checks = {c["check"]: c for c in verify(project, out)["checks"]}
     assert not checks["no_leftover_markup"]["ok"]
     assert "chapter_01.xhtml" in checks["no_leftover_markup"]["detail"]
+
+
+@pytest.mark.parametrize("about", [
+    "[LIBRE] Ver el [sitio]({{ SITIO }}).",
+    "[LIBRE] Ver [aquí](www.x.org).",
+])
+def test_verify_catches_variables_and_links_the_build_printed_as_typed(tmp_path, about):
+    project = _project(tmp_path, edition={"version": "1.0", "status": "beta"})
+    (project / "about_book.json").write_text(json.dumps({"heading": "Sobre este libro",
+                                                         "body": about}), encoding="utf-8")
+    out = build_epub(project_path=project, target=LIBRE, **epub_kwargs(project))
+    checks = {c["check"]: c for c in verify(project, out, target=LIBRE)["checks"]}
+    assert not checks["no_leftover_markup"]["ok"]
+    assert "about_book.xhtml" in checks["no_leftover_markup"]["detail"]

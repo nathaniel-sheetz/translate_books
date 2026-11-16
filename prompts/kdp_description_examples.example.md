@@ -19,6 +19,11 @@ guide. Keep the annotations, since they tell the model *why* each part is there.
    the author. No plot past the first act (KDP bars spoilers).
 3. **Why it lasts (one short paragraph).** Its place: the readers it has had,
    what it is known for. Make claims you can verify, never "the best".
+
+   Parts 2 and 3 are **the book's description**, the one the `book-metadata`
+   skill wrote for the site and the EPUB (`project.json` `description`). Carry it
+   over as written; `check` warns when the store's wording drifts from it. To
+   reword it, change it there.
 4. **This edition (a short paragraph or 2–4 bullets).** The specifics from
    `facts.json`: who it is for (age, reading aloud, classroom), what the notes
    explain, what changed in the images. This is where the edition earns its

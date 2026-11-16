@@ -23,9 +23,41 @@ whenever your feedback on a draft changes how a text is written.
 - **Sources stay out of the texts.** A curriculum or a review that told you the reading age is evidence for
   the forms, not something to cite.
 
+## The edition (title page and copyright page)
+
+The copyright page is `edition.notice`. Start from the draft the facts give, which follows the house
+template: the original title and year, the translator, what this edition includes, the rights line, the
+imprint.
+
+- **The notes sentence gives the count in digits:** «29 notas del traductor». The check compares it with
+  the built EPUB.
+- **A Bible version's notice stays word for word.** It is the wording the version's publisher requires.
+- **The source is named by its publisher and year,** never by the site the scan or the text came from.
+- **Subjects:** two or three BISAC headings, then the catalog's own subject headings.
+
+Model:
+
+```text
+Título original: Evenings in the Orchard
+
+Publicado originalmente en 1890.
+
+Traducción al español: Ana Pérez.
+
+Esta edición incluye una traducción nueva al español, 24 notas del traductor y una portada nueva.
+
+Traducción © 2026 Ana Pérez. La obra original es de dominio público.
+
+Editorial Ejemplo
+```
+
 ## Description (`descripcion.md`) and the card summary (`resumen`)
 
 Why this book is worth reading. Nothing about the edition.
+
+This is the book's one description. The site shows it, the EPUB carries it as its description, and the
+store description is built from it, so it has no link, no price and no program name, and every fact in it
+can be checked.
 
 - A bold hook: questions for a book that answers questions, the theme in one line for a novel.
 - One paragraph on what the book is and what the child gets from it.
@@ -47,6 +79,12 @@ Publicado en 1890 y leído en las escuelas durante medio siglo. Para leer en voz
 Three bullets: the source edition, what is left out and where the images come from; the silent fixes; the
 notes. A book with no notes says so in the third bullet.
 
+- **A deliberate edit to the author's content is declared by its purpose,** not by what the original
+  said: «algunos pasajes se retocan para mayor precisión, como…», with one or two examples by chapter.
+  Retelling the removed passage puts it back in front of the reader.
+- **What every translation does is not a change:** Spanish names for invented characters, metric units
+  beside the old ones.
+
 Model:
 
 ```markdown
@@ -62,6 +100,8 @@ Model:
 - Then a bold lead per concern the edition doesn't handle, with its chapter.
 - Keep what the parent has to judge or act on: a sad or strong passage, a short list of other strong but
   brief passages, and worldview points the edition doesn't change.
+- **A book that teaches from one tradition says which,** in a short paragraph for parents of another: what
+  the author assumes and teaches that they may not share. State it plainly and without argument.
 
 Model:
 

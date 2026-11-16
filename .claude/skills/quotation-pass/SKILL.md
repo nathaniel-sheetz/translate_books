@@ -243,7 +243,8 @@ It ends by writing
 `projects/<slug>/quotations.json`: verses (unique and with repeats), quoted words,
 share of the book, the NBLA's limits and `within_limits`, plus one accounting row per
 accepted card. Every card with NBLA wording counts, edited or not, adapted ones
-included and labelled. Relay those numbers; kdp-publish reads the file.
+included and labelled. Relay those numbers; book-metadata reads the file for the
+copyright page's notice, and kdp-publish for the listing.
 
 `verify` checks that every applied quotation is still in its chunk. Run it again
 before publishing if the book was edited after the pass.
