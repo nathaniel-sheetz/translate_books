@@ -452,6 +452,35 @@ Playwright (`requirements-kdp.txt`). Full reference: [`KDP_PUBLISH.md`](KDP_PUBL
 
 *Skill equivalent:* `/kdp-publish`
 
+### `book_metadata.py` — the site texts and «Sobre este libro»
+
+```bash
+python scripts/book_metadata.py status --project my-book
+python scripts/book_metadata.py check  --project my-book
+python scripts/book_metadata.py apply  --project my-book --dry-run
+python scripts/book_metadata.py site   --project my-book --dry-run
+```
+
+The deterministic half of the `book-metadata` skill, which drafts a book's site
+description, «Sobre esta edición», «Lo que los padres deben saber», recommended forms
+and the EPUB's «Sobre este libro» page into `.harness/metadata/texts.json`.
+
+- `status`: the content review found, the built EPUB and its note count, what is
+  already written, whether the book has a folder in the site repo.
+- `check`: refuses markup «Sobre este libro» would show as typed characters (bold,
+  lists, subheadings, a misplaced `[LIBRE]`), an unknown form code, and a note count
+  that differs from the built EPUB.
+- `apply`: writes `forms`, `adaptations` and `parent_notes` to `project.json` and the
+  page to `about_book.json`. A key left out of `texts.json` is left alone.
+- `site`: writes `adaptaciones.md`, `padres.md`, `descripcion.md` and the `resumen`
+  line of `libro.toml` in the site repo's `libros/<site_slug>/` (`site.repo_dir` in
+  `prompts/publish_defaults.json`). The folder must exist; commits stay in that repo.
+
+The writing rules live in `prompts/book_metadata_guide.md` (per-user; tracked twin
+`book_metadata_guide.example.md`).
+
+*Skill equivalent:* `/book-metadata`
+
 ### `image_pass.py` — redo a book's images
 
 ```bash

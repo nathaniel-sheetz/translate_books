@@ -50,7 +50,10 @@ Two problems, one tool:
 - **Site-only fields:** `forms`, `adaptations` and `parent_notes` are for the
   mislibrosvivos.com book page and never go into either EPUB.
   `load_site_metadata(project_dir)` reads them, not `load_book_metadata`. The Export
-  tab's Website box edits them through `/api/project/<id>/site-metadata`.
+  tab's Website box edits them through `/api/project/<id>/site-metadata`. The
+  `book-metadata` skill drafts them, with `about_book.json`, from the content review
+  and the record of what the translation changed; `scripts/book_metadata.py` checks
+  and writes them (`src/site_texts.py`).
   - **`forms`:** one or more recommended forms, which the site shows instead of an age
     range: `I` (years 1–3), `II` (4–6), `III/IV` (7–9), `V/VI` (10–12). They are
     stored in that order, and `book_metadata.FORMS` is the list.

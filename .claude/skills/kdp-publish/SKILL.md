@@ -327,7 +327,7 @@ pages the build also reads:
 
 `project.json` `forms`, `adaptations` and `parent_notes` are for the website only.
 They are not in either EPUB. The KDP reading age is set on its own and never derived
-from `forms`.
+from `forms`. The **`book-metadata`** skill drafts those three and `about_book.json`.
 
 ### 7. Hand-off
 

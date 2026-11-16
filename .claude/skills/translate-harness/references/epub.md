@@ -48,6 +48,10 @@ drift, not a false alarm.)
 > Spanish title, subtitle, translator, description, subjects and a title page and copyright
 > page into `project.json` / `edition_notice.json`, which this build then picks up.
 
+> **Posting to the site?** Run the **`book-metadata`** skill before the final build, after
+> the content review. It drafts the book page's texts and the «Sobre este libro» page
+> (`about_book.json`), which only an EPUB built afterwards carries.
+
 The API `translate` run chains through combine, epub, and align, building the EPUB from translated
 chunks only and reporting exactly which chapters shipped. On the **workers** path you already
 aligned each set in translate-workers 4B-e (the reader reads `alignments/`, not the EPUB), so here

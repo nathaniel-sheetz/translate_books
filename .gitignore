@@ -90,6 +90,7 @@ prompts/book_groups.json
 prompts/kdp_defaults.json
 prompts/publish_defaults.json
 prompts/kdp_description_examples.md
+prompts/book_metadata_guide.md
 prompts/proposals/
 prompts/decisions_taxonomy.json
 prompts/quotation_judge_examples.json
