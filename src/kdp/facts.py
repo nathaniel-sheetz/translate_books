@@ -69,6 +69,104 @@ def _footnotes(project_dir: Path) -> dict[str, int]:
     }
 
 
+def _natural_name(name: str) -> str:
+    """A catalog name in reading order: ``"Long, C. C."`` -> ``"C. C. Long"``."""
+    last, comma, first = name.partition(",")
+    return f"{first.strip()} {last.strip()}" if comma and first.strip() else name.strip()
+
+
+def _author_candidates(cover: dict, catalog: Optional[dict]) -> list[dict[str, str]]:
+    """Where an unrecorded author can be read from: the cover spec, then the catalog."""
+    out = []
+    if str(cover.get("author") or "").strip():
+        out.append({"name": str(cover["author"]).strip(), "from": "cover/spec.json"})
+    for agent in (catalog or {}).get("agents") or []:
+        if agent.get("role") == "author" and agent.get("name"):
+            out.append({"name": _natural_name(str(agent["name"])), "from": "catalog"})
+    return out
+
+
+def _epub_endnotes(project_dir: Path, footnotes: dict) -> Optional[dict[str, Any]]:
+    """Record the built EPUB's note count; a ``needs_input`` item when the store disagrees.
+
+    The annotation store is what the notes are written in, but the EPUB is what
+    the reader gets: a count that differs means a stale build, or a reader memo
+    saved under the wrong type.
+    """
+    from src import epub_readback
+
+    epub = epub_readback.newest_epub(project_dir)
+    footnotes["epub_endnotes"] = epub_readback.count_endnotes(epub) if epub else None
+    if epub is None or footnotes["epub_endnotes"] == footnotes["total"]:
+        return None
+    return {
+        "field": "footnotes",
+        "why": f"The annotation store has {footnotes['total']} active notes and the built EPUB "
+               f"({epub.name}) prints {footnotes['epub_endnotes']}: rebuild, then look for a "
+               "note saved under the wrong type. Every stated count follows the EPUB.",
+    }
+
+
+def site_presence(project_dir: Path) -> dict[str, Any]:
+    """Whether the book is on the house site: its folder there, or a libre build.
+
+    A book on the site is given away, so it cannot be enrolled in KDP Select,
+    which requires the ebook to be exclusive to Amazon.
+    """
+    from src import epub_readback, site_texts
+
+    info = site_texts.site_status(project_dir)
+    libre = epub_readback.libre_epub(project_dir)
+    return {
+        "site_slug": info.get("site_slug"),
+        "book_dir_exists": bool(info.get("book_dir_exists")),
+        "libre_epub": str(libre) if libre else None,
+        "on_site": bool(info.get("book_dir_exists")) or libre is not None,
+    }
+
+
+def with_live_site(facts: Optional[dict[str, Any]], project_dir: Path) -> dict[str, Any]:
+    """``facts`` with ``site`` read now, not from when ``facts.json`` was cached.
+
+    The KDP Select rule hangs on it, and a libre build made after ``facts`` ran
+    (or a ``facts.json`` from before ``site`` existed) must still bar Select.
+    """
+    return {**(facts or {}), "site": site_presence(project_dir)}
+
+
+_EXAMPLE_HEADING_RE = re.compile(r"^#+.*?\*([^*\n]+)\*\s*\((B0[A-Z0-9]{8})\)", re.MULTILINE)
+
+
+def _existing_listing(project_dir: Path, titles: list[str]) -> dict[str, Any]:
+    """What is known of a listing already made: the approved file, and its ASIN once live.
+
+    ``kdp_publish.py published`` records the ASIN. A book listed by hand before
+    that existed is found by its title among the headings of the description
+    examples, which name the house's live listings with their ASINs.
+    """
+    from src.kdp import LISTING_FILE
+
+    record = _obj(project_dir / LISTING_FILE)
+    out: dict[str, Any] = {
+        "file": (project_dir / LISTING_FILE).exists(),
+        "asin": str(record.get("asin") or ""),
+        "published_at": str(record.get("published_at") or ""),
+    }
+    if out["asin"]:
+        return out
+    wanted = {" ".join(t.casefold().split()) for t in titles if t and t.strip()}
+    try:
+        examples = examples_path().read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for match in _EXAMPLE_HEADING_RE.finditer(examples):
+        if " ".join(match.group(1).casefold().split()) in wanted:
+            out["asin"] = match.group(2)
+            out["asin_from"] = "description examples"
+            break
+    return out
+
+
 def _images(project_dir: Path) -> dict[str, Any]:
     from src.image_pass import ledger
 
@@ -364,11 +462,28 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
         needs_input.append({
             "field": "translator",
             "why": f"project.json spells it {translator_project!r}; the house default is "
-                   f"{translator_default!r}. apply writes the listing's Translator contributor "
-                   f"(draft it from the default unless told otherwise).",
+                   f"{translator_default!r}. The listing must name the translator as "
+                   f"project.json does; if the house default is right, change it with "
+                   f"book-metadata first.",
         })
-    if not (project.get("author") or harness.get("author") or ingest.get("creator")):
-        needs_input.append({"field": "author", "why": "No author recorded anywhere."})
+    author = str(project.get("author") or harness.get("author") or ingest.get("creator")
+                 or cover.get("author") or "").strip()
+    if not author:
+        needs_input.append({
+            "field": "author",
+            "why": "No author recorded in project.json, the setup, the ingest or the cover spec.",
+            "candidates": _author_candidates(cover, catalog),
+        })
+    if not catalog and not url:
+        needs_input.append({
+            "field": "source",
+            "why": "No source URL, so there is no catalog record and the rights were not "
+                   "checked: for a Gutenberg book set project.json gutenberg_url to the ebook's "
+                   "URL and run facts again; for any other source, check the rights by hand.",
+        })
+    note_mismatch = _epub_endnotes(project_dir, footnotes)
+    if note_mismatch:
+        needs_input.append(note_mismatch)
     quotations, quotation_flags, quotation_needs = _quotations(project_dir)
     needs_input.extend(quotation_needs)
 
@@ -404,9 +519,10 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
             "ingest_title": ingest.get("title") or "",
             "catalog_title": (catalog or {}).get("title") or "",
         },
-        "author": project.get("author") or harness.get("author") or ingest.get("creator") or "",
+        "author": author,
         "translator": {"project": translator_project, "default": translator_default},
         "publisher": project.get("publisher") or defaults.get("publisher") or "",
+        "site": site_presence(project_dir),
         "source": {
             "url": url,
             "gutenberg_id": book_id,
@@ -456,7 +572,8 @@ def gather(project_dir: Path, *, fetch: bool = True, today: Optional[date] = Non
             "variety_label": str(defaults.get("variety_label") or ""),
             "notice_draft": render_edition_notice(defaults, notice_values),
         },
-        "existing_listing": (project_dir / "kdp_listing.json").exists(),
+        "existing_listing": _existing_listing(project_dir, [
+            str(project.get("spanish_title") or ""), str(cover.get("title") or "")]),
         "description_examples": str(examples_path()),
         "needs_input": needs_input,
     }
@@ -658,6 +775,7 @@ def gather_collection(
         "authors": collection_mod.member_authors(coll),
         "translator": {"project": translator_project, "default": translator_default},
         "publisher": project.get("publisher") or defaults.get("publisher") or "",
+        "site": site_presence(collection_dir),
         "source": {"url": None, "gutenberg_id": None, "format": None, "ingest_publisher": "",
                    "works": [{"slug": w["slug"], "url": w["url"],
                               "gutenberg_id": w["gutenberg_id"]} for w in works]},
@@ -711,7 +829,8 @@ def gather_collection(
             "variety_label": str(defaults.get("variety_label") or ""),
             "notice_draft": render_edition_notice(defaults, notice_values, collection=True),
         },
-        "existing_listing": (collection_dir / "kdp_listing.json").exists(),
+        "existing_listing": _existing_listing(collection_dir, [
+            str(project.get("spanish_title") or ""), str(cover.get("title") or "")]),
         "description_examples": str(examples_path()),
         "needs_input": needs_input,
     }

@@ -243,6 +243,7 @@ makes it idempotent.
 | `combine` | no | Rewrite `chapters/<id>.txt` from translated chunks. Repair/backfill — normally automatic |
 | `align` | no | Align translated chapters for the reader and print a reader link |
 | `epub` | no | Build the EPUB from translated chunks |
+| `site-export` | no | Copy `project.json` `adaptations` and `parent_notes` into the site repo's `libros/<site_slug>/` as `adaptaciones.md` and `padres.md`. The folder must already exist; a blank field leaves its file alone. `--site-dir` overrides the house `site.repo_dir`; `--dry-run` reports only |
 | `footnotes` | depends | `translate` / `translate-prepare` / `translate-commit` / `apply` / `drop`. Follows the book's backend; `apply` and `drop` are free |
 | `captions` | no | Find image captions still rendering as body prose and mark them `[CAPTION]`. Dry-run unless `--apply` |
 | `quotes` | no | Pre-translation: list set-off passages in `source.txt` (indented blocks, plus any block containing a `--match` phrase) and mark the `--accept`ed ones `[QUOTE]`. Dry-run unless `--apply`; refused once any chunk is translated; re-run `setup` afterwards |

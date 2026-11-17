@@ -15,6 +15,13 @@ The public-domain rules (the title descriptor, the opening bullet summary)
 apply only when the listing answers Publishing Rights "public_domain". An
 "own_copyright" listing must instead state its ``copyright_basis``, and is
 warned about how KDP and US copyright law read that claim.
+
+The listing is the store's half of a book. The edition (title page, copyright
+page, ``dc:description``) is written by ``book_metadata.py`` first, and
+``check`` takes it as ``book`` (:func:`src.kdp.listing.book_state`): the
+listing must name the book as the book names itself, state the note count the
+built EPUB has, and never enroll in KDP Select a book the house gives away on
+its site.
 """
 
 from __future__ import annotations
@@ -68,6 +75,12 @@ _PHONE_RE = re.compile(r"(?!\d{1,3}(?:[.,]\d{3})+\b)\+?(?:\d[\s().-]*){8,}\d")
 _BLOCK_TAGS = {"p", "br", "li", "ul", "ol", "h4", "h5", "h6"}
 _PRICE_RE = re.compile(r"[$€]\s?\d|\b\d+(?:[.,]\d\d)?\s?(?:USD|dólares|pesos)\b", re.I)
 _EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF]")
+# A claim that every sentence was revised, which only a measured share can back.
+_SENTENCE_REVISION_RE = re.compile(
+    r"frase por frase|l[ií]nea por l[ií]nea|cada (?:frase|oraci[oó]n|l[ií]nea)"
+    r"|sentence[- ]by[- ]sentence|line[- ]by[- ]line|every (?:sentence|line)", re.I)
+#: The ages each recommended form covers on the site (``book_metadata.FORMS``: school years).
+FORM_AGES = {"I": (6, 9), "II": (9, 12), "III/IV": (12, 15), "V/VI": (15, 18)}
 
 
 def _fold(text: str) -> str:
@@ -219,6 +232,73 @@ def _copyright_checks(
                "No original content listed (introduction, study questions, a guide). Content "
                "the translator wrote is the part of the claim that does not depend on how much "
                "of the translation is human.", "copyright_basis")
+    measured = ((facts or {}).get("authorship") or {}).get("changed_fraction")
+    claim = _SENTENCE_REVISION_RE.search(str(basis.get("statement") or ""))
+    if claim and not isinstance(measured, (int, float)):
+        _issue(warnings, "revision_overclaim",
+               f"The statement says {claim.group(0)!r}, but the share of the text the translator "
+               "changed is not measured for this book (no model drafts were kept). State what "
+               "the record shows: the number of sentence edits.", "copyright_basis")
+
+
+def _book_checks(
+    listing: dict[str, Any], book: dict[str, Any], text: str, errors: list, warnings: list,
+) -> None:
+    """The listing against the book ``book_metadata.py`` wrote (``listing.book_state``)."""
+    if not book.get("edition_applied"):
+        _issue(errors, "edition_not_applied",
+               "project.json has no translator or the book has no copyright page yet: run "
+               "book-metadata first. It writes the edition; the listing only reads it.", "title")
+        return
+    for field, mine in (("title", listing.get("title")), ("subtitle", listing.get("subtitle")),
+                        ("author", listing.get("author")),
+                        ("translator", next(
+                            (c.get("name") for c in listing.get("contributors") or []
+                             if str(c.get("role") or "").lower() in ("translator", "traductor")),
+                            ""))):
+        theirs = book.get(field)
+        if theirs is None:  # not comparable for this book (a collection's joined authors)
+            continue
+        if " ".join(str(mine or "").split()) != " ".join(str(theirs).split()):
+            _issue(errors, "edition_mismatch",
+                   f"The listing says {str(mine or '')!r}; the book says {str(theirs)!r}. The "
+                   "book is the source: change it with book-metadata, or match it here.", field)
+
+    theirs = _fold(" ".join(str(book.get("description") or "").split()))
+    mine = _fold(" ".join(description_plain(str(listing.get("description_html") or "")).split()))
+    # The store may add to the book's description (a paragraph on this edition); it
+    # should not reword it.
+    if theirs and mine and theirs not in mine:
+        _issue(warnings, "description_diverges",
+               "After its opening bullets, the store description does not carry the book's "
+               "description as written (project.json description, also the site's and "
+               "dc:description). One text should serve all three; a paragraph on this edition "
+               "may follow it.", "description_html")
+
+    from src import epub_readback
+
+    basis = listing.get("copyright_basis") or {}
+    counted = [("description_html", text),
+               ("copyright_basis.statement", str(basis.get("statement") or "")),
+               ("copyright_basis.original_content",
+                " ".join(str(item) for item in basis.get("original_content") or []))]
+    for field, value in counted:
+        found, _ = epub_readback.note_count_issues(
+            field, value, book.get("endnotes"), expect_count=False)
+        for message in found:
+            _issue(errors, "note_count", message.split(": ", 1)[-1], field)
+
+    audience = listing.get("primary_audience") or {}
+    lo, hi = audience.get("reading_age_min"), audience.get("reading_age_max")
+    spans = [FORM_AGES[form] for form in book.get("forms") or [] if form in FORM_AGES]
+    if spans and (lo is not None or hi is not None):
+        youngest, oldest = min(s[0] for s in spans), max(s[1] for s in spans)
+        if (hi is not None and hi < youngest) or (lo is not None and lo > oldest):
+            _issue(warnings, "reading_age_vs_forms",
+                   f"Reading age {'' if lo is None else lo}–{'' if hi is None else hi} does not "
+                   f"overlap the site's recommended forms {', '.join(book['forms'])} (ages "
+                   f"{youngest}–{oldest}). The two are set separately, but they describe one "
+                   "reader.", "primary_audience")
 
 
 def check(
@@ -226,15 +306,20 @@ def check(
     defaults: dict[str, Any] | None = None,
     *,
     facts: dict[str, Any] | None = None,
+    book: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Every error and warning for ``listing``. ``ok`` is true when there are no errors.
 
-    ``facts`` (``facts.json``) adds the cross-checks that need the book: a
-    worldwide sale against the source edition's rights flags.
+    ``facts`` (``facts.json``) adds the cross-checks that need the book's
+    record: a worldwide sale against the source edition's rights flags, KDP
+    Select against a book that is on the site. ``book``
+    (:func:`src.kdp.listing.book_state`) is the edition as ``project.json``
+    holds it, which the listing has to agree with.
     """
     defaults = defaults or {}
     errors: list[dict] = []
     warnings: list[dict] = []
+    info: list[dict] = []
 
     title = str(listing.get("title") or "").strip()
     descriptor = str(listing.get("descriptor") or "").strip()
@@ -312,9 +397,7 @@ def check(
                        f"Opening bullet {item!r} is {len(item)} characters "
                        f"(limit {OPENING_SUMMARY_MAX} per bullet).", "description_html")
     text = parsed["text"]
-    # An epub.description override goes straight to dc:description: same rules.
-    epub_description = str((listing.get("epub") or {}).get("description") or "")
-    for field, value in (("description_html", text), ("epub.description", epub_description)):
+    for field, value in (("description_html", text),):
         for code, pattern, what in (
             ("description_url", _URL_RE, "a URL or website"),
             ("description_email", _EMAIL_RE, "an email address"),
@@ -441,24 +524,47 @@ def check(
              if f.get("code") in ("life_plus_70", "mexico_life_plus_100", "us_term")]
     territories = listing.get("territories") or {}
     if flags and territories.get("mode", "worldwide") == "worldwide":
-        _issue(warnings, "territories_vs_rights",
-               f"Selling worldwide, but facts.json carries {len(flags)} rights flag(s) "
-               f"({', '.join(sorted({f['code'] for f in flags}))}). Choose individual "
-               "territories or record why worldwide is safe.", "territories")
+        codes = ", ".join(sorted({f["code"] for f in flags}))
+        if str(territories.get("rationale") or "").strip():
+            # The operator looked at the flags and recorded why worldwide stands.
+            _issue(info, "territories_vs_rights",
+                   f"Selling worldwide with {len(flags)} rights flag(s) ({codes}); the recorded "
+                   f"reason: {territories['rationale']}", "territories")
+        else:
+            _issue(warnings, "territories_vs_rights",
+                   f"Selling worldwide, but facts.json carries {len(flags)} rights flag(s) "
+                   f"({codes}). Choose individual territories, or record why worldwide is safe "
+                   "in territories.rationale.", "territories")
 
-    # ── the book side: nothing may name Project Gutenberg ──
-    epub = listing.get("epub") or {}
-    notice = (epub.get("edition_notice") or {}).get("body") or ""
-    for field, value in (("title", title), ("subtitle", subtitle),
-                         ("description_html", text), ("epub.description", epub_description),
-                         ("epub.edition_notice", notice),
-                         ("epub.rights", str(epub.get("rights") or ""))):
+    # ── KDP Select against a book the house gives away ──
+    on_site = bool(((facts or {}).get("site") or {}).get("on_site"))
+    if listing.get("kdp_select"):
+        if on_site:
+            _issue(errors, "select_on_site",
+                   "kdp_select is true, but the book is on the site (a book folder or a libre "
+                   "build exists). KDP Select requires the ebook to be exclusive to Amazon.",
+                   "kdp_select")
+        else:
+            _issue(warnings, "select_bars_site",
+                   "kdp_select is true: while the book is enrolled, the free EPUB cannot be "
+                   "posted on the site.", "kdp_select")
+
+    # ── the listing against the book it lists ──
+    if listing.get("epub"):
+        _issue(warnings, "epub_block_ignored",
+               "The listing's epub block is no longer read: the title page, the copyright page "
+               "and dc:description are written by book-metadata.", "epub")
+    if book is not None:
+        _book_checks(listing, book, text, errors, warnings)
+
+    # ── nothing may name Project Gutenberg ──
+    for field, value in (("title", title), ("subtitle", subtitle), ("description_html", text)):
         if names_trademark(value):
             _issue(errors, "gutenberg_mention",
                    "Project Gutenberg's trademark license bars its name on a commercial "
                    "derivative.", field)
 
-    return {"ok": not errors, "errors": errors, "warnings": warnings,
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "info": info,
             "rights_mode": rights_mode,
             "counts": {"description_chars": len(html), "keywords": len(keywords),
                        "categories": len(categories)}}

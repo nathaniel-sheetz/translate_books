@@ -44,9 +44,16 @@ drift, not a false alarm.)
 > `images/` under their original names, so the EPUB picks them up with no other change; an EPUB
 > built earlier keeps the old pictures until it is rebuilt.
 
-> **Publishing to KDP?** Run the **`kdp-publish`** skill before the final build. It writes the
-> Spanish title, subtitle, translator, description, subjects and a title page and copyright
-> page into `project.json` / `edition_notice.json`, which this build then picks up.
+> **Finishing the book?** Run the **`book-metadata`** skill before the final build, after the
+> content review. It writes what the book says about itself: the Spanish title, subtitle,
+> translator, description, subjects, the title page and copyright page (`project.json`,
+> `edition_notice.json`), the «Sobre este libro» page (`about_book.json`) and the site's
+> texts. Only an EPUB built afterwards carries them. A book posted on the site needs
+> nothing more.
+
+> **Publishing to KDP?** Run the **`kdp-publish`** skill after `book-metadata`. It writes the
+> store listing (`kdp_listing.json`) and reads the book as `book-metadata` left it; it does
+> not change the EPUB.
 
 The API `translate` run chains through combine, epub, and align, building the EPUB from translated
 chunks only and reporting exactly which chapters shipped. On the **workers** path you already

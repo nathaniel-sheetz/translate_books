@@ -72,8 +72,10 @@ def _links_in(path: Path) -> list[str]:
     links = []
     for match in _LINK_RE.finditer(body):
         target = match.group(1).strip()
-        # Skip external URLs, mailto:, and bare in-page anchors handled below.
-        if target.startswith(("http://", "https://", "mailto:", "<")):
+        # Skip external URLs, mailto:, and bare in-page anchors handled below. A
+        # ``{{VARIABLE}}`` target is an EPUB page variable shown in an example
+        # (``[nuestro sitio]({{SITIO}})``), never a file.
+        if target.startswith(("http://", "https://", "mailto:", "<", "{{")):
             continue
         links.append(target)
     return links

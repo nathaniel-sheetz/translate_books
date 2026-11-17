@@ -5033,17 +5033,150 @@
                 if (exportLi) exportLi.classList.add('done');
             }
 
-            // Show download link if epub already exists
-            if (data.epub_exists) {
-                var dlBtn = document.getElementById('btn-download-epub');
-                dlBtn.href = '/api/project/' + PROJECT + '/download-epub';
-                dlBtn.textContent = 'Download ' + data.epub_filename;
-                dlBtn.style.display = '';
+            var versionEl = document.getElementById('epub-edition-version');
+            if (versionEl && !versionEl.value && data.edition_version) versionEl.value = data.edition_version;
+            var statusSel = document.getElementById('epub-edition-status');
+            if (statusSel && (data.edition_version || data.edition_status)) {
+                // Keep a stored status the two stock options don't cover (or a
+                // blank one): selecting a missing value would blank the select,
+                // and the next Build would save the wrong status.
+                var stored = data.edition_status || '';
+                var known = Array.prototype.some.call(statusSel.options, function(o) {
+                    return o.value === stored;
+                });
+                if (!known) {
+                    var opt = document.createElement('option');
+                    opt.value = stored;
+                    opt.textContent = stored || '(no status)';
+                    statusSel.appendChild(opt);
+                }
+                statusSel.value = stored;
             }
+
+            // Show the download link for the selected target's existing build
+            _builtEpubs.kindle = data.epub_filename || null;
+            _builtEpubs.libre = data.libre_epub_filename || null;
+            showEpubDownload();
         });
 
         loadTranslatorNote();
+        loadAboutBook();
+        loadSiteMetadata();
     }
+
+    // The newest built file per target, so the Download link follows the target picker.
+    var _builtEpubs = { kindle: null, libre: null };
+
+    function epubTarget() {
+        var sel = document.getElementById('epub-target');
+        return sel ? sel.value : 'kindle';
+    }
+
+    function showEpubDownload() {
+        var target = epubTarget();
+        var dlBtn = document.getElementById('btn-download-epub');
+        var name = _builtEpubs[target];
+        if (!name) {
+            dlBtn.style.display = 'none';
+            return;
+        }
+        dlBtn.href = '/api/project/' + PROJECT + '/download-epub?target=' + target;
+        dlBtn.textContent = 'Download ' + name;
+        dlBtn.style.display = '';
+    }
+
+    var targetSel = document.getElementById('epub-target');
+    if (targetSel) targetSel.addEventListener('change', showEpubDownload);
+
+    // -- Sobre este libro: load + blur autosave --
+    function loadAboutBook() {
+        apiGet('/api/project/' + PROJECT + '/about-book').then(function(data) {
+            if (!data) return;
+            var hEl = document.getElementById('epub-about-heading');
+            var bEl = document.getElementById('epub-about-body');
+            if (hEl && typeof data.heading === 'string') hEl.value = data.heading;
+            if (bEl && typeof data.body === 'string') bEl.value = data.body;
+        });
+    }
+
+    function saveAboutBook() {
+        var hEl = document.getElementById('epub-about-heading');
+        var bEl = document.getElementById('epub-about-body');
+        setStatus('epub-about-status', 'Saving…', '');
+        return fetch('/api/project/' + PROJECT + '/about-book', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ heading: hEl ? hEl.value : '', body: bEl ? bEl.value : '' }),
+        }).then(function(r) {
+            setStatus('epub-about-status', r.ok ? 'Saved' : 'Save failed', r.ok ? 'success' : 'error');
+        }).catch(function() {
+            setStatus('epub-about-status', 'Save failed', 'error');
+        });
+    }
+
+    ['epub-about-heading', 'epub-about-body'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('blur', saveAboutBook);
+    });
+
+    // -- Website fields (forms, adaptations, parent notes): load + autosave --
+    function loadSiteMetadata() {
+        apiGet('/api/project/' + PROJECT + '/site-metadata').then(function(data) {
+            if (!data) return;
+            var box = document.getElementById('site-forms');
+            if (box) {
+                box.innerHTML = '';
+                var picked = data.forms || [];
+                (data.form_choices || []).forEach(function(choice) {
+                    var label = document.createElement('label');
+                    label.style.fontWeight = 'normal';
+                    var cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.value = choice.code;
+                    cb.checked = picked.indexOf(choice.code) !== -1;
+                    cb.addEventListener('change', saveSiteMetadata);
+                    label.appendChild(cb);
+                    label.appendChild(document.createTextNode(' ' + choice.label));
+                    box.appendChild(label);
+                });
+            }
+            var aEl = document.getElementById('site-adaptations');
+            var pEl = document.getElementById('site-parent-notes');
+            if (aEl && typeof data.adaptations === 'string') aEl.value = data.adaptations;
+            if (pEl && typeof data.parent_notes === 'string') pEl.value = data.parent_notes;
+        });
+    }
+
+    function saveSiteMetadata() {
+        var aEl = document.getElementById('site-adaptations');
+        var pEl = document.getElementById('site-parent-notes');
+        var payload = {
+            adaptations: aEl ? aEl.value : '',
+            parent_notes: pEl ? pEl.value : '',
+        };
+        // The checkboxes exist only once the load has answered; until then
+        // leave the stored forms alone rather than send an empty list.
+        if (document.querySelector('#site-forms input[type=checkbox]')) {
+            payload.forms = Array.prototype.map.call(
+                document.querySelectorAll('#site-forms input[type=checkbox]:checked'),
+                function(cb) { return cb.value; });
+        }
+        setStatus('site-meta-status', 'Saving…', '');
+        return fetch('/api/project/' + PROJECT + '/site-metadata', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        }).then(function(r) {
+            setStatus('site-meta-status', r.ok ? 'Saved' : 'Save failed', r.ok ? 'success' : 'error');
+        }).catch(function() {
+            setStatus('site-meta-status', 'Save failed', 'error');
+        });
+    }
+
+    ['site-adaptations', 'site-parent-notes'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('blur', saveSiteMetadata);
+    });
 
     // -- Translator note: load + blur autosave with sequence-token guard --
     function loadTranslatorNote() {
@@ -5138,6 +5271,9 @@
         var publisher = readMeta('epub-publisher');
         var description = readMeta('epub-description');
         var rights = readMeta('epub-rights');
+        var target = epubTarget();
+        var aboutH = document.getElementById('epub-about-heading');
+        var aboutB = document.getElementById('epub-about-body');
 
         btn.disabled = true;
         btn.textContent = 'Building...';
@@ -5153,7 +5289,16 @@
             rights: rights,
             translator_heading: translatorHeading,
             translator_note: translatorNote,
+            target: target,
+            edition: {
+                version: readMeta('epub-edition-version'),
+                status: readMeta('epub-edition-status'),
+            },
         };
+        if (aboutH && aboutB) {
+            body.about_heading = aboutH.value;
+            body.about_body = aboutB.value;
+        }
         // A volume has no Original title field: each work names its own.
         if (document.getElementById('epub-source-title')) body.source_title = sourceTitle;
         if (IS_COLLECTION) body.allow_partial = document.getElementById('epub-allow-partial').checked;
@@ -5172,10 +5317,8 @@
                 }
                 statusEl.textContent = summary;
                 statusEl.style.color = '#080';
-                var dlBtn = document.getElementById('btn-download-epub');
-                dlBtn.href = '/api/project/' + PROJECT + '/download-epub';
-                dlBtn.textContent = 'Download ' + data.filename;
-                dlBtn.style.display = '';
+                _builtEpubs[target] = data.filename;
+                showEpubDownload();
 
                 // Update badge
                 var badge = document.getElementById('badge-export');

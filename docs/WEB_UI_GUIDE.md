@@ -583,7 +583,7 @@ Images referenced via `[IMAGE:...]` placeholders in translated text are embedded
 All fields are optional. Every build path (this button, `harness.py epub`,
 `build_epub.py`, the corrections and `translate_book.py` rebuilds) resolves them through
 `src/book_metadata.py`, so a book carries the same metadata whichever one built it. The
-last five rows have no form field: the `kdp-publish` skill writes them
+last five rows have no form field: the `book-metadata` skill writes them
 (`docs/KDP_PUBLISH.md`). Values are saved to `project.json` by the `POST /api/project/<id>/config` endpoint when Build EPUB is clicked, and read back by `build_epub()` at build time.
 
 ### Translator note (optional final chapter)

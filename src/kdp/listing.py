@@ -2,29 +2,32 @@
 The approved listing, and what applying it writes.
 
 A listing is the JSON the drafting step writes (``.harness/kdp/listing.json``
-by convention): the KDP form's fields in the agent's words, plus an ``epub``
-block for what the book itself should carry. ``apply`` is the only writer, and
-only of three files:
+by convention): the KDP form's fields in the agent's words. ``apply`` writes
+one file:
 
-- ``project.json``: the metadata keys ``src.book_metadata`` reads, so the next
-  build — from any path — carries them;
-- ``edition_notice.json``: the copyright page, ``{heading, body}``;
 - ``kdp_listing.json``: the listing as approved plus ``kdp_form``, the form's
-  fields in the order KDP's pages ask for them — the copy-paste source.
+  fields in the order KDP's pages ask for them — the copy-paste source. Once
+  the book is live, ``mark_published`` adds its ASIN and date.
 
-It refuses while ``validate.check`` reports an error.
+The book itself is not written here. Its title page, copyright page and
+``dc:description`` (the edition) belong to ``scripts/book_metadata.py``, which
+runs first and also serves books that go to the site with no Kindle listing.
+``book_state`` reads what that wrote, and ``validate.check`` holds the listing
+to it: ``apply`` refuses while the two disagree.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
-from src.book_metadata import EDITION_NOTICE_FILE, PROJECT_FILE
 from src.kdp import LISTING_FILE
-from src.kdp.validate import OWN_COPYRIGHT, check, description_plain, rights_mode_of
+from src.kdp.validate import OWN_COPYRIGHT, check, rights_mode_of
+
+_ASIN_RE = re.compile(r"^B0[A-Z0-9]{8}$")
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -34,22 +37,46 @@ def load(path: Path) -> dict[str, Any]:
     return data
 
 
-def translator_of(listing: dict[str, Any]) -> str:
-    for contributor in listing.get("contributors") or []:
-        if str(contributor.get("role") or "").lower() in ("translator", "traductor"):
-            return str(contributor.get("name") or "").strip()
-    return ""
+def book_state(project_dir: Path) -> dict[str, Any]:
+    """The edition as ``project.json`` holds it: what the listing has to agree with.
+
+    ``edition_applied`` is false for a book ``book_metadata.py apply`` has not
+    reached (no translator on record, or no copyright page). ``author`` is
+    ``None`` for a collection, whose volume author may be several names joined.
+    ``endnotes`` is the built EPUB's note count, ``None`` without a build.
+    """
+    from src import collection as collection_mod
+    from src import epub_readback
+    from src.book_metadata import load_book_metadata, load_site_metadata
+
+    project_dir = Path(project_dir)
+    meta = load_book_metadata(project_dir)
+    epub = epub_readback.newest_epub(project_dir)
+    return {
+        "title": meta["title"],
+        "subtitle": meta["subtitle"],
+        "author": None if collection_mod.is_collection_dir(project_dir) else meta["author"],
+        "translator": meta["translator"],
+        "description": meta["description"],
+        "forms": load_site_metadata(project_dir)["forms"],
+        "edition": meta["edition"],
+        "edition_applied": bool(meta["translator"] and meta["edition_notice_body"].strip()),
+        "endnotes": epub_readback.count_endnotes(epub) if epub else None,
+        "epub": str(epub) if epub else None,
+    }
 
 
-def _fill(template: str, values: dict[str, Any]) -> str:
-    try:
-        return template.format(**values)
-    except (KeyError, IndexError, ValueError):
-        return template
+def select_answer(listing: dict[str, Any], facts: Optional[dict[str, Any]] = None) -> str:
+    """The KDP Select answer for the form, with the reason when the site decides it."""
+    if ((facts or {}).get("site") or {}).get("on_site"):
+        return ("No. The book is on the site, and KDP Select requires the ebook to be "
+                "exclusive to Amazon.")
+    return "Yes" if listing.get("kdp_select") else "No"
 
 
 def kdp_form(
     listing: dict[str, Any], defaults: Optional[dict[str, Any]] = None,
+    *, facts: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """The KDP eBook Details / Content / Rights fields, in page order."""
     owned = rights_mode_of(listing, defaults) == OWN_COPYRIGHT
@@ -89,52 +116,13 @@ def kdp_form(
             (k.get("phrase") if isinstance(k, dict) else k) for k in listing.get("keywords") or []
         ]),
         ("Content", "AI-generated content", listing.get("ai_disclosure") or {}),
+        ("Pricing", "KDP Select", select_answer(listing, facts)),
         ("Pricing", "Territories",
          territories.get("mode", "") + (
              f" (exclude: {', '.join(territories.get('exclude') or [])})"
              if territories.get("exclude") else "")),
     ]
     return [{"page": page, "field": field, "value": value} for page, field, value in rows]
-
-
-def planned_writes(
-    project_dir: Path, listing: dict[str, Any], defaults: dict[str, Any],
-    *, today: Optional[date] = None,
-) -> dict[str, Any]:
-    """What ``apply`` would write: ``{project_json: {...}, edition_notice: {...}}``."""
-    today = today or date.today()
-    epub = listing.get("epub") or {}
-    translator = translator_of(listing) or str(defaults.get("translator") or "")
-    publisher = epub.get("publisher") or defaults.get("publisher") or ""
-    rights = epub.get("rights") or _fill(
-        str(defaults.get("rights") or ""), {"year": today.year, "translator": translator},
-    )
-    project_fields = {
-        "spanish_title": str(listing.get("title") or "").strip(),
-        "subtitle": str(listing.get("subtitle") or "").strip(),
-        "author": str(listing.get("author") or "").strip(),
-        "translator": translator,
-        "publisher": publisher,
-        "description": epub.get("description") or description_plain(
-            str(listing.get("description_html") or "")),
-        "rights": rights,
-        "subjects": [str(s).strip() for s in epub.get("subjects") or [] if str(s).strip()],
-        "original_year": epub.get("original_year"),
-        "publication_date": epub.get("publication_date") or today.isoformat(),
-        "front_matter": {"title_page": bool(epub.get("title_page", True))},
-    }
-    if epub.get("source_title"):
-        project_fields["source_title"] = epub["source_title"]
-    # Never blank out a value already on disk with an empty one.
-    project_fields = {k: v for k, v in project_fields.items() if v not in (None, "", [])}
-    notice = epub.get("edition_notice") or {}
-    return {
-        "project_json": project_fields,
-        "edition_notice": {
-            "heading": str(notice.get("heading") or "").strip(),
-            "body": str(notice.get("body") or "").strip(),
-        } if str(notice.get("body") or "").strip() else None,
-    }
 
 
 def _read(path: Path) -> Optional[dict[str, Any]]:
@@ -155,54 +143,47 @@ def apply(
     defaults: dict[str, Any],
     *,
     facts: Optional[dict[str, Any]] = None,
+    book: Optional[dict[str, Any]] = None,
     dry_run: bool = False,
     today: Optional[date] = None,
 ) -> dict[str, Any]:
-    """Validate, then write the three files. Returns the field-level diff."""
+    """Validate, then write ``kdp_listing.json``. Returns the field-level diff.
+
+    ``book`` is :func:`book_state`; left out, it is read here. An ASIN and a
+    publication date already on record are kept.
+    """
     project_dir = Path(project_dir)
-    verdict = check(listing, defaults, facts=facts)
+    if book is None:
+        book = book_state(project_dir)
+    verdict = check(listing, defaults, facts=facts, book=book)
     if not verdict["ok"]:
         return {"status": "refused", "reason": "the listing has errors", "check": verdict}
 
-    plan = planned_writes(project_dir, listing, defaults, today=today)
-    project_path = project_dir / PROJECT_FILE
-    project = _read(project_path)
-    if project is None:
-        # Writing over it would drop every key apply does not own.
-        return {"status": "refused", "reason": f"{PROJECT_FILE} exists but is not a readable "
+    listing_path = project_dir / LISTING_FILE
+    before = _read(listing_path)
+    if before is None:
+        return {"status": "refused", "reason": f"{LISTING_FILE} exists but is not a readable "
                 "JSON object; fix it by hand first"}
-    changes = []
-    for key, after in plan["project_json"].items():
-        before = project.get(key)
-        if key == "front_matter" and isinstance(before, dict):
-            after = {**before, **after}
-        if before != after:
-            changes.append({"file": PROJECT_FILE, "field": key, "before": before, "after": after})
-            project[key] = after
 
-    notice_path = project_dir / EDITION_NOTICE_FILE
-    if plan["edition_notice"] is not None:
-        before = _read(notice_path) or {}
-        for field in ("heading", "body"):
-            if before.get(field) != plan["edition_notice"][field]:
-                changes.append({"file": EDITION_NOTICE_FILE, "field": field,
-                                "before": before.get(field),
-                                "after": plan["edition_notice"][field]})
-
-    record = dict(listing)
+    record = {k: v for k, v in listing.items() if k != "epub"}
     record["publishing_rights"] = verdict["rights_mode"]
+    record["kdp_select"] = bool(listing.get("kdp_select"))
     record["approved_at"] = (today or date.today()).isoformat()
-    record["kdp_form"] = kdp_form(listing, defaults)
+    record["kdp_form"] = kdp_form(listing, defaults, facts=facts)
+    for key in ("asin", "published_at"):
+        if before.get(key):
+            record[key] = before[key]
+
+    changes = []
+    for key in sorted(set(record) | set(before)):
+        if key in ("approved_at", "kdp_form", "epub"):
+            continue
+        if before.get(key) != record.get(key):
+            changes.append({"file": LISTING_FILE, "field": key,
+                            "before": before.get(key), "after": record.get(key)})
 
     written = []
     if not dry_run:
-        project_path.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
-        written.append(str(project_path))
-        if plan["edition_notice"] is not None:
-            notice_path.write_text(
-                json.dumps(plan["edition_notice"], indent=2, ensure_ascii=False), encoding="utf-8")
-            written.append(str(notice_path))
-        listing_path = project_dir / LISTING_FILE
         listing_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
         written.append(str(listing_path))
 
@@ -211,4 +192,31 @@ def apply(
         "changes": changes,
         "written": written,
         "warnings": verdict["warnings"],
+        "kdp_select": select_answer(listing, facts),
     }
+
+
+def mark_published(
+    project_dir: Path, asin: str, *, when: Optional[str] = None, today: Optional[date] = None,
+) -> dict[str, Any]:
+    """Record a live listing's ASIN and date in ``kdp_listing.json``.
+
+    The next run then knows the book is for sale: it refreshes that listing
+    and keeps its title and reading age, where a first run would draft a new one.
+    """
+    path = Path(project_dir) / LISTING_FILE
+    record = _read(path)
+    if not record:
+        return {"status": "refused", "reason": f"no readable {LISTING_FILE}: apply a listing first"}
+    asin = asin.strip().upper()
+    if not _ASIN_RE.match(asin):
+        return {"status": "refused", "reason": f"{asin!r} is not an ASIN (B0 and eight more "
+                "letters or digits)"}
+    when = when or (today or date.today()).isoformat()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", when):
+        return {"status": "refused", "reason": f"{when!r} is not YYYY-MM-DD"}
+    before = {"asin": record.get("asin"), "published_at": record.get("published_at")}
+    record["asin"], record["published_at"] = asin, when
+    path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"status": "ok", "listing": str(path), "before": before,
+            "after": {"asin": asin, "published_at": when}}

@@ -2,24 +2,32 @@
 """
 The last mile to a Kindle listing: facts, Amazon evidence, the KDP form.
 
+This is the store's half of a book and it runs second. The book's own pages
+(title page, copyright page, ``dc:description``) are written by
+``scripts/book_metadata.py``; ``check`` holds the listing to them, and ``apply``
+writes only ``kdp_listing.json``.
+
 Subcommands, each printing exactly one JSON object:
 
     facts         book + edition facts -> .harness/kdp/facts.json      (one cached fetch)
     suggest       Amazon autocomplete for keyword seeds                (HTTP, no browser)
     comps         comparable books' BSR ladders, reading age, price    (headless browser)
     category      a category's tree position and rank-to-sales signal  (headless browser)
-    check         validate a listing against KDP's rules               (no network)
+    check         validate a listing against KDP's rules and the book  (no network)
     report        the dated report for the approval gate               (no network)
-    apply         write project.json, edition_notice.json, kdp_listing.json
-    verify-epub   read the built EPUB back and confirm the metadata landed
+    apply         write kdp_listing.json
+    verify-epub   read the built Kindle EPUB back and confirm the metadata landed
+    published     record the live listing's ASIN and date in kdp_listing.json
 
 The agent drafts the listing (``.harness/kdp/listing.json``); these commands
 gather what it is drafted from and refuse what KDP would refuse. ``comps`` and
 ``category`` need Playwright (``requirements-kdp.txt``); everything else runs
-on the base install.
+on the base install. Each command's result is also kept in
+``.harness/kdp/last_output.<command>.json``.
 
 Typical flow (the kdp-publish skill drives it, with a STOP gate before apply):
 
+    python scripts/book_metadata.py apply  --project bambi-a-life-in-the-woods   (first)
     python scripts/kdp_publish.py facts    --project bambi-a-life-in-the-woods
     python scripts/kdp_publish.py suggest  --project bambi-a-life-in-the-woods \
         --seeds-file projects/bambi-a-life-in-the-woods/.harness/kdp/seeds.txt --expand
@@ -29,8 +37,8 @@ Typical flow (the kdp-publish skill drives it, with a STOP gate before apply):
     python scripts/kdp_publish.py check    --project bambi-a-life-in-the-woods
     python scripts/kdp_publish.py report   --project bambi-a-life-in-the-woods
     python scripts/kdp_publish.py apply    --project bambi-a-life-in-the-woods --dry-run
-    python scripts/harness.py epub         --project bambi-a-life-in-the-woods
     python scripts/kdp_publish.py verify-epub --project bambi-a-life-in-the-woods
+    python scripts/kdp_publish.py published --project bambi-a-life-in-the-woods --asin B0XXXXXXXX
 """
 
 from __future__ import annotations
@@ -54,10 +62,10 @@ for _stream in (sys.stdout, sys.stderr):
 # import time so it can't corrupt the JSON an agent parses.
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 
-from src.harness import state as hstate  # noqa: E402
 from src.kdp import load_defaults, work_dir  # noqa: E402
 
 _OUTPUT_DIR: Path | None = None
+_COMMAND = ""
 
 
 def _die(message: str) -> None:
@@ -70,28 +78,28 @@ def _resolve_project(arg: str) -> Path:
     from src import collection as collection_mod
 
     try:
-        return hstate.resolve_project_dir(arg).resolve()
-    except FileNotFoundError:
-        pass
-    try:
-        return collection_mod.resolve_collection_dir(arg).resolve()
-    except (FileNotFoundError, ValueError):
-        _die(f"project not found: {arg!r} (looked for a directory, projects/{arg} "
-             f"and a collection named {arg!r})")
+        return collection_mod.resolve_book_or_collection(arg)
+    except FileNotFoundError as exc:
+        _die(str(exc))
         raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _emit(payload: dict) -> None:
-    """Print one JSON object, after mirroring it to ``.harness/kdp/last_output.json``.
+    """Print one JSON object, after mirroring it to ``.harness/kdp/``.
 
     The same contract as ``footnote_pass.py``: a file on disk is ``Read``-able
-    without a second interpreter in the loop. Best-effort by design.
+    without a second interpreter in the loop. ``last_output.<command>.json``
+    keeps each command's result, so two commands running at once (``suggest``
+    in the background, say) cannot overwrite each other; ``last_output.json`` is
+    whichever finished last. Best-effort by design.
     """
     if _OUTPUT_DIR is not None:
         try:
             _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            out = _OUTPUT_DIR / "last_output.json"
-            out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            out = _OUTPUT_DIR / f"last_output.{_COMMAND}.json"
+            for path in (_OUTPUT_DIR / "last_output.json", out):
+                path.write_text(text, encoding="utf-8")
             print(f"OUTPUT_JSON: {out}", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - a convenience, never a hard dependency
             print(f"warning: could not write last_output.json: {exc}", file=sys.stderr)
@@ -125,11 +133,19 @@ def _listing(project_dir: Path, arg: str | None) -> tuple[dict, Path]:
 def cmd_facts(args: argparse.Namespace, project_dir: Path) -> dict:
     from src.kdp import facts as kdp_facts
 
+    from src.kdp.listing import book_state
+
     facts = kdp_facts.gather(project_dir, fetch=not args.no_fetch)
     catalog = facts.get("catalog") or {}
+    book = book_state(project_dir)
     return {
         "status": "ok",
         "facts_path": facts["_path"],
+        # The listing reads the edition; without one, book-metadata runs first.
+        "edition_applied": book["edition_applied"],
+        "book": {k: book[k] for k in ("title", "subtitle", "translator", "edition", "endnotes")},
+        "site": facts["site"],
+        "existing_listing": facts["existing_listing"],
         "title": facts["titles"]["spanish_title"] or facts["titles"]["project_title"],
         "author": facts["author"],
         "gutenberg_id": facts["source"]["gutenberg_id"],
@@ -330,11 +346,14 @@ def cmd_category(args: argparse.Namespace, project_dir: Path) -> dict:
 
 
 def cmd_check(args: argparse.Namespace, project_dir: Path) -> dict:
+    from src.kdp.listing import book_state
     from src.kdp.validate import check
 
+    from src.kdp.facts import with_live_site
+
     listing, path = _listing(project_dir, args.listing_file)
-    facts = _read_json(work_dir(project_dir) / "facts.json")
-    verdict = check(listing, load_defaults(), facts=facts)
+    facts = with_live_site(_read_json(work_dir(project_dir) / "facts.json"), project_dir)
+    verdict = check(listing, load_defaults(), facts=facts, book=book_state(project_dir))
     return {"status": "ok" if verdict["ok"] else "errors", "listing": str(path), **verdict}
 
 
@@ -348,9 +367,10 @@ def cmd_report(args: argparse.Namespace, project_dir: Path) -> dict:
 
 def cmd_apply(args: argparse.Namespace, project_dir: Path) -> dict:
     from src.kdp import listing as kdp_listing
+    from src.kdp.facts import with_live_site
 
     listing, _path = _listing(project_dir, args.listing_file)
-    facts = _read_json(work_dir(project_dir) / "facts.json")
+    facts = with_live_site(_read_json(work_dir(project_dir) / "facts.json"), project_dir)
     return kdp_listing.apply(project_dir, listing, load_defaults(), facts=facts, dry_run=args.dry_run)
 
 
@@ -359,6 +379,12 @@ def cmd_verify_epub(args: argparse.Namespace, project_dir: Path) -> dict:
 
     result = verify(project_dir, Path(args.epub) if args.epub else None)
     return {"status": "ok" if result["ok"] else "failed", **result}
+
+
+def cmd_published(args: argparse.Namespace, project_dir: Path) -> dict:
+    from src.kdp import listing as kdp_listing
+
+    return kdp_listing.mark_published(project_dir, args.asin, when=args.date)
 
 
 # ── argparse ────────────────────────────────────────────────────────────────
@@ -402,28 +428,34 @@ def _parser() -> argparse.ArgumentParser:
 
     for name, help_ in (("check", "Validate a listing against KDP's rules"),
                         ("report", "Write the dated report for the approval gate"),
-                        ("apply", "Write the approved listing to the book")):
+                        ("apply", "Write the approved listing to kdp_listing.json")):
         p = _cmd(name, help_)
         p.add_argument("--listing-file", help="Default: .harness/kdp/listing.json")
         if name == "apply":
             p.add_argument("--dry-run", action="store_true", help="Show the diff, write nothing")
 
-    p = _cmd("verify-epub", "Confirm the built EPUB carries the metadata")
+    p = _cmd("verify-epub", "Confirm the built Kindle EPUB carries the metadata")
     p.add_argument("--epub", help="Default: the newest *.epub in the project folder")
+
+    p = _cmd("published", "Record the live listing's ASIN and date")
+    p.add_argument("--asin", required=True, help="The Kindle listing's ASIN (B0…)")
+    p.add_argument("--date", help="Publication date, YYYY-MM-DD (default: today)")
     return parser
 
 
 _COMMANDS = {
     "facts": cmd_facts, "suggest": cmd_suggest, "comps": cmd_comps, "category": cmd_category,
     "check": cmd_check, "report": cmd_report, "apply": cmd_apply, "verify-epub": cmd_verify_epub,
+    "published": cmd_published,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _OUTPUT_DIR
+    global _OUTPUT_DIR, _COMMAND
     args = _parser().parse_args(argv)
     project_dir = _resolve_project(args.project)
     _OUTPUT_DIR = work_dir(project_dir)
+    _COMMAND = args.command
     payload = _COMMANDS[args.command](args, project_dir)
     _emit(payload)
     return 0 if payload.get("status") in ("ok", "applied", "dry_run") else 1

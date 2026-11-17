@@ -15,7 +15,8 @@ unchanged. A collection folder lives anywhere under ``projects/`` and holds:
   ``part_title`` defaults to the member's ``spanish_title``; ``part_page`` is
   ``"auto"`` (a part page only for a multi-chapter member), ``true`` or ``false``.
 - ``project.json`` — the *volume's* metadata, the same keys a book carries, so
-  :mod:`src.book_metadata` and ``kdp_publish.py apply`` work on it unchanged.
+  :mod:`src.book_metadata`, ``book_metadata.py apply`` and ``kdp_publish.py apply``
+  work on it unchanged.
 - the volume's own sidecars (``edition_notice.json``, ``translator_note.json``,
   ``kdp_listing.json``, ``cover/``, ``quotations.json``), named as for a book.
 
@@ -146,6 +147,24 @@ def resolve_collection_dir(collection: str) -> Path:
         logger.warning("Duplicate collection id %r found at %s; using %s",
                        collection, [str(d) for d in found], found[0])
     return found[0]
+
+
+def resolve_book_or_collection(arg: str) -> Path:
+    """A book's project dir, or a collection's dir: a volume is published like a book.
+
+    ``arg`` is a slug or a path. Raises ``FileNotFoundError`` naming everything
+    that was looked for.
+    """
+    try:
+        return state.resolve_project_dir(arg).resolve()
+    except FileNotFoundError:
+        pass
+    try:
+        return resolve_collection_dir(arg).resolve()
+    except (FileNotFoundError, ValueError):
+        raise FileNotFoundError(
+            f"project not found: {arg!r} (looked for a directory, projects/{arg} "
+            f"and a collection named {arg!r})") from None
 
 
 def _project_slug_exists(slug: str) -> bool:

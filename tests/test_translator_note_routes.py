@@ -233,6 +233,67 @@ class TestPostTranslatorNote:
         assert rv.status_code == 404
 
 
+class TestAboutBook:
+    def test_blank_when_no_file(self, client, project):
+        assert client.get("/api/project/p1/about-book").get_json() == {"heading": "", "body": ""}
+
+    def test_round_trip(self, client, project):
+        rv = client.post("/api/project/p1/about-book", json={"heading": "H", "body": "B"})
+        assert rv.get_json() == {"ok": True}
+        assert json.loads((project / "about_book.json").read_text(encoding="utf-8")) == \
+            {"heading": "H", "body": "B"}
+        assert client.get("/api/project/p1/about-book").get_json() == {"heading": "H", "body": "B"}
+
+    def test_body_too_large(self, client, project):
+        rv = client.post("/api/project/p1/about-book", json={"body": "x" * 200_000})
+        assert rv.status_code == 400
+
+    def test_unsafe_id(self, client, project):
+        assert client.get("/api/project/.../about-book").status_code == 400
+
+
+class TestSiteMetadata:
+    def _project_json(self, project):
+        return json.loads((project / "project.json").read_text(encoding="utf-8"))
+
+    def test_blank_when_unset_with_choices(self, client, project):
+        data = client.get("/api/project/p1/site-metadata").get_json()
+        assert data["forms"] == [] and data["adaptations"] == "" and data["parent_notes"] == ""
+        assert [c["code"] for c in data["form_choices"]] == ["I", "II", "III/IV", "V/VI"]
+
+    def test_round_trip_keeps_other_keys(self, client, project):
+        (project / "project.json").write_text(json.dumps({"title": "T"}), encoding="utf-8")
+        rv = client.post("/api/project/p1/site-metadata", json={
+            "forms": ["III/IV", "II"], "adaptations": " Notas nuevas. ", "parent_notes": "Cuidado."})
+        assert rv.get_json() == {"ok": True}
+        assert self._project_json(project) == {
+            "title": "T", "forms": ["II", "III/IV"],
+            "adaptations": "Notas nuevas.", "parent_notes": "Cuidado."}
+        data = client.get("/api/project/p1/site-metadata").get_json()
+        assert data["forms"] == ["II", "III/IV"]
+
+    def test_blank_clears_and_omitted_key_is_left_alone(self, client, project):
+        (project / "project.json").write_text(json.dumps(
+            {"forms": ["I"], "adaptations": "A", "parent_notes": "P"}), encoding="utf-8")
+        client.post("/api/project/p1/site-metadata", json={"forms": [], "adaptations": ""})
+        assert self._project_json(project) == {"parent_notes": "P"}
+
+    def test_unknown_form_refused(self, client, project):
+        rv = client.post("/api/project/p1/site-metadata", json={"forms": ["II", "Form 7"]})
+        assert rv.status_code == 400
+        assert not (project / "project.json").exists()
+
+    def test_forms_not_a_list(self, client, project):
+        assert client.post("/api/project/p1/site-metadata", json={"forms": "II"}).status_code == 400
+
+    def test_text_too_large(self, client, project):
+        rv = client.post("/api/project/p1/site-metadata", json={"parent_notes": "x" * 200_000})
+        assert rv.status_code == 400
+
+    def test_unsafe_id(self, client, project):
+        assert client.get("/api/project/.../site-metadata").status_code == 400
+
+
 class TestBuildEpubPersistsNote:
     def test_build_route_writes_note_to_disk(self, client, project):
         # The build itself will fail (no chunks), but the note save runs first.
@@ -312,6 +373,61 @@ class TestBuildEpubRoute:
         assert data["chapters_included"] == 1
         assert data["filename"].endswith(".epub")
         assert data["size_bytes"] > 0
+
+    def test_libre_target_builds_into_libre_and_downloads_from_there(
+        self, client, project, monkeypatch, tmp_path
+    ):
+        import src.book_metadata as bm
+        monkeypatch.setattr(bm, "PUBLISH_DEFAULTS_FILE", tmp_path / "none.json")
+        monkeypatch.setattr(bm, "PUBLISH_DEFAULTS_EXAMPLE_FILE", tmp_path / "none.example.json")
+        (project / "images").mkdir()
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola.")
+
+        rv = client.post("/api/project/p1/build-epub", json={
+            "title": "Mi Libro", "author": "A", "target": "libre",
+            "edition": {"version": "1.0", "status": "beta"},
+            "about_heading": "", "about_body": "Sobre el libro.",
+        })
+        assert rv.status_code == 200, rv.get_json()
+        data = rv.get_json()
+        assert data["target"] == "libre" and data["filename"] == "mi-libro.epub"
+        assert (project / "libre" / "mi-libro.epub").exists()
+        assert not list(project.glob("*.epub"))
+        saved = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        assert saved["edition"] == {"version": "1.0", "status": "beta"}
+        assert json.loads((project / "about_book.json").read_text(encoding="utf-8"))["body"] \
+            == "Sobre el libro."
+
+        assert client.get("/api/project/p1/download-epub").status_code == 404
+        rv = client.get("/api/project/p1/download-epub?target=libre")
+        assert rv.status_code == 200
+        assert "mi-libro.epub" in rv.headers["Content-Disposition"]
+        status = client.get("/api/project/p1/epub-status").get_json()
+        assert status["libre_epub_filename"] == "mi-libro.epub"
+        assert status["epub_exists"] is False
+        assert status["edition_version"] == "1.0"
+
+    def test_blank_edition_version_clears_it(self, client, project):
+        (project / "project.json").write_text(
+            json.dumps({"edition": {"version": "1.0", "status": "beta"}}), encoding="utf-8")
+        client.post("/api/project/p1/build-epub",
+                    json={"edition": {"version": "", "status": "beta"}})
+        assert "edition" not in json.loads((project / "project.json").read_text(encoding="utf-8"))
+
+    def test_libre_without_edition_is_a_400(self, client, project):
+        (project / "images").mkdir()
+        chunks_dir = project / "chunks"
+        chunks_dir.mkdir()
+        self._write_chunk(chunks_dir, "chapter_01", 0, "Hello.", "CAPÍTULO I\n\nHola.")
+        rv = client.post("/api/project/p1/build-epub", json={"title": "T", "target": "libre"})
+        assert rv.status_code == 400
+        assert "edition" in rv.get_json()["error"]
+
+    def test_unknown_target_is_a_400(self, client, project):
+        rv = client.post("/api/project/p1/build-epub", json={"target": "kobo"})
+        assert rv.status_code == 400
 
     def test_generic_exception_returns_500(self, client, project, monkeypatch):
         """Unexpected exceptions are caught and return 500."""

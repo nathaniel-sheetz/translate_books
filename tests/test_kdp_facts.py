@@ -137,6 +137,7 @@ def test_gather(tmp_path, monkeypatch):
             "{edition_additions}", "{publisher}"]},
         "_source": "test",
     })
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
     project = _project(tmp_path)
     facts = kdp_facts.gather(project, today=TODAY)
 
@@ -144,7 +145,10 @@ def test_gather(tmp_path, monkeypatch):
     assert facts["source"]["gutenberg_id"] == 72577
     assert facts["catalog"]["lcsh"] == ["Nature stories", "Deer -- Fiction"]
     assert facts["footnotes"] == {"total": 2, "imported_from_source": 1, "editorial": 1,
-                                  "by_origin": {"gutenberg": 1, "footnote_pass": 1}}
+                                  "by_origin": {"gutenberg": 1, "footnote_pass": 1},
+                                  "epub_endnotes": None}
+    assert facts["existing_listing"] == {"file": False, "asin": "", "published_at": ""}
+    assert facts["site"]["on_site"] is False and facts["site"]["libre_epub"] is None
     images = facts["images"]
     assert images["new_cover"] and not images["cover_made_from_nothing"]
     assert images["translated_lettering"] == 1  # i002 was reverted, i003 only backfilled
@@ -161,6 +165,119 @@ def test_gather(tmp_path, monkeypatch):
     needs = {n["field"] for n in facts["needs_input"]}
     assert needs == {"original_year", "translator"}
     assert (project / ".harness" / "kdp" / "facts.json").exists()
+
+
+def _rewrite_project(project: Path, **changes) -> None:
+    path = project / "project.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in changes.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_gather_reads_the_author_from_the_cover_then_offers_the_catalog(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: {"_source": "test"})
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
+    project = _project(tmp_path)
+    _rewrite_project(project, author=None)
+
+    asked = next(n for n in kdp_facts.gather(project, today=TODAY)["needs_input"]
+                 if n["field"] == "author")
+    assert {"name": "Felix Salten", "from": "catalog"} in asked["candidates"]
+
+    (project / "cover" / "spec.json").write_text(json.dumps(
+        {"title": "Bambi", "author": "Félix Salten"}), encoding="utf-8")
+    facts = kdp_facts.gather(project, today=TODAY)
+    assert facts["author"] == "Félix Salten"
+    assert "author" not in {n["field"] for n in facts["needs_input"]}
+
+
+def test_natural_name():
+    assert kdp_facts._natural_name("Long, C. C.") == "C. C. Long"
+    assert kdp_facts._natural_name("Homer") == "Homer"
+
+
+def test_gather_says_when_there_is_no_source_to_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: {"_source": "test"})
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
+    project = _project(tmp_path)
+    _rewrite_project(project, gutenberg_url=None)
+    facts = kdp_facts.gather(project, today=TODAY)
+    asked = next(n for n in facts["needs_input"] if n["field"] == "source")
+    assert "gutenberg_url" in asked["why"] and facts["rights_flags"] == []
+
+
+def test_gather_compares_the_note_store_with_the_built_epub(tmp_path, monkeypatch):
+    import zipfile
+
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: {"_source": "test"})
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
+    project = _project(tmp_path)
+
+    def build(notes: int) -> None:
+        body = "".join(f'<p class="endnote"><a id="en-{n}" href="c.xhtml#enref-{n}">{n}.</a> Nota.</p>'
+                       for n in range(1, notes + 1))
+        with zipfile.ZipFile(project / "book.epub", "w") as zf:
+            zf.writestr("EPUB/endnotes.xhtml", f"<html><body>{body}</body></html>")
+
+    build(2)
+    facts = kdp_facts.gather(project, today=TODAY)
+    assert facts["footnotes"]["epub_endnotes"] == 2
+    assert "footnotes" not in {n["field"] for n in facts["needs_input"]}
+
+    build(3)
+    facts = kdp_facts.gather(project, today=TODAY)
+    asked = next(n for n in facts["needs_input"] if n["field"] == "footnotes")
+    assert "2 active notes" in asked["why"] and "prints 3" in asked["why"]
+
+
+def test_existing_listing_knows_a_live_book(tmp_path, monkeypatch):
+    monkeypatch.setattr(kdp_facts, "load_defaults", lambda: {"_source": "test"})
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
+    examples = tmp_path / "examples.md"
+    examples.write_text(
+        "# Examples\n\n## Example 2: *Bambi: Una vida en el bosque* (B0EXAMPLE1): the context\n",
+        encoding="utf-8")
+    monkeypatch.setattr(kdp_facts, "examples_path", lambda: examples)
+    project = _project(tmp_path)
+
+    by_hand = kdp_facts.gather(project, today=TODAY)["existing_listing"]
+    assert by_hand == {"file": False, "asin": "B0EXAMPLE1", "published_at": "",
+                       "asin_from": "description examples"}
+
+    (project / "kdp_listing.json").write_text(json.dumps(
+        {"title": "Bambi", "asin": "B0AAAAAAAA", "published_at": "2026-10-20"}), encoding="utf-8")
+    recorded = kdp_facts.gather(project, today=TODAY)["existing_listing"]
+    assert recorded == {"file": True, "asin": "B0AAAAAAAA", "published_at": "2026-10-20"}
+
+
+def test_site_block_counts_a_libre_build_as_on_the_site(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
+    project = _project(tmp_path)
+    assert kdp_facts.site_presence(project)["on_site"] is False
+    (project / "libre").mkdir()
+    (project / "libre" / "bambi.epub").write_bytes(b"x")
+    site = kdp_facts.site_presence(project)
+    assert site["on_site"] is True and site["libre_epub"].endswith("bambi.epub")
+
+
+def test_with_live_site_overrides_a_stale_cached_site(tmp_path, monkeypatch):
+    from src.kdp.validate import check
+
+    monkeypatch.setattr("src.site_texts.site_repo_dir", lambda: "")
+    project = _project(tmp_path)
+    cached = {"site": {"on_site": False}, "authorship": {"x": 1}}
+    (project / "libre").mkdir()
+    (project / "libre" / "bambi.epub").write_bytes(b"x")
+    live = kdp_facts.with_live_site(cached, project)
+    assert live["site"]["on_site"] is True and live["authorship"] == {"x": 1}
+    # A facts.json from before ``site`` existed, or none at all, is read live too.
+    assert kdp_facts.with_live_site(None, project)["site"]["on_site"] is True
+    verdict = check({"kdp_select": True}, {}, facts=live)
+    assert any(i["code"] == "select_on_site" for i in verdict["errors"])
 
 
 def test_descriptor_key_thresholds():

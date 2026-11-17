@@ -25,6 +25,9 @@ Examples:
     # Use a different chapters directory
     python build_epub.py projects/fabre2 --title "Book" --author "Author" \\
         --chapters-dir projects/fabre2/chapters/translated
+
+    # The free-library edition (needs project.json "edition")
+    python build_epub.py projects/fabre2 --target libre
 """
 
 import argparse
@@ -35,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.book_metadata import epub_kwargs
-from src.epub_builder import build_epub, build_epub_from_chunks
+from src.epub_builder import KINDLE, TARGETS, build_epub, build_epub_from_chunks
 from src.harness.state import emit_harness_result
 
 
@@ -90,6 +93,14 @@ Examples:
         help='Chapter files directory. Defaults to {project_dir}/chapters/'
     )
     parser.add_argument(
+        '--target',
+        choices=TARGETS,
+        default=KINDLE,
+        help='kindle (default): the KDP upload, links as plain text. libre: the '
+             'free-library download, with live links, the house license and the '
+             'edition version; written to {project_dir}/libre/<site_slug>.epub'
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Show detailed build information'
@@ -136,6 +147,7 @@ Examples:
                 cover_image=args.cover,
                 output_path=args.output,
                 chapters_dir=chapters_dir,
+                target=args.target,
                 **metadata,
             )
             included = skipped = None
@@ -144,6 +156,7 @@ Examples:
                 project_path=project_dir,
                 cover_image=args.cover,
                 output_path=args.output,
+                target=args.target,
                 **metadata,
             )
             output = result.path
@@ -169,6 +182,7 @@ Examples:
 
     emit_harness_result({
         "stage": "epub",
+        "target": args.target,
         "path": str(output),
         "size_kb": round(size_kb, 1),
         "included": list(included) if included is not None else [],

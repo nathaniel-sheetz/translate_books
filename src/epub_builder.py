@@ -48,6 +48,26 @@ _ENDNOTE_SUP = (
     r'<a id="enref-\1" href="endnotes.xhtml#en-\1">\1</a></sup>'
 )
 
+# Build targets. ``kindle`` is the KDP upload: no live links, no [LIBRE] blocks
+# (KDP bans links to forms and treats self-promotion harshly). ``libre`` is the
+# free-library download: live links, the house license on the copyright page,
+# and a required edition version on the title page.
+KINDLE = 'kindle'
+LIBRE = 'libre'
+TARGETS = (KINDLE, LIBRE)
+
+# Markup understood only in the generated pages (translator note, copyright
+# page, Sobre este libro), never in chapter text:
+#   [LIBRE] / [KINDLE] at the start of a block -> the block is kept only in that target
+#   [texto](https://...)                        -> a link (live in libre, text in kindle)
+#   {{SITIO}} / {{COMENTARIOS}}                  -> the house site / feedback URL
+_TARGET_TAG_RE = re.compile(r'^\[(LIBRE|KINDLE)\][ \t]*\n?', re.IGNORECASE)
+_LINK_RE = re.compile(r'\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()]+)\)')
+_EMPTY_LINK_RE = re.compile(r'\[([^\[\]\n]+)\]\(\s*\)')
+_PAGE_VAR_RE = re.compile(r'\{\{(SITIO|COMENTARIOS)\}\}')
+_DEFAULT_EDITION_LABEL = 'Versión {version} ({status})'
+_DEFAULT_LICENSE_STATEMENT = 'Esta traducción se publica bajo la licencia [{name}]({url}).'
+
 # Characters Windows reserves in a filename. ':' is the dangerous one here --
 # NTFS reads it as the alternate-data-stream separator, so a title like
 # "Bambi: Una vida en el bosque" writes the EPUB into a hidden stream on a
@@ -76,6 +96,21 @@ def epub_filename(title: str, fallback: str) -> str:
     # guarantee that the result is a single path component and nothing more.
     stem = Path(stem).name.rstrip(". ")
     return f"{stem or fallback}.epub"
+
+
+def default_epub_path(
+    project_path: Path, title: str, *, target: str = 'kindle', site_slug: Optional[str] = None,
+) -> Path:
+    """Where a build of ``target`` lands when no output path is given.
+
+    Kindle: ``<project>/<Spanish title>.epub``, as every build path always wrote.
+    Libre: ``<project>/libre/<site_slug>.epub``, so the two builds never
+    overwrite each other and the file is named as the site's release asset.
+    """
+    project_path = Path(project_path)
+    if target == 'libre':
+        return project_path / 'libre' / f"{site_slug or project_path.name}.epub"
+    return project_path / epub_filename(title, project_path.name)
 
 # Default configuration for synthesizing a chapter heading when the chapter
 # text does not begin with a recognizable numeral line. Override per project
@@ -106,12 +141,94 @@ _CHAPTER_LABELS_BY_LANGUAGE: Dict[str, str] = {
 }
 
 _DEFAULT_TRANSLATOR_HEADING = "Nota del traductor"
+_DEFAULT_ABOUT_BOOK_HEADING = "Sobre este libro"
 
 
 class EpubBuildResult(NamedTuple):
     path: Path
     included: List[str]
     skipped: List[str]
+
+
+class PageMarkup(NamedTuple):
+    """How a generated page's markup resolves in one build: its target and variables."""
+    target: str = KINDLE
+    #: ``SITIO`` / ``COMENTARIOS`` -> URL (``""`` when unset).
+    variables: Dict[str, str] = {}
+
+
+def _select_target_blocks(body: str, target: str) -> str:
+    """Keep untagged blocks and the blocks tagged for ``target``, tags stripped."""
+    kept: List[str] = []
+    for block in re.split(r'\n\s*\n', body):
+        stripped = block.strip()
+        m = _TARGET_TAG_RE.match(stripped)
+        if m is None:
+            kept.append(block)
+        elif m.group(1).lower() == target:
+            kept.append(stripped[m.end():])
+    return '\n\n'.join(kept)
+
+
+def _prepare_page_body(body: str, markup: Optional[PageMarkup], *, warn: bool = True) -> str:
+    """Resolve a generated page's target blocks and variables for one build.
+
+    ``markup=None`` returns the body untouched. A variable with no value is
+    replaced by nothing (with a warning), and a link left with no URL collapses
+    to its text, so a missing setting never ships as literal markup.
+    """
+    if markup is None:
+        return body
+    body = _select_target_blocks(body, markup.target)
+
+    def _var(m: 're.Match[str]') -> str:
+        value = markup.variables.get(m.group(1), '')
+        if not value and warn:
+            logger.warning("{{%s}} has no value (set it in prompts/publish_defaults.json); "
+                           "its link is left as plain text", m.group(1))
+        return value
+
+    body = _PAGE_VAR_RE.sub(_var, body)
+    return _EMPTY_LINK_RE.sub(r'\1', body)
+
+
+def page_variables(
+    publish: Optional[Dict[str, Any]],
+    site_slug: Optional[str],
+    edition: Optional[Dict[str, str]],
+) -> Dict[str, str]:
+    """``{{SITIO}}`` and ``{{COMENTARIOS}}`` from the house settings.
+
+    The feedback URL gets ``libro=<site_slug>`` and ``edicion=<status>``, the
+    hidden fields the feedback form pre-fills from.
+    """
+    from urllib.parse import urlencode
+
+    site = (publish or {}).get('site') or {}
+    feedback = (site.get('feedback_url') or '').strip()
+    if feedback:
+        params = {'libro': site_slug or ''}
+        if edition and edition.get('status'):
+            params['edicion'] = edition['status']
+        feedback += ('&' if '?' in feedback else '?') + urlencode(params)
+    return {'SITIO': (site.get('url') or '').strip(), 'COMENTARIOS': feedback}
+
+
+def edition_label(edition: Optional[Dict[str, str]], fmt: Optional[str] = None) -> str:
+    """``{"version": "1.2", "status": "beta"}`` -> ``"Versión 1.2 (beta)"``; ``""`` without a version.
+
+    With no status, an empty ``()`` the format leaves behind is dropped.
+    """
+    if not edition or not (edition.get('version') or '').strip():
+        return ''
+    values = {'version': edition['version'].strip(),
+              'status': (edition.get('status') or '').strip()}
+    try:
+        label = (fmt or _DEFAULT_EDITION_LABEL).format(**values)
+    except (KeyError, IndexError, ValueError):
+        # A placeholder the house format names wrongly must not fail every build.
+        label = _DEFAULT_EDITION_LABEL.format(**values)
+    return re.sub(r'\s*\(\s*\)', '', label).strip()
 
 
 def _int_to_roman(n: int) -> str:
@@ -329,6 +446,7 @@ section.titlepage p { text-indent: 0; text-align: center; }
 p.titlepage-subtitle { font-size: 1.2em; font-style: italic; margin-bottom: 2em; }
 p.titlepage-author { font-size: 1.2em; margin-bottom: 1.5em; }
 p.titlepage-publisher { margin-top: 4em; font-size: 0.9em; }
+p.titlepage-edition { margin-top: 1.5em; font-size: 0.85em; }
 section.edition-notice p { text-indent: 0; font-size: 0.9em; margin: 0.6em 0; }
 """
 
@@ -497,7 +615,7 @@ def detect_chapter_heading(
     return (heading, subtitle, body)
 
 
-def _render_inline(text: str) -> str:
+def _render_run(text: str) -> str:
     """Escape a text run, then promote the pipeline's inline markers.
 
     Promotes underscore-wrapped runs (the italic marker emitted by the ingest
@@ -507,7 +625,28 @@ def _render_inline(text: str) -> str:
     return _ENDNOTE_RE.sub(_ENDNOTE_SUP, _EM_RE.sub(_EM_REPL, escape(text)))
 
 
-def _render_quote_block(text: str) -> str:
+def _render_inline(text: str, links: Optional[str] = None) -> str:
+    """:func:`_render_run`, plus ``[texto](url)`` links when ``links`` names a target.
+
+    ``links=None`` (chapters) leaves the syntax as text. A ``libre`` build makes
+    each one a live ``<a>``; a ``kindle`` build keeps only ``texto``. The text is
+    split around each link before rendering, so an underscore in a URL never
+    turns into ``<em>``.
+    """
+    if links is None:
+        return _render_run(text)
+    out: List[str] = []
+    pos = 0
+    for m in _LINK_RE.finditer(text):
+        out.append(_render_run(text[pos:m.start()]))
+        label = _render_run(m.group(1))
+        out.append(f'<a href="{escape(m.group(2))}">{label}</a>' if links == LIBRE else label)
+        pos = m.end()
+    out.append(_render_run(text[pos:]))
+    return ''.join(out)
+
+
+def _render_quote_block(text: str, links: Optional[str] = None) -> str:
     """Render one block of a quoted passage (marker already stripped).
 
     A block with line breaks is verse and keeps each line, with the same markup
@@ -528,15 +667,15 @@ def _render_quote_block(text: str) -> str:
                     f'alt="{escape(m.group(2) or "")}"/></div>'
                 )
             else:
-                parts.append(f'<p>{_render_inline(ln)}</p>')
+                parts.append(f'<p>{_render_inline(ln, links)}</p>')
         return '\n'.join(parts)
     if len(lines) > 1:
-        verse_lines = [f'  <p class="verse-line">{_render_inline(ln)}</p>' for ln in lines]
+        verse_lines = [f'  <p class="verse-line">{_render_inline(ln, links)}</p>' for ln in lines]
         return '<div class="verse">\n' + '\n'.join(verse_lines) + '\n</div>'
-    return f'<p>{_render_inline(lines[0] if lines else "")}</p>'
+    return f'<p>{_render_inline(lines[0] if lines else "", links)}</p>'
 
 
-def _render_body_blocks(body: str) -> List[str]:
+def _render_body_blocks(body: str, links: Optional[str] = None) -> List[str]:
     """
     Render a plain-text body into a list of XHTML block strings.
 
@@ -547,6 +686,9 @@ def _render_body_blocks(body: str) -> List[str]:
         - A [CAPTION] block with no image above it -> <p class="caption">
         - A run of consecutive [QUOTE] blocks -> one <blockquote class="quote">
         - --- lines -> <hr />
+
+    ``links`` is passed to :func:`_render_inline`: only the generated pages
+    (translator note, copyright page, Sobre este libro) set it.
     """
     out: List[str] = []
     # Drop empties up front so the image branch's one-block lookahead lands on
@@ -571,7 +713,7 @@ def _render_body_blocks(body: str) -> List[str]:
             # the reader keeps the pair together across a page break
             # (page-break-inside: avoid); margin tuning alone cannot do that.
             if i + 1 < len(blocks) and is_caption_block(blocks[i + 1]):
-                caption = _render_inline(strip_caption_marker(blocks[i + 1]))
+                caption = _render_inline(strip_caption_marker(blocks[i + 1]), links)
                 out.append(
                     f'<figure>{img_tag}<figcaption>{caption}</figcaption></figure>'
                 )
@@ -587,7 +729,7 @@ def _render_body_blocks(body: str) -> List[str]:
         # branch: is_verse_block fires on two short lines, which would otherwise
         # render a two-line caption as a stanza.
         if is_caption_block(block):
-            caption = _render_inline(strip_caption_marker(block))
+            caption = _render_inline(strip_caption_marker(block), links)
             out.append(f'<p class="caption">{caption}</p>')
             i += 1
             continue
@@ -599,7 +741,7 @@ def _render_body_blocks(body: str) -> List[str]:
         if is_quote_block(block):
             inner: List[str] = []
             while i < len(blocks) and is_quote_block(blocks[i]):
-                inner.append(_render_quote_block(strip_quote_marker(blocks[i])))
+                inner.append(_render_quote_block(strip_quote_marker(blocks[i]), links))
                 i += 1
             out.append('<blockquote class="quote">\n' + '\n'.join(inner) + '\n</blockquote>')
             continue
@@ -617,7 +759,7 @@ def _render_body_blocks(body: str) -> List[str]:
             _IMAGE_RE.fullmatch(ln.strip()) for ln in block.split('\n') if ln.strip()
         ):
             verse_lines = [
-                f'  <p class="verse-line">{_render_inline(line.strip())}</p>'
+                f'  <p class="verse-line">{_render_inline(line.strip(), links)}</p>'
                 for line in block.split('\n')
                 if line.strip()
             ]
@@ -626,7 +768,7 @@ def _render_body_blocks(body: str) -> List[str]:
             continue
 
         # Regular paragraph
-        out.append(f'<p>{_render_inline(block)}</p>')
+        out.append(f'<p>{_render_inline(block, links)}</p>')
         i += 1
 
     return out
@@ -696,14 +838,22 @@ def _strip_image_blocks(body: str) -> Tuple[str, int]:
     return _IMAGE_RE.sub('', body), n_stripped
 
 
-def note_text_to_xhtml(heading: str, body: str) -> str:
+def note_text_to_xhtml(
+    heading: str,
+    body: str,
+    markup: Optional[PageMarkup] = None,
+    default_heading: str = _DEFAULT_TRANSLATOR_HEADING,
+) -> str:
     """
     Convert a translator note to XHTML. Same scaffolding as
     chapter_text_to_xhtml but takes an explicit heading (no regex
     detection, no subtitle) and strips [IMAGE:...] placeholders from body.
+    With ``markup``, the body's target blocks, variables and links resolve
+    for that build. Sobre este libro uses the same page with its own default
+    heading.
     """
-    eff_heading = heading.strip() or _DEFAULT_TRANSLATOR_HEADING
-    stripped_body, n_stripped = _strip_image_blocks(body)
+    eff_heading = heading.strip() or default_heading
+    stripped_body, n_stripped = _strip_image_blocks(_prepare_page_body(body, markup))
     if n_stripped > 0:
         logger.warning(
             "Stripped %d image placeholder(s) from translator note",
@@ -721,7 +871,7 @@ def note_text_to_xhtml(heading: str, body: str) -> str:
     )
     parts.append('<body>')
     parts.append(f'<h1>{escape(eff_heading)}</h1>')
-    parts.extend(_render_body_blocks(stripped_body))
+    parts.extend(_render_body_blocks(stripped_body, markup.target if markup else None))
     parts.append('</body>')
     parts.append('</html>')
     return '\n'.join(parts)
@@ -751,8 +901,10 @@ def title_page_to_xhtml(
     translator: Optional[str] = None,
     publisher: Optional[str] = None,
     translator_label: Optional[str] = None,
+    edition: Optional[str] = None,
 ) -> str:
-    """Render the generated title page: title, subtitle, author, translator, imprint."""
+    """Render the generated title page: title, subtitle, author, translator,
+    imprint, and the edition line («Versión 1.2 (beta)») when one is given."""
     body = ['<section class="titlepage">', f'<h1>{escape(title)}</h1>']
     if subtitle and subtitle.strip():
         body.append(f'<p class="titlepage-subtitle">{escape(subtitle.strip())}</p>')
@@ -765,6 +917,8 @@ def title_page_to_xhtml(
         )
     if publisher and publisher.strip():
         body.append(f'<p class="titlepage-publisher">{escape(publisher.strip())}</p>')
+    if edition and edition.strip():
+        body.append(f'<p class="titlepage-edition">{escape(edition.strip())}</p>')
     body.append('</section>')
     return _xhtml_page(title, body)
 
@@ -788,13 +942,15 @@ def part_page_to_xhtml(
     return _xhtml_page(title, body)
 
 
-def edition_notice_to_xhtml(heading: str, body: str) -> str:
+def edition_notice_to_xhtml(
+    heading: str, body: str, markup: Optional[PageMarkup] = None,
+) -> str:
     """Render the copyright / edition-notice page. Unlike the translator note the
     heading is visually quiet (an h2), and paragraphs are not indented."""
     eff_heading = (heading or '').strip() or _DEFAULT_EDITION_NOTICE_HEADING
-    stripped_body, _ = _strip_image_blocks(body)
+    stripped_body, _ = _strip_image_blocks(_prepare_page_body(body, markup))
     parts = ['<section class="edition-notice">', f'<h2>{escape(eff_heading)}</h2>']
-    parts.extend(_render_body_blocks(stripped_body))
+    parts.extend(_render_body_blocks(stripped_body, markup.target if markup else None))
     parts.append('</section>')
     return _xhtml_page(eff_heading, parts)
 
@@ -1181,6 +1337,12 @@ def build_epub(
     front_matter: Optional[Dict[str, Any]] = None,
     edition_notice_heading: Optional[str] = None,
     edition_notice_body: Optional[str] = None,
+    about_book_heading: Optional[str] = None,
+    about_book_body: Optional[str] = None,
+    edition: Optional[Dict[str, str]] = None,
+    site_slug: Optional[str] = None,
+    publish: Optional[Dict[str, Any]] = None,
+    target: str = KINDLE,
 ) -> Path:
     """
     Build an EPUB from translated chapter files and project images.
@@ -1226,11 +1388,25 @@ def build_epub(
         edition_notice_heading / edition_notice_body: The copyright /
                      edition-notice page, placed after the title page. Skipped
                      when the body is blank.
+        about_book_heading / about_book_body: «Sobre este libro», the first
+                     TOC entry, between the nav and the first chapter. Skipped
+                     when the body is blank.
+        edition: ``{"version", "status"}``, shown on the title page.
+        site_slug: The book's name on the free-library site: the libre file
+                     name and the feedback form's ``libro`` field.
+        publish: House publish settings (``src.book_metadata``): the license,
+                     the site links, the edition-label format.
+        target: ``"kindle"`` (default) or ``"libre"``; see :func:`_resolve_publication`.
 
     Returns:
         Path to the written EPUB file.
     """
     project_path = Path(project_path)
+    pub = _resolve_publication(
+        target=target, quotation_dirs=[project_path], publish=publish,
+        edition=edition, site_slug=site_slug or project_path.name,
+        front_matter=front_matter, edition_notice_body=edition_notice_body, rights=rights,
+    )
     chapters_dir = Path(chapters_dir) if chapters_dir else project_path / 'chapters'
 
     if chapter_heading_config is None:
@@ -1253,7 +1429,7 @@ def build_epub(
     book, css_item = _new_book(
         identifier=f'translate-books-{project_path.name}',
         title=title, language=language, authors=[author],
-        translator=translator, description=description, rights=rights,
+        translator=translator, description=description, rights=pub.rights,
         sources=[source_title] if source_title else [],
         publisher=publisher, subtitle=subtitle, subjects=subjects, date=date,
         cover_path=_resolve_cover(project_path, cover_image),
@@ -1262,12 +1438,16 @@ def build_epub(
     spine = _front_matter_items(
         book, css_item, title=title, language=language, subtitle=subtitle,
         author=author, translator=translator, publisher=publisher,
-        front_matter=front_matter, edition_notice_heading=edition_notice_heading,
-        edition_notice_body=edition_notice_body,
+        front_matter=pub.front_matter, edition_notice_heading=edition_notice_heading,
+        edition_notice_body=pub.notice_body, edition=pub.edition_label, markup=pub.markup,
     )
 
     # Convert chapters to XHTML and add to book
     spine.append('nav')
+    about = _about_book_item(book, css_item, about_book_heading, about_book_body,
+                             markup=pub.markup, language=language)
+    if about is not None:
+        spine.append(about)
     rendered = _render_chapters(
         book, project_path, ordered_chapters,
         heading_config=chapter_heading_config,
@@ -1277,7 +1457,7 @@ def build_epub(
         css_item=css_item, language=language,
     )
     spine.extend(rendered.items)
-    toc: List[Any] = list(rendered.items)
+    toc: List[Any] = ([about] if about is not None else []) + list(rendered.items)
 
     _finish_book(
         book, css_item, spine, toc, language=language,
@@ -1286,12 +1466,14 @@ def build_epub(
         chapter_files_map=rendered.chapter_files_map,
         translator_note_heading=translator_note_heading,
         translator_note_body=translator_note_body,
+        markup=pub.markup,
     )
 
     # Write EPUB. Named after the (Spanish) title so every build path -- web UI,
     # harness, corrections rebuild -- lands on the same file.
     if output_path is None:
-        output_path = project_path / epub_filename(title, project_path.name)
+        output_path = default_epub_path(
+            project_path, title, target=target, site_slug=site_slug)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1439,6 +1621,108 @@ def _embed_images(
     return len(embedded_images)
 
 
+class _Publication(NamedTuple):
+    markup: PageMarkup
+    front_matter: Optional[Dict[str, Any]]
+    edition_label: str
+    notice_body: Optional[str]
+    rights: Optional[str]
+
+
+def _resolve_publication(
+    *,
+    target: str,
+    quotation_dirs: List[Path],
+    publish: Optional[Dict[str, Any]],
+    edition: Optional[Dict[str, str]],
+    site_slug: str,
+    front_matter: Optional[Dict[str, Any]],
+    edition_notice_body: Optional[str],
+    rights: Optional[str],
+) -> _Publication:
+    """What ``target`` changes in one build.
+
+    Both targets show the edition line on the title page when ``edition`` is
+    set. A ``libre`` build also:
+
+    - requires an edition version, and turns the title page on to carry it;
+    - refuses a book whose ``quotations.json`` is over the Bible version's
+      permission-to-quote limits (a free edition then needs written permission);
+    - with the house license listing ``libre`` among its targets, states it at
+      the end of the copyright page (with the Scripture carve-out when the book
+      quotes the NBLA) and in ``dc:rights``.
+
+    ``quotation_dirs`` are the projects whose ``quotations.json`` count: the
+    book, or every member of a collection.
+    """
+    from src.quotations.record import read_record
+
+    if target not in TARGETS:
+        raise ValueError(f"unknown build target {target!r} (expected one of {', '.join(TARGETS)})")
+    publish = publish or {}
+    records = [r for r in (read_record(d) for d in quotation_dirs) if r]
+    if target == LIBRE:
+        if not edition:
+            raise ValueError(
+                'a libre build needs an edition: set project.json "edition": '
+                '{"version": "1.0", "status": "beta"}')
+        if any(r.get('within_limits') is False for r in records):
+            raise ValueError(
+                'quotations.json is over the permission-to-quote limits; a free '
+                'edition needs the publisher\'s written permission')
+        front_matter = {**(front_matter or {}), 'title_page': True}
+
+    license_ = publish.get('license')
+    if license_ and target in (license_.get('targets') or [LIBRE]):
+        name = str(license_['name']).strip()
+        values = {'name': name, 'url': (license_.get('url') or '').strip()}
+        try:
+            statement = (license_.get('statement') or _DEFAULT_LICENSE_STATEMENT).format(**values)
+        except (KeyError, IndexError, ValueError):
+            # A placeholder the house statement names wrongly must not fail every build.
+            statement = _DEFAULT_LICENSE_STATEMENT.format(**values)
+        carveout = (license_.get('scripture_carveout') or '').strip()
+        if carveout and any(r.get('rows') for r in records):
+            statement = f'{statement} {carveout}'
+        notice = (edition_notice_body or '').rstrip()
+        edition_notice_body = f'{notice}\n\n{statement}' if notice.strip() else statement
+        rights = f'{rights.strip()} Licencia: {name}.' if rights and rights.strip() \
+            else f'Licencia: {name}.'
+
+    return _Publication(
+        markup=PageMarkup(target, page_variables(publish, site_slug, edition)),
+        front_matter=front_matter,
+        edition_label=edition_label(edition, publish.get('edition_label')),
+        notice_body=edition_notice_body,
+        rights=rights,
+    )
+
+
+def _about_book_item(
+    book: epub.EpubBook,
+    css_item: epub.EpubItem,
+    heading: Optional[str],
+    body: Optional[str],
+    *,
+    markup: PageMarkup,
+    language: str,
+) -> Optional[epub.EpubHtml]:
+    """«Sobre este libro», or ``None`` when its body is blank in this target."""
+    prepared, _ = _strip_image_blocks(_prepare_page_body(str(body or ''), markup, warn=False))
+    if not prepared.strip():
+        return None
+    heading_text = (heading or '').strip() or _DEFAULT_ABOUT_BOOK_HEADING
+    item = epub.EpubHtml(
+        uid='about_book', title=heading_text, file_name='about_book.xhtml', lang=language,
+    )
+    item.set_content(note_text_to_xhtml(
+        heading_text, str(body), markup, default_heading=_DEFAULT_ABOUT_BOOK_HEADING,
+    ).encode('utf-8'))
+    item.add_item(css_item)
+    book.add_item(item)
+    return item
+
+
 def _front_matter_items(
     book: epub.EpubBook,
     css_item: epub.EpubItem,
@@ -1452,6 +1736,8 @@ def _front_matter_items(
     front_matter: Optional[Dict[str, Any]],
     edition_notice_heading: Optional[str],
     edition_notice_body: Optional[str],
+    edition: Optional[str] = None,
+    markup: Optional[PageMarkup] = None,
 ) -> List[Any]:
     """The generated title page and edition notice, as the opening of the spine.
 
@@ -1468,11 +1754,13 @@ def _front_matter_items(
         title_item.set_content(title_page_to_xhtml(
             title, subtitle=subtitle, author=author, translator=translator,
             publisher=publisher, translator_label=front_matter.get('translator_label'),
+            edition=edition,
         ).encode('utf-8'))
         title_item.add_item(css_item)
         book.add_item(title_item)
         spine.append(title_item)
-    if edition_notice_body and str(edition_notice_body).strip():
+    if edition_notice_body and _prepare_page_body(
+            str(edition_notice_body), markup, warn=False).strip():
         notice_heading = (
             (edition_notice_heading or '').strip() or _DEFAULT_EDITION_NOTICE_HEADING
         )
@@ -1480,9 +1768,9 @@ def _front_matter_items(
             uid='edition_notice', title=notice_heading,
             file_name='copyright.xhtml', lang=language,
         )
-        notice_item.set_content(
-            edition_notice_to_xhtml(notice_heading, str(edition_notice_body)).encode('utf-8')
-        )
+        notice_item.set_content(edition_notice_to_xhtml(
+            notice_heading, str(edition_notice_body), markup,
+        ).encode('utf-8'))
         notice_item.add_item(css_item)
         book.add_item(notice_item)
         spine.append(notice_item)
@@ -1641,6 +1929,7 @@ def _finish_book(
     translator_note_heading: Optional[str],
     translator_note_body: Optional[str],
     work_titles: Optional[Dict[str, str]] = None,
+    markup: Optional[PageMarkup] = None,
 ) -> None:
     """Append Notas and the translator note, then set the TOC, spine and nav."""
     from src.endnotes import render_endnotes_xhtml
@@ -1668,11 +1957,14 @@ def _finish_book(
     # Append optional "Note from the Translator" as the final chapter.
     if translator_note_body is not None:
         body_text = str(translator_note_body)
-        stripped_body, _ = _strip_image_blocks(body_text)
+        # Blank in this target counts as blank: a note made only of [LIBRE]
+        # blocks gives the Kindle build no note page.
+        stripped_body, _ = _strip_image_blocks(
+            _prepare_page_body(body_text, markup, warn=False))
         if stripped_body.strip():
             heading_text = (translator_note_heading or "").strip() \
                 or _DEFAULT_TRANSLATOR_HEADING
-            note_xhtml = note_text_to_xhtml(heading_text, body_text)
+            note_xhtml = note_text_to_xhtml(heading_text, body_text, markup)
             note_item = epub.EpubHtml(
                 uid='translator_note',
                 title=heading_text,
@@ -1771,10 +2063,11 @@ def build_collection_epub(
     *,
     allow_partial: bool = False,
     output_path: Optional[Path] = None,
+    target: str = KINDLE,
 ) -> CollectionBuildResult:
     """Build one EPUB from every member of a collection.
 
-    Spine: title page -> copyright -> nav -> for each member, its part page
+    Spine: title page -> copyright -> nav -> Sobre este libro -> for each member, its part page
     (a multi-chapter member only, unless ``part_page`` says otherwise) and its
     chapters, front matter included -> Notas -> the volume's translator note.
 
@@ -1835,11 +2128,19 @@ def build_collection_epub(
 
     originals = {m.slug: _member_original(m.path) for _, m, _, _, _ in gathered}
     authors = collection_mod.member_authors(coll) or [meta.get('author') or 'Unknown']
+    site_slug = meta.get('site_slug') or coll.slug
+    pub = _resolve_publication(
+        target=target,
+        quotation_dirs=[collection_dir] + [m.path for _, m, ordered, _, _ in gathered if ordered],
+        publish=meta.get('publish'), edition=meta.get('edition'), site_slug=site_slug,
+        front_matter=meta.get('front_matter'),
+        edition_notice_body=meta.get('edition_notice_body'), rights=meta.get('rights'),
+    )
     book, css_item = _new_book(
         identifier=f'translate-books-{coll.slug}',
         title=title, language=language, authors=authors,
         translator=meta.get('translator'), description=meta.get('description'),
-        rights=meta.get('rights'),
+        rights=pub.rights,
         sources=[originals[m.slug][0] for _, m, ordered, _, _ in gathered if ordered],
         publisher=meta.get('publisher'), subtitle=meta.get('subtitle'),
         subjects=meta.get('subjects'), date=meta.get('date'),
@@ -1852,13 +2153,18 @@ def build_collection_epub(
     spine = _front_matter_items(
         book, css_item, title=title, language=language, subtitle=meta.get('subtitle'),
         author=meta.get('author'), translator=meta.get('translator'),
-        publisher=meta.get('publisher'), front_matter=meta.get('front_matter'),
+        publisher=meta.get('publisher'), front_matter=pub.front_matter,
         edition_notice_heading=meta.get('edition_notice_heading'),
-        edition_notice_body=meta.get('edition_notice_body'),
+        edition_notice_body=pub.notice_body, edition=pub.edition_label, markup=pub.markup,
     )
     spine.append('nav')
+    about = _about_book_item(book, css_item, meta.get('about_book_heading'),
+                             meta.get('about_book_body'), markup=pub.markup, language=language)
 
     toc: List[Any] = []
+    if about is not None:
+        spine.append(about)
+        toc.append(about)
     endnote_entries: List[Any] = []
     chapter_headings: Dict[str, str] = {}
     chapter_files_map: Dict[str, str] = {}
@@ -1924,10 +2230,12 @@ def build_collection_epub(
         translator_note_heading=meta.get('translator_note_heading'),
         translator_note_body=meta.get('translator_note_body'),
         work_titles=work_titles,
+        markup=pub.markup,
     )
 
     if output_path is None:
-        output_path = collection_dir / epub_filename(title, coll.slug)
+        output_path = default_epub_path(
+            collection_dir, title, target=target, site_slug=site_slug)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     epub.write_epub(str(output_path), book)

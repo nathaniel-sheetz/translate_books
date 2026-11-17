@@ -38,6 +38,7 @@ cp translation.example.txt translation.txt   # now yours
 | `decisions_taxonomy.json` | `decisions_taxonomy.example.json` |
 | `kdp_defaults.json` | `kdp_defaults.example.json` |
 | `kdp_description_examples.md` | `kdp_description_examples.example.md` |
+| `book_metadata_guide.md` | `book_metadata_guide.example.md` |
 
 Every other file here is tracked directly — edit in place and commit.
 
