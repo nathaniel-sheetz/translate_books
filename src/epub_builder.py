@@ -55,6 +55,9 @@ _INLINE_HEADING_LABELS = frozenset({
 # Line-length cap for the no-label form, so a numbered list item or a long
 # opening sentence ("1. Take the flour and...") is not promoted to a heading.
 _INLINE_NUMBERED_MAX_LEN = 120
+# Highest chapter number a one-line heading may state; above it the "numeral" is
+# a word that happens to be a Roman numeral ("CAPÍTULO MI PROPIO CUENTO").
+_INLINE_MAX_NUMBER = 199
 _HR_RE = re.compile(r'^-{3,}$')
 _EM_RE = re.compile(r'(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])')
 # Kept as a module constant so it can be used inside f-string expressions
@@ -537,11 +540,10 @@ def _split_inline_heading(
     m = _INLINE_LABELED_HEADING_RE.match(first_line)
     if m:
         label, numeral, title = m.group(1), m.group(2), m.group(3).strip()
-        known = {w.casefold() for w in _INLINE_HEADING_LABELS}
-        if cfg_label:
-            known.add(cfg_label.casefold())
+        known = _INLINE_HEADING_LABELS | {cfg_label.casefold()} if cfg_label else _INLINE_HEADING_LABELS
         number = _heading_numeral_value(numeral)
         if (label.casefold() in known and number is not None
+                and number <= _INLINE_MAX_NUMBER
                 and any(c.isalpha() for c in title)):
             if explicit_style and cfg_label and label.casefold() == cfg_label.casefold():
                 heading = synthesize_chapter_heading(number, heading_config)
@@ -553,7 +555,11 @@ def _split_inline_heading(
     if m and len(first_line) < _INLINE_NUMBERED_MAX_LEN:
         numeral, title = m.group(1), m.group(2).strip()
         number = _heading_numeral_value(numeral)
-        if number is not None and any(c.isalpha() for c in title):
+        # A lone L/C/D/M before a period is an initial ("M. Dupont", "C. S.
+        # Lewis"), not a chapter number.
+        initial = len(numeral) == 1 and numeral in 'LCDM'
+        if (number is not None and number <= _INLINE_MAX_NUMBER and not initial
+                and any(c.isalpha() for c in title)):
             style = explicit_style or ('arabic' if numeral.isdigit() else 'roman')
             return synthesize_chapter_heading(
                 number, {**cfg, 'numeral_style': style}), title
@@ -1881,7 +1887,8 @@ def _prefix_image_srcs(xhtml: str, image_prefix: str) -> str:
 
 
 _LEAKED_LABELED_RE = re.compile(r'^(\w+)\s+(?:[IVXLCDM]+|\d+)\b')
-_LEAKED_NUMBERED_RE = re.compile(r'^(?:\d{1,3}|[IVXLCDM]+)\.\s')
+# (?![LCDM]\.) skips initials like "M. Dupont", as _split_inline_heading does.
+_LEAKED_NUMBERED_RE = re.compile(r'^(?:\d{1,3}|(?![LCDM]\.)[IVXLCDM]+)\.\s')
 
 
 def _looks_like_leaked_heading(subtitle: str) -> bool:

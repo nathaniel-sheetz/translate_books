@@ -1618,6 +1618,15 @@ class TestInlineHeading:
         h, s, _ = self._detect("Juan 3 dijo algo.\n\nx")
         assert h == "Capítulo 2"
 
+    def test_initial_is_not_a_numeral(self):
+        h, s, _ = self._detect("M. Dupont llegó tarde.\n\nx")
+        assert (h, s) == ("Capítulo 2", "M. Dupont llegó tarde.")
+
+    def test_roman_lookalike_word_is_not_split(self):
+        h, s, _ = self._detect("CAPÍTULO MI PROPIO CUENTO\n\nx")
+        assert h == "Capítulo 2"
+        assert s == "CAPÍTULO MI PROPIO CUENTO"
+
     def test_bare_heading_unchanged(self):
         h, s, _ = self._detect("SERMÓN I.\n\nHay un Dios.\n\nBody.")
         assert (h, s) == ("SERMÓN I.", "Hay un Dios.")

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.86.1.0] - 2026-11-18
+
+### Fixed
+- **A chapter heading and its title on one line are now split apart in the EPUB.** «CAPÍTULO I. WATHO.» becomes the heading «Capítulo I» with the subtitle «Watho.», so the TOC reads «Capítulo I: Watho.» and no longer «Capítulo 1: Capítulo I. Watho.». A numbered title with no label word («1. Cuates») takes the book's label and its own number, «Capítulo 1». The number comes from the line, so a front-matter page counted as a chapter no longer shifts it. A label word in the book's config with an explicit `numeral_style` is rewritten the same way a bare heading is.
+  - A line of its own is required: a wrapped paragraph, prose («Había 3 caballos.») and labels outside a short list are never split. Initials («M. Dupont») and numbers over 199 («CAPÍTULO MI PROPIO CUENTO») are not read as chapter numbers.
+  - The build warns when a chapter's subtitle still starts with a chapter number, because its own heading leaked and the TOC repeats the number.
+- In an all-caps title, «MI» and «DI» are title-cased as words rather than kept upper-case as Roman numerals («Mi Propio Cuento»).
+
 ## [0.86.0.0] - 2026-11-16
 
 ### Added
