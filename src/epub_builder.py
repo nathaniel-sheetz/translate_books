@@ -35,6 +35,26 @@ _CHUNK_FILE_RE = re.compile(r'^(.+)_chunk_\d+\.json$')
 _HEADING_RE = re.compile(
     r'^(?:(\w+)\s+)?([IVXLCDM\d]+)\.?\s*$', re.IGNORECASE
 )
+# A heading and its title on ONE line, as an HTML/EPUB ingest keeps it:
+# "CAPÍTULO I. WATHO.", "CAPÍTULO III CÓMO ROJITO ZORRO...", "Chapter 2 — Title".
+# The numeral is case-sensitive (upper-case Roman or digits) so a lower-case word
+# after the label ("Capítulo di...") is never read as a numeral; the label is
+# checked against _INLINE_HEADING_LABELS by the caller.
+_INLINE_LABELED_HEADING_RE = re.compile(
+    r'^(\w+)\s+([IVXLCDM]+|\d+)(?:\s*[.:—–-])?\s+(\S.*)$'
+)
+# A numbered title with no label word: "1. Cuates", "IV. THE STORM".
+_INLINE_NUMBERED_HEADING_RE = re.compile(r'^(\d{1,3}|[IVXLCDM]+)\.\s+(\S.*)$')
+# Words that may open a one-line heading. Kept short on purpose: any word here
+# followed by a numeral and a title is split into heading + subtitle.
+_INLINE_HEADING_LABELS = frozenset({
+    'capítulo', 'capitulo', 'chapter', 'lección', 'leccion', 'lesson',
+    'sermón', 'sermon', 'parte', 'part', 'libro', 'book', 'canto',
+    'chapitre', 'kapitel', 'capitolo', 'capítol', 'hoofdstuk',
+})
+# Line-length cap for the no-label form, so a numbered list item or a long
+# opening sentence ("1. Take the flour and...") is not promoted to a heading.
+_INLINE_NUMBERED_MAX_LEN = 120
 _HR_RE = re.compile(r'^-{3,}$')
 _EM_RE = re.compile(r'(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])')
 # Kept as a module constant so it can be used inside f-string expressions
@@ -351,6 +371,11 @@ _ROMAN_NUMERAL_RE = re.compile(
 )
 
 
+# Well-formed Roman numerals that are ordinary words in a title and never a
+# realistic chapter number ("MI PROPIO CUENTO" -> "Mi Propio Cuento", not "MI").
+_ROMAN_LOOKALIKE_WORDS = frozenset({'mi', 'di'})
+
+
 def _is_roman_numeral(token: str) -> bool:
     """True when ``token`` is a well-formed Roman numeral (I..MMMCMXCIX)."""
     return bool(token) and bool(_ROMAN_NUMERAL_RE.fullmatch(token))
@@ -387,7 +412,7 @@ def _normalize_allcaps_title(text: str) -> str:
             out.append(word)
             continue
         core = ''.join(c for c in word if c.isalpha()).lower()
-        if _is_roman_numeral(core):
+        if _is_roman_numeral(core) and core not in _ROMAN_LOOKALIKE_WORDS:
             out.append(''.join(c.upper() if c.isalpha() else c for c in word))
             continue
         lowered = word.lower()
@@ -481,6 +506,60 @@ def parse_image_placeholders(text: str) -> List[Tuple[str, str, str]]:
     return results
 
 
+def _split_inline_heading(
+    lines: List[str],
+    cfg: Dict[str, Any],
+    heading_config: Optional[Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    """Split a one-line ``LABEL NUMERAL[.] TITLE`` / ``NUMERAL. TITLE`` heading.
+
+    Returns ``(heading, title)`` or None when the first line is not that shape.
+    The number comes from the line itself, never from the chapter's position,
+    so a front-matter page miscounted as a chapter cannot shift it.
+
+    ``CAPÍTULO I. WATHO.`` -> ``("CAPÍTULO I", "WATHO.")``, or ``"Capítulo 1"``
+    when the book's config sets that label with an explicit numeral style
+    (the same rule a bare ``CAPÍTULO I`` line follows). ``1. Cuates`` ->
+    ``("Capítulo 1", "Cuates")``: a label-less number takes the book's label,
+    in the source's numeral style unless the config sets one.
+    """
+    first_line = lines[0].strip()
+    # The heading must be a line of its own, not the start of a wrapped paragraph.
+    if len(lines) > 1 and lines[1].strip():
+        return None
+    if len(first_line) >= 200:
+        return None
+    cfg_label = cfg['label'].strip()
+    explicit_style = (heading_config or {}).get('numeral_style')
+    if explicit_style not in ('arabic', 'roman'):
+        explicit_style = None
+
+    m = _INLINE_LABELED_HEADING_RE.match(first_line)
+    if m:
+        label, numeral, title = m.group(1), m.group(2), m.group(3).strip()
+        known = {w.casefold() for w in _INLINE_HEADING_LABELS}
+        if cfg_label:
+            known.add(cfg_label.casefold())
+        number = _heading_numeral_value(numeral)
+        if (label.casefold() in known and number is not None
+                and any(c.isalpha() for c in title)):
+            if explicit_style and cfg_label and label.casefold() == cfg_label.casefold():
+                heading = synthesize_chapter_heading(number, heading_config)
+            else:
+                heading = f'{label} {numeral}'
+            return heading, title
+
+    m = _INLINE_NUMBERED_HEADING_RE.match(first_line)
+    if m and len(first_line) < _INLINE_NUMBERED_MAX_LEN:
+        numeral, title = m.group(1), m.group(2).strip()
+        number = _heading_numeral_value(numeral)
+        if number is not None and any(c.isalpha() for c in title):
+            style = explicit_style or ('arabic' if numeral.isdigit() else 'roman')
+            return synthesize_chapter_heading(
+                number, {**cfg, 'numeral_style': style}), title
+    return None
+
+
 def detect_chapter_heading(
     text: str,
     *,
@@ -513,6 +592,12 @@ def detect_chapter_heading(
     ``Capítulo 3`` whatever ``chapter_number`` says. Labels that do not match (for example ``Sermón``) are
     left as written. Omitting ``numeral_style`` preserves the source numeral.
 
+    For a chapter (``chapter_number`` given), a heading and title on one line
+    are split apart (:func:`_split_inline_heading`): ``CAPÍTULO I. WATHO.``
+    gives ``("CAPÍTULO I", "WATHO.")`` and ``1. Cuates`` gives
+    ``("Capítulo 1", "Cuates")``, rather than a synthesized heading with the
+    whole line stacked under it as the subtitle.
+
     Returns:
         (heading, subtitle, body) where heading/subtitle may be ''
         if no heading was detected and synthesis was not requested.
@@ -526,6 +611,17 @@ def detect_chapter_heading(
 
     first_line = lines[0].strip()
     heading_match = _HEADING_RE.match(first_line)
+
+    inline = None
+    if not heading_match and chapter_number is not None:
+        inline = _split_inline_heading(lines, cfg, heading_config)
+
+    if inline is not None:
+        heading, inline_subtitle = inline
+        idx = 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        return (heading, inline_subtitle, '\n'.join(lines[idx:]))
 
     if heading_match:
         detected_label = (heading_match.group(1) or "").strip()
@@ -1784,6 +1880,23 @@ def _prefix_image_srcs(xhtml: str, image_prefix: str) -> str:
     return xhtml.replace('<img src="images/', f'<img src="images/{image_prefix}')
 
 
+_LEAKED_LABELED_RE = re.compile(r'^(\w+)\s+(?:[IVXLCDM]+|\d+)\b')
+_LEAKED_NUMBERED_RE = re.compile(r'^(?:\d{1,3}|[IVXLCDM]+)\.\s')
+
+
+def _looks_like_leaked_heading(subtitle: str) -> bool:
+    """True when a chapter's subtitle itself opens with a heading number.
+
+    ``Capítulo I. Watho.`` or ``1. Cuates`` as a subtitle means the chapter's
+    own heading was not recognised, so the TOC reads "Capítulo 2: 1. Cuates".
+    """
+    s = subtitle.strip()
+    m = _LEAKED_LABELED_RE.match(s)
+    if m and m.group(1).casefold() in _INLINE_HEADING_LABELS:
+        return True
+    return bool(_LEAKED_NUMBERED_RE.match(s))
+
+
 def _render_chapters(
     book: epub.EpubBook,
     project_path: Path,
@@ -1860,6 +1973,13 @@ def _render_chapters(
             section_heading = toc_label
             if subtitle and toc_format != 'heading_only':
                 toc_label = f'{toc_label}: {_normalize_allcaps_title(subtitle)}'
+            if subtitle and _looks_like_leaked_heading(subtitle):
+                logger.warning(
+                    "%s: subtitle %r starts with a chapter number, so the heading "
+                    "%r was probably invented and the chapter's own heading leaked "
+                    "into the subtitle; the TOC will repeat the number",
+                    chapter_id, subtitle, norm_heading,
+                )
         else:
             # Front- or back-matter section: never synthesize "Chapter N".
             # Prefer the section's own first line (the heading the splitter

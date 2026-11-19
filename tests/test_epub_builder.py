@@ -1567,6 +1567,107 @@ class TestTocFormat:
             assert "Sermon III: The Good Shepherd" in ncx
 
 
+class TestInlineHeading:
+    """A heading and its title on one line are split, never stacked."""
+
+    CFG = {"label": "Capítulo"}
+
+    def _detect(self, text, number=2, cfg=CFG):
+        heading, subtitle, body = detect_chapter_heading(
+            text, chapter_number=number, heading_config=cfg,
+        )
+        return heading, subtitle, body
+
+    def test_label_numeral_period_title(self):
+        h, s, body = self._detect("CAPÍTULO I. WATHO.\n\nHabía una vez.")
+        assert (h, s) == ("CAPÍTULO I", "WATHO.")
+        assert body == "Había una vez."
+        assert _normalize_heading(h) == "Capítulo I"
+
+    def test_label_numeral_title_without_separator(self):
+        h, s, _ = self._detect("CAPÍTULO III CÓMO ROJITO ZORRO SE LLEVÓ UNA SORPRESA\n\nx")
+        assert (h, s) == ("CAPÍTULO III", "CÓMO ROJITO ZORRO SE LLEVÓ UNA SORPRESA")
+
+    def test_dash_separator(self):
+        h, s, _ = self._detect("Chapter 2 — The Storm\n\nx")
+        assert (h, s) == ("Chapter 2", "The Storm")
+
+    def test_explicit_style_rewrites_own_label(self):
+        cfg = {"label": "Capítulo", "numeral_style": "arabic"}
+        h, s, _ = self._detect("CAPÍTULO III. EL FIN\n\nx", number=9, cfg=cfg)
+        assert (h, s) == ("Capítulo 3", "EL FIN")
+
+    def test_numbered_title_takes_its_own_number(self):
+        # chapter_number 2 is the file position (a front-matter page miscounted
+        # as chapter 1); the line's own "1." wins.
+        h, s, body = self._detect("1. Cuates\n\nSam estaba meditando.", number=2)
+        assert (h, s, body) == ("Capítulo 1", "Cuates", "Sam estaba meditando.")
+
+    def test_numbered_roman_title_keeps_roman(self):
+        h, s, _ = self._detect("IV. LA TORMENTA\n\nx")
+        assert (h, s) == ("Capítulo IV", "LA TORMENTA")
+
+    def test_wrapped_paragraph_is_not_a_heading(self):
+        text = "I. El rebaño de Cristo tiene ovejas\nque han estado mucho tiempo.\n\nx"
+        _, s, _ = self._detect(text)
+        assert not s.startswith("El rebaño")
+
+    def test_prose_and_unknown_labels_do_not_match(self):
+        h, s, _ = self._detect("Había 3 caballos.\n\nx")
+        assert (h, s) == ("Capítulo 2", "Había 3 caballos.")
+        h, s, _ = self._detect("Juan 3 dijo algo.\n\nx")
+        assert h == "Capítulo 2"
+
+    def test_bare_heading_unchanged(self):
+        h, s, _ = self._detect("SERMÓN I.\n\nHay un Dios.\n\nBody.")
+        assert (h, s) == ("SERMÓN I.", "Hay un Dios.")
+
+    def test_matter_is_not_split(self):
+        h, s, _ = detect_chapter_heading(
+            "1. Cuates\n\nx", chapter_number=None, heading_config=self.CFG,
+        )
+        assert (h, s) == ("", "")
+
+    def test_toc_and_headings_in_built_epub(self, tmp_path):
+        chapters = tmp_path / "chapters"
+        chapters.mkdir()
+        (tmp_path / "images").mkdir()
+        (chapters / "chapter_01.txt").write_text(
+            "CAPÍTULO I. EL HUEVO MOTEADO\n\nCuerpo uno.", encoding="utf-8")
+        (chapters / "chapter_02.txt").write_text(
+            "2. Caballo salvaje\n\nCuerpo dos.", encoding="utf-8")
+        output = build_epub(project_path=tmp_path, title="T", author="A", language="es")
+        with zipfile.ZipFile(output) as zf:
+            nav = zf.read(next(n for n in zf.namelist() if n.endswith("nav.xhtml"))).decode("utf-8")
+            ch1 = zf.read(next(n for n in zf.namelist() if n.endswith("chapter_01.xhtml"))).decode("utf-8")
+            ch2 = zf.read(next(n for n in zf.namelist() if n.endswith("chapter_02.xhtml"))).decode("utf-8")
+        assert "Capítulo I: El Huevo Moteado" in nav
+        assert "Capítulo 2: Caballo salvaje" in nav
+        assert "Capítulo 1" not in nav
+        assert "<h1>Capítulo I</h1>" in ch1 and "<h2>El Huevo Moteado</h2>" in ch1
+        assert "<h1>Capítulo 2</h1>" in ch2 and "<h2>Caballo salvaje</h2>" in ch2
+
+    def test_leaked_heading_warns(self, tmp_path, caplog):
+        chapters = tmp_path / "chapters"
+        chapters.mkdir()
+        (tmp_path / "images").mkdir()
+        # A wrapped first paragraph is not split, so its numbered subtitle leaks.
+        (chapters / "chapter_01.txt").write_text(
+            "1. Cuates\nsegunda línea\n\nCuerpo.", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="src.epub_builder"):
+            build_epub(project_path=tmp_path, title="T", author="A", language="es")
+        assert any("leaked" in r.getMessage() for r in caplog.records)
+
+
+class TestRomanLookalikeWords:
+    def test_mi_is_a_word(self):
+        assert _normalize_allcaps_title("MI PROPIO CUENTO") == "Mi Propio Cuento"
+
+    def test_real_numerals_stay_upper(self):
+        assert _normalize_allcaps_title("EPISODE IV") == "Episode IV"
+        assert _normalize_allcaps_title("LECCIÓN VI") == "Lección VI"
+
+
 # --- _discover_chunk_chapters ---
 
 class TestDiscoverChunkChapters:
