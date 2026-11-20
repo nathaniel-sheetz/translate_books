@@ -1,0 +1,170 @@
+# Modernize Prompt Template
+# Version: 1.0
+# Last Updated: 2026-11-20
+#
+# The prompt for a book whose harness config says "task": "modernize": an old
+# Spanish text brought up to current Mexican Spanish with the fewest changes.
+# Rendered by build_translation_prompt with the same variables as
+# prompts/translation.txt (see the header there). Two things differ:
+#   - source_text has already been through src/modernize/orthography.py, so
+#     the model never spends effort on accents.
+#   - The glossary must NOT carry an archaism list. A partial list switches
+#     off the model's own judgment (pilot 2026-11-19: 10 of 41 held-out
+#     occurrences changed without a list, 2 of 41 with one). The book's list
+#     is applied after this pass, by src/modernize/archaisms.py.
+# Keep the GLOSSARY TERMS and SOURCE TEXT TO TRANSLATE headings: the cache
+# split and the house blocks are placed by them.
+#
+# Derived from projects/historia-de-un-cascanueces/pilot/modernize_v2a.txt.
+
+================================================================================
+MODERNIZED EDITION TASK
+================================================================================
+
+You are preparing a modernized edition of «{{book_title}}», an old Spanish
+text, for Mexican families reading it today. Each message gives you one
+passage of that text. Its spelling has already been updated mechanically (a, o,
+fue, dio, solo, este), so do not worry about accents on those.
+
+This is an edition, not a rewrite. The reader should still hear the original
+author and translator, only without anything that now reads as foreign,
+archaic or wrong to a Mexican reader.
+
+THE RULE: copy every sentence exactly as it is, unless it contains an item from
+the CHANGE LIST. When it does, change the smallest span that fixes that item and
+keep the rest word for word, in the same order. Never improve, smooth, shorten
+or reorder a sentence for style. If you are unsure whether something needs
+changing, leave it.
+
+================================================================================
+STYLE GUIDE
+================================================================================
+
+What this book's edition keeps and changes, beyond the lists below:
+
+{{style_guide}}
+
+{{house_rules}}
+
+================================================================================
+CHANGE LIST
+================================================================================
+
+1. VOSOTROS → USTEDES, everywhere outside verse: vosotros/vosotras → ustedes;
+   second-person plural verbs → third-person plural (habéis → han, estáis →
+   están, recordaréis → recordarán, seáis → sean); plural imperatives →
+   ustedes subjunctive (decid → digan, venid → vengan, mirad → miren, formad →
+   formen); os → les / los / se, as the verb needs (os advierto → les advierto,
+   os habéis detenido → se han detenido, contaros → contarles); vuestro/a/os/as
+   → su/sus (use «de ustedes» only where «su» would be ambiguous). Keep every
+   singular tú and usted exactly as the original has them.
+   - ONE PERSON ADDRESSED WITH VOSOTROS FORMS: old texts often speak to a
+     single person (a prince, a lady, a child, one officer given an order) with
+     vos and second-person plural forms. Make those singular usted, never
+     plural: estáis → está, os exponéis → se expone, contentaos → conténtese,
+     vuestro valor → su valor, de vos → de usted, sois → es usted. Read who is
+     being spoken to before choosing: a vocative in the singular («Monseñor»,
+     «Princesa», «Sargento») means usted.
+
+2. PRONOUNS AND OLD VERB FORMS:
+   - A pronoun attached to a finite verb moves in front of it: vióse → se vio,
+     sentíase → se sentía, parecíale → le parecía, abrióle → le abrió. (Pronouns
+     on infinitives, gerunds and affirmative imperatives stay attached.)
+   - Future subjunctive (-are, -iere: si alguno viniere) → present subjunctive
+     or present indicative, whichever fits.
+   - The -ra form used as a past perfect in a statement (el vestido que tanto le
+     maravillara al entrar) → había + participle (le había maravillado). Leave
+     -ra where it is a real subjunctive (si hubiera, quisiera, como si fuera).
+
+3. LE / LA / LO, as Mexican usage has them:
+   - la/las as an indirect object → le/les (la contaba cuentos → le contaba
+     cuentos; la dijo → le dijo).
+   - le/les as the direct object for a person → lo/los (or la/las for a woman):
+     le vi → lo vi, les llevó a su casa → los llevó a su casa.
+
+4. DIALOGUE PUNCTUATION: follow the DIALOGUE FORMATTING rules below. Old texts
+   mark a speech tag with only commas (—Es el trabajador común, replicó el
+   Presidente; es el encargado…); set it as an inciso between rayas (—Es el
+   trabajador común —replicó el Presidente—; es el encargado…). Change the words
+   of the dialogue only for items 1–3 and 5.
+
+5. WORDS AND PHRASES: replace a word, idiom or fixed phrase when it is
+   - archaic: no longer in current use, or used in a sense that is no longer
+     current;
+   - current only in Spain, where Mexican Spanish has a different word for the
+     same thing;
+   - so rare that an educated Mexican adult would not know it and the sentence
+     does not make it clear; or
+   - a word a Mexican reader would take in a different sense, or that is slang
+     or vulgar in Mexico (coger → tomar / agarrar).
+   Use the closest current Mexican word or phrase, of the same register,
+   changing as few words as possible, and fix the agreement of the articles and
+   adjectives around it when the gender or number changes. A literary word that
+   is still in current use stays, even if it is uncommon: the reader is happy
+   to learn vocabulary (see KEEP).
+
+6. CURRENT PUNCTUATION AND CAPITALS: months and days in lowercase (Diciembre →
+   diciembre); remove a comma only where today it is an error (between a subject
+   and its verb). After a closing ! or ? that ends the sentence, the next word
+   takes a capital; when the exclamation or question sits inside a sentence,
+   the next word stays lowercase («pero ¡cosa extraña!, le parecía…»).
+   Otherwise keep the original punctuation, including long sentences,
+   semicolons and colons.
+
+================================================================================
+KEEP
+================================================================================
+
+- Period vocabulary that is still understood and gives the book its flavor
+  (the style guide names this book's).
+- The narrator's voice and asides to the reader, with their verbs moved to
+  ustedes.
+- Literary but correct Spanish: el cual, cuyo, pues, mas, en seguida, a fin de,
+  sentence order with the verb first, long sentences.
+- Names, places, foreign words and the setting as they are.
+- Verse (lines of a song or poem, one per line): change nothing but spelling;
+  vosotros stays.
+- Paragraphs: keep every paragraph break where it is; split a paragraph only
+  where the dialogue rules require it. Keep every verse line on its own line.
+{{image_placeholder_instructions}}
+
+The dialogue rules below are the house rules for dialogue, written for
+translations from English. Here, apply them to the old Spanish dialogue
+punctuation.
+
+{{dialogue_instructions}}
+
+================================================================================
+GLOSSARY TERMS
+================================================================================
+
+Names and terms to write exactly as given:
+
+{{glossary}}
+
+{{house_notes}}
+
+================================================================================
+BOOK CONTEXT
+================================================================================
+
+{{context}}
+
+{{previous_chapter_context}}
+
+================================================================================
+SOURCE TEXT TO TRANSLATE
+================================================================================
+
+{{source_text}}
+
+================================================================================
+OUTPUT FORMAT
+================================================================================
+
+Return ONLY the modernized passage: the same paragraphs, separated by a blank
+line, each verse line on its own line. No commentary, no headers, no notes.
+
+================================================================================
+MODERNIZED TEXT
+================================================================================

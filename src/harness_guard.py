@@ -357,7 +357,13 @@ def address_map_name_warnings(glossary, address_map) -> list[str]:
     return warnings
 
 
-def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
+def guard_translation_draft(
+    chunk: Chunk,
+    prose: str,
+    *,
+    modernize_reference: str | None = None,
+    warnings: list[str] | None = None,
+) -> list[str]:
     """Validate a worker-produced translation draft before it is stamped.
 
     Harness Phase B lets a spawned subagent translate a chunk and write the
@@ -386,6 +392,12 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
                                    ERROR?
                                         │ problems
                                         ▼ return [..]  ──► re-spawn (cap 3) ─► manual
+
+    ``modernize_reference`` marks a modernize book's draft and is the
+    spelling-fixed source the prompt showed. A good modernization copies all
+    but a few words, so the echo guard is swapped for the over-edit guard
+    (:mod:`src.modernize.guard`): too many words changed, or the length off,
+    blocks. Its non-blocking notes are appended to ``warnings`` when given.
     """
     text = (prose or "").strip()
     if not text:
@@ -395,7 +407,14 @@ def guard_translation_draft(chunk: Chunk, prose: str) -> list[str]:
 
     # Echo guard: exact match and near-verbatim overlap both catch untranslated prose.
     source_text = (chunk.source_text or "").strip()
-    if text == source_text:
+    if modernize_reference is not None:
+        from src.modernize.guard import over_edit_report
+
+        report = over_edit_report(modernize_reference, text)
+        problems.extend(report.problems)
+        if warnings is not None:
+            warnings.extend(report.warnings)
+    elif text == source_text:
         problems.append("translation is a verbatim copy of the English source (not translated)")
     elif source_text:
         src_tokens = set(source_text.lower().split())

@@ -94,6 +94,20 @@ DEFAULTS: dict[str, object] = {
     # :func:`~src.harness.headless.resolve_cache_mode`. Claude-only — Cursor
     # ignores it.
     "headless_prompt_cache": "auto",
+    # What the book's pipeline does to its source. ``translate`` (the default)
+    # is every book so far; ``modernize`` takes an old text in the target
+    # language and brings it up to current spelling, grammar and vocabulary
+    # (src.modernize). Set at `setup --task`; translation renders exactly as it
+    # did before these keys existed.
+    "task": "translate",
+    # The source text's language, as the prompt names it and as the aligner
+    # codes it. Hard-coded English before 2026-11-20.
+    "source_language": "English",
+    "source_language_code": "en",
+    # Prompt template file, relative to the repo root. Empty means the task's
+    # own: prompts/translation.txt for translate, prompts/modernize.txt for
+    # modernize.
+    "prompt_template": "",
 }
 
 # Headless launcher families, plus the ``auto`` sentinel that defers to the
@@ -165,6 +179,10 @@ COMMAND_EFFORT_DEFAULTS: dict[str, str | None] = {
     # triage, and named medium for that reason. Unmeasured; re-measure and move
     # the row.
     "quotations_judge": "medium",
+    # A modernize book's guided archaism entries: per chunk, a few marked
+    # occurrences, each a keep/replace call with a short span copied back.
+    # Judgment over short text, like the quotation judge. Unmeasured.
+    "archaisms_guided": "medium",
 }
 
 
