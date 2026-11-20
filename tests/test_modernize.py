@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -373,3 +374,124 @@ class TestGuidedRoundTrip:
         res = G.apply(book, no_realign=True)
         assert res["status"] == "partial" and len(res["problems"]) == 1
         assert G.prepare(book)["occurrences"] == 1
+
+
+# ── the glossary beat ────────────────────────────────────────────────────────
+
+GLOSS_TEXT = (
+    "Fritz miró a Drosselmayer. DROSSELMAYER llegó con Zacarías y su levitón.\n\n"
+    "Luego Zacarias dijo que Drosselmayer rompya otro levitón."
+)
+
+
+def _fake_classify(text):
+    words = {"Fritz": "english", "Drosselmayer": "unknown", "DROSSELMAYER": "unknown",
+             "Zacarías": "unknown", "Zacarias": "unknown", "levitón": "unknown"}
+    out: dict = {}
+    for w in __import__("re").findall(r"[^\W\d_]+", text):
+        if w in words:
+            out.setdefault(w, {"kind": words[w], "count": 0})["count"] += 1
+    return out
+
+
+class TestModernizeGlossary:
+    def test_candidates_group_case_and_mark_accent_pairs(self):
+        from src.modernize import glossary as MG
+
+        cands = MG.candidates(GLOSS_TEXT, classify=_fake_classify)
+        by = {c["term"]: c for c in cands}
+        assert cands[0]["term"] == "Drosselmayer" and cands[0]["frequency"] == 3
+        assert by["Drosselmayer"]["forms"] == {"DROSSELMAYER": 1, "Drosselmayer": 2}
+        assert by["Zacarías"]["accent_pair"] == ["Zacarias ×1"]
+        assert by["Zacarias"]["accent_pair"] == ["Zacarías ×1"]
+        assert by["Fritz"]["detection_reasons"] == ["dictionary_english"]
+        assert "levitón" in by["levitón"]["contexts"][0][1] and len(by["levitón"]["contexts"]) == 2
+        assert MG.candidates(GLOSS_TEXT, classify=_fake_classify, max_candidates=2)[1]["term"] == "levitón"
+
+    def test_format_shows_the_accent_line(self):
+        from src.modernize import glossary as MG
+
+        text = MG.format_candidates(MG.candidates(GLOSS_TEXT, classify=_fake_classify))
+        assert "SAME WORD, OTHER ACCENTS: Zacarias ×1" in text
+        assert "also written: DROSSELMAYER" in text
+
+    def test_accent_slip_warning_names_the_hidden_form(self):
+        from src.models import GlossaryTerm
+        from src.modernize import glossary as MG
+
+        cands = MG.candidates(GLOSS_TEXT, classify=_fake_classify)
+        terms = [GlossaryTerm(english="Zacarías", spanish="Zacarías", type="character"),
+                 GlossaryTerm(english="Drosselmayer", spanish="Drosselmayer", type="character")]
+        warnings = MG.accent_slip_warnings(terms, cands)
+        assert len(warnings) == 1 and "«Zacarias»" in warnings[0]
+        # An alias that spells the other form on purpose clears it.
+        terms[0] = GlossaryTerm(english="Zacarías", spanish="Zacarías", type="character",
+                                aliases=["Zacarias"])
+        assert MG.accent_slip_warnings(terms, cands) == []
+
+    def test_defect_draft_is_normalized(self, tmp_path):
+        from src.modernize import glossary as MG
+
+        assert MG.load_defects(tmp_path) == ([], [])
+        (tmp_path / MG.DEFECTS_DRAFT).write_text(json.dumps([
+            {"form": "rompya", "fix": "rompía", "kind": "OCR"},
+            {"form": "váis", "kind": "weird"},
+            {"fix": "x"},
+        ]), encoding="utf-8")
+        defects, problems = MG.load_defects(tmp_path)
+        assert [d["kind"] for d in defects] == ["ocr", "other"] and len(problems) == 1
+
+    def test_prompt_renders_without_header_or_placeholders(self):
+        from src.glossary_bootstrap import build_glossary_prompt
+        from src.modernize import glossary as MG
+
+        prompt = build_glossary_prompt(
+            MG.candidates(GLOSS_TEXT, classify=_fake_classify), "", "Keep names.", "Spanish",
+            context_mode="modernize", book_title="Historia de un cascanueces",
+        )
+        assert not prompt.startswith("#") and "{{" not in prompt
+        assert "«Historia de un cascanueces»" in prompt and "Keep names." in prompt
+        assert "1. Drosselmayer" in prompt
+
+    def test_flow_prepare_commit_rescore(self, tmp_path):
+        from src.harness import flow, state
+        from src.modernize import glossary as MG
+        from src.utils.file_io import save_chunk
+        from web_ui.evaluations import load_chunk_evaluation
+
+        book = tmp_path / "book"
+        (book / "chunks").mkdir(parents=True)
+        (book / "chapters").mkdir()
+        (book / "source.txt").write_text(GLOSS_TEXT, encoding="utf-8")
+        (book / "chapters" / "chapter_01.txt").write_text(GLOSS_TEXT, encoding="utf-8")
+        state.save_config(book, {"task": "modernize", "title": "T", "target_language": "Spanish",
+                                 "source_language_code": "es", "language_code": "es"})
+        chunk = _chunk(GLOSS_TEXT).model_copy(
+            update={"id": "chapter_01_chunk_001", "translated_text": GLOSS_TEXT})
+        save_chunk(chunk, book / "chunks" / "chapter_01_chunk_001.json")
+
+        prep = flow.glossary_prepare(str(book))
+        terms = {c["term"] for c in json.loads(
+            (book / ".harness" / MG.CANDIDATES_FILE).read_text(encoding="utf-8"))}
+        assert {"Drosselmayer", "Zacarias"} <= terms
+        assert "Zacarias" in prep["accent_pairs"]
+        assert prep["house_candidates_added"] == 0
+        assert "SAME WORD, OTHER ACCENTS" in Path(prep["prompt_path"]).read_text(encoding="utf-8")
+
+        Path(prep["draft_path"]).write_text(json.dumps([
+            {"english": "Drosselmayer", "translation": "Drosselmayer", "type": "character"},
+            {"english": "Fritz", "translation": "Fritz", "type": "character"},
+            {"english": "Zacarías", "translation": "Zacarías", "type": "character"},
+            {"english": "levitón", "translation": "levitón", "type": "other"},
+        ]), encoding="utf-8")
+        Path(prep["defects_draft_path"]).write_text(json.dumps([
+            {"form": "Zacarias", "fix": "Zacarías", "kind": "accent", "why": "missing accent"},
+        ]), encoding="utf-8")
+        out = flow.glossary_commit(str(book))
+        assert out["defects"][0]["fix"] == "Zacarías"
+        assert any("«Zacarias»" in w for w in out["warnings"])
+        assert out["rescored"] == {"chunks": 1}
+        evaluation = load_chunk_evaluation(book, "chapter_01_chunk_001")
+        dictionary = json.dumps(evaluation, ensure_ascii=False)
+        assert "'Drosselmayer'" not in dictionary and "'Fritz'" not in dictionary
+        assert "'rompya'" in dictionary  # the checker ran; a word with no entry stays flagged

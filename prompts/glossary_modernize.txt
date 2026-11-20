@@ -1,0 +1,75 @@
+# Modernize Glossary Prompt Template
+# Version: 1.0
+# Last Updated: 2026-11-20
+#
+# The glossary-beat prompt for a book whose harness config says
+# "task": "modernize". Rendered by src.glossary_bootstrap.build_glossary_prompt
+# (context_mode="modernize"). The candidates are the words the coded
+# dictionary checker flags in the spelling-fixed source
+# (src/modernize/glossary.py), so the list mixes real entries with the
+# source's own slips. Two outputs: the glossary draft and a defect list.
+
+You are preparing the glossary for a modernized edition of «{{book_title}}», an
+old {{target_language}} text being brought up to current Mexican Spanish with the
+fewest changes.
+
+The book's dictionary checker flags every word below in the source: each one is
+in neither its {{target_language}} nor its English dictionary, or reads to it as
+English. A glossary entry does two things. It tells the modernizer to write the
+word exactly as the entry gives it, and it stops the checker flagging the word.
+So an entry must only ever cover a word that is right. A misspelling that gets
+an entry is hidden from every later check.
+
+STYLE GUIDE (what this edition keeps and changes):
+{{style_guide}}
+{{glossary_guidance}}
+
+CANDIDATES (spelling-fixed source; ×N is how often the word occurs):
+{{candidates}}
+
+Sort every candidate into exactly one of three outcomes.
+
+1. ENTRY: a word the edition writes as it stands, or with one deliberate change.
+   - Names of people, animals, dolls and toys; places; peoples; titles of works
+     and their authors.
+   - Foreign words, coins, measures, dishes, garments and period objects the
+     edition keeps (the archaism list decides old vocabulary separately; an
+     entry here only says "this word is spelled right").
+   - The book's own coinages, diminutives and onomatopoeia.
+   Write one JSON object per entry:
+   - "english": the form exactly as the candidate gives it. (The field keeps its
+     translation-book name; here it is the source form.)
+   - "translation": the form the modern edition writes. Normally the same form.
+     Change it only where current standard usage clearly spells the name
+     differently (an old spelling of a well-known place, such as «Rhin» for
+     «Rin»), and say why in "context".
+   - "type": "character", "place", "concept", "technical" or "other".
+   - "context": one sentence for the human reading the table. It never reaches
+     the modernizer.
+   - "note": omit by default. It reaches the modernizer; use it only to stop a
+     plausible wrong change, in one short instruction.
+   - "aliases": omit by default. Other spellings the source uses for the same
+     name that are also right. Case and plural forms already match.
+   - "alternatives": always an empty array.
+
+2. DEFECT: a word that is wrong in the source and needs fixing there, not an
+   entry.
+   - An OCR slip: letters swapped, dropped, doubled or run together.
+   - An accent slip the spelling pass missed (a stray or missing accent).
+   - SAME WORD, OTHER ACCENTS: when a candidate shows that line, decide which
+     spelling is right. The right one may be an entry; the other is a defect
+     whose "fix" is the right spelling. Leave both only if both are correct.
+   Write one JSON object per defect: "form" (exactly as given), "fix" (the
+   corrected word, or "" if you cannot tell), "kind" ("ocr", "accent" or
+   "other") and "why" (a few words).
+
+3. LEFT TO THE MODERNIZER: an old verb or pronoun form the modernizer rewrites
+   anyway (a vosotros form such as «tuvísteis», «buscáseis»). List it as a
+   defect with "kind": "modernizer" and an empty "fix", so the gate shows it.
+
+All-caps copies of a word (a heading) are the same candidate; never give them an
+entry of their own.
+
+The output is two JSON arrays: the entries, which become the glossary draft,
+and the defects, which become the defect list. Every candidate lands in exactly
+one of them.

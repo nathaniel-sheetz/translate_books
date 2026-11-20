@@ -13,7 +13,7 @@ from typing import Optional
 
 from src.models import GlossaryTerm, Glossary
 from src.utils.file_io import render_prompt
-from src.style_guide_wizard import _resolve_prompt_path
+from src.style_guide_wizard import _PROMPTS_DIR, _resolve_prompt_path
 
 
 def format_candidates_for_prompt(candidates: list[dict]) -> str:
@@ -74,6 +74,24 @@ def build_glossary_prompt(
         f"\nGLOSSARY-SPECIFIC GUIDANCE (from style questionnaire):\n{glossary_guidance}\n"
         if glossary_guidance.strip() else ""
     )
+
+    if context_mode == "modernize":
+        # A modernize book (src/modernize/glossary.py): the candidates are the
+        # words the dictionary checker flags in the old target-language source.
+        from src.modernize.glossary import format_candidates
+
+        template = (_PROMPTS_DIR / "glossary_modernize.txt").read_text(encoding="utf-8")
+        lines = template.splitlines(keepends=True)
+        while lines and (lines[0].startswith("#") or not lines[0].strip()):
+            lines.pop(0)  # the header comment is for maintainers, not the model
+        variables = {
+            "target_language": target_lang,
+            "book_title": book_title or "the book",
+            "style_guide": style_guide_content or "No style guide provided.",
+            "glossary_guidance": guidance_block,
+            "candidates": format_candidates(candidates),
+        }
+        return render_prompt("".join(lines), variables)
 
     if context_mode == "word":
         template = _resolve_prompt_path("glossary_bootstrap_word.txt").read_text(encoding="utf-8")

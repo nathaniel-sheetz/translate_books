@@ -1560,6 +1560,11 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     # extractor. Mirrors the GUI route; falls back to raw source.txt only if
     # neither exists. See FRICTION_LOG_5 #27 (151-vs-200 candidate gap).
     source, _, source_kind = load_clean_source_text(project_dir)
+    from src.modernize import mode as modernize_mode
+    if modernize_mode.is_modernize(cfg):
+        return _modernize_glossary_prepare(
+            project_dir, hdir, cfg, source, source_kind, max_candidates=max_candidates
+        )
     with _quiet_stdout():
         report = extract_candidates(source, max_candidates=max_candidates, verbose=False)
     candidates = [c.model_dump() for c in report.candidates]
@@ -1642,6 +1647,62 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     }
 
 
+def _modernize_glossary_prepare(project_dir: Path, hdir: Path, cfg: dict, source: str,
+                                source_kind: str, *, max_candidates: int) -> dict:
+    """``glossary prepare`` for a modernize book (:mod:`src.modernize.glossary`).
+
+    The candidates are what the dictionary checker flags in the spelling-fixed
+    source. The house lexicon and sibling glossaries are keyed by English
+    forms, so nothing is pre-filled.
+    """
+    from src.glossary_bootstrap import build_glossary_prompt
+    from src.modernize import glossary as mglossary
+    from src.modernize import mode as modernize_mode
+
+    text = modernize_mode.prompt_source(cfg, source)
+    candidates = mglossary.candidates(text, max_candidates=max_candidates)
+    carryforward, guidance = _glossary_carryforward(hdir, {c["term"] for c in candidates})
+    candidates.extend(carryforward)
+    mglossary.save_candidates(hdir, candidates)
+    (hdir / "glossary_prefill.json").write_text(
+        json.dumps({"prefilled": [], "divergence": []}), encoding="utf-8"
+    )
+    style_path = project_dir / "style.json"
+    style_guide = _read(style_path) if style_path.exists() else ""
+    prompt = build_glossary_prompt(
+        candidates, "", style_guide, cfg["target_language"], glossary_guidance=guidance,
+        context_mode="modernize", book_title=cfg.get("title") or project_dir.name,
+    )
+    prompt_path = hdir / "glossary_prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    draft_path = hdir / "glossary_draft.json"
+    defects_path = hdir / mglossary.DEFECTS_DRAFT
+    return {
+        "prompt_path": str(prompt_path),
+        "candidate_count": len(candidates),
+        "carryforward_count": len(carryforward),
+        "house_candidates_added": 0,
+        "prefilled": [],
+        "divergence": [],
+        "source_kind": source_kind,
+        "style_guide_loaded": bool(style_guide),
+        "draft_path": str(draft_path),
+        "defects_draft_path": str(defects_path),
+        "accent_pairs": sorted({c["term"] for c in candidates if c.get("accent_pair")}),
+        "sections": _prompt_sections(prompt, {"style_guide": style_guide}),
+        "instructions": (
+            "Modernize book: the candidates are the words the dictionary checker flags in "
+            "the spelling-fixed source. Read prompt_path and sort every candidate. Write the "
+            "entries as a JSON array of {english, translation, type, context} (note / aliases "
+            "only where needed, alternatives empty) to draft_path, and the defects as a JSON "
+            "array of {form, fix, kind, why} to defects_draft_path. At the gate, show the "
+            "defects next to the entries: the ocr/accent ones are fixed in the source (OCR "
+            "fixes or the spelling pass), never by an entry. Then run `glossary commit`."
+            + _SECTIONS_HINT
+        ),
+    }
+
+
 def glossary_commit(project: str, *, draft: str | None = None,
                     reason: str | None = None) -> dict:
     """Guard, build, save, and validate the agent-drafted glossary -> glossary.json."""
@@ -1695,12 +1756,25 @@ def glossary_commit(project: str, *, draft: str | None = None,
         prefilled, [{"english": t.english, "translation": t.spanish} for t in glossary.terms]
     )
 
+    # A modernize book's draft comes with a defect list, and its entries can
+    # hide the source's accent slips (src/modernize/glossary.py).
+    from src.modernize import mode as modernize_mode
+    defects: list[dict] = []
+    if modernize_mode.is_modernize(cfg):
+        from src.modernize import glossary as mglossary
+        defects, problems = mglossary.load_defects(hdir)
+        warnings.extend(problems)
+        warnings.extend(mglossary.accent_slip_warnings(
+            glossary.terms, mglossary.load_candidates(hdir)))
+
     return {
         "glossary_path": str(out),
         "term_count": len(glossary.terms),
         "house_departures": departures,
         "house_check": write_report(project_dir),
         "warnings": warnings,
+        "defects": defects,
+        "rescored": _rescore_dictionary(project_dir, glossary),
         "terms": [
             {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context,
              "note": t.note, "aliases": t.aliases}
@@ -1709,14 +1783,54 @@ def glossary_commit(project: str, *, draft: str | None = None,
     }
 
 
+def _rescore_dictionary(project_dir: Path, glossary) -> dict:
+    """Re-run the dictionary checker on every committed chunk against ``glossary``.
+
+    Its findings were scored against the glossary the chunk was committed
+    with; a glossary committed later (a mid-book entry, or a modernize book
+    that ran without one) leaves them stale. Machine-triage verdicts live in
+    their own file and survive. Never raises: the glossary is already saved.
+    """
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.is_dir():
+        return {"chunks": 0}
+    from src.utils.file_io import load_chunk
+    try:
+        from web_ui.evaluations import evaluate_and_persist_chunk
+    except Exception as exc:  # pragma: no cover - import trouble only
+        return {"chunks": 0, "error": str(exc)}
+    done, failed = 0, []
+    for cp in sorted(chunks_dir.glob("*.json")):
+        try:
+            chunk = load_chunk(cp)
+        except Exception:
+            continue  # not a chunk file
+        if not chunk.translated_text:
+            continue
+        try:
+            evaluate_and_persist_chunk(project_dir, chunk, glossary=glossary,
+                                       enabled_evals=("dictionary",))
+            done += 1
+        except Exception as exc:
+            failed.append(f"{chunk.id}: {exc}")
+    out: dict = {"chunks": done}
+    if failed:
+        out["failed"] = failed
+    return out
+
+
 def _unmatched_key_warnings(project_dir: Path, glossary) -> list[str]:
     """One ``REVIEW:`` line naming the keys no chunk of the source would ship."""
     from src.house import read_source
+    from src.modernize import mode as modernize_mode
     from src.utils.file_io import unmatched_glossary_terms
 
     source = read_source(project_dir)
     if not source:
         return []
+    # A modernize prompt carries the spelling-fixed source, so the keys are
+    # matched against that («Ilíada», where the old text has «Iliada»).
+    source = modernize_mode.prompt_source(state.load_config(project_dir), source)
     unmatched = unmatched_glossary_terms(glossary, source)
     if not unmatched:
         return []
@@ -5915,6 +6029,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         ),
         "style_guide_loaded": "whether style.json was fed into the prompt",
         "draft_path": "path to write the drafted proposals JSON to",
+        "defects_draft_path": "modernize books only: path to write the defect list to, a JSON array of {form, fix, kind: ocr|accent|modernizer|other, why}",
+        "accent_pairs": "modernize books only: flagged candidates that differ from another flagged form only by accents (one spelling is usually a slip)",
         "instructions": "what to do next",
     },
     "glossary commit": {
@@ -5924,6 +6040,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "warnings": "advisory, non-blocking flags for the approval gate: accent-stripping, REVIEW: alternatives-convention violations, and up to two address-map cast lines (stale names the rename will fix, and sites it will flag but not rewrite); empty when clean",
         "terms": "list of {english, translation, type, context}",
         "house_check": "{counts, report_path} from scripts/house_check.py: style, address, glossary, sibling-usage, committed-text, drift and promotion-candidate counts, with the full report at reports/house_check.md; {error} if the check failed (never blocks the commit)",
+        "defects": "modernize books only (else []): the drafted defect list, {form, fix, kind, why}. Show at the gate; ocr/accent ones are fixed in the source, never by an entry. Warnings add a REVIEW: line for each flagged form an entry hides by accents alone",
+        "rescored": "{chunks, failed?}: committed chunks whose dictionary findings were re-scored against the new glossary (machine-triage verdicts survive)",
     },
     "address-map precheck": {
         "chapters_scored": "chapters whose English source was scored for dialogue",
