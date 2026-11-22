@@ -440,3 +440,25 @@ then `references/epub.md` — combine + EPUB).
 
 Then continue exactly as the API path does — **`references/footnotes.md` if footnotes were imported**, then `references/epub.md`
 (combine + EPUB).
+
+## Modernize books (`task: modernize`)
+
+A book set up with `setup --task modernize` brings an old text in the target language up to current
+Mexican Spanish. It runs **only** on this workers path: `translate` and the web UI's API translate
+buttons refuse it, and so does `footnotes translate`. `translate-prepare` renders `prompts/modernize.txt`
+over the spelling-fixed source. `translate-commit` runs the spelling pass on the draft, swaps the echo
+guard for an over-edit guard, and applies the literal entries of the book's `archaisms.json`.
+
+The commit reports `guided_pending`: chunks with occurrences of guided entries (those a model must
+judge in context) not yet decided. Settle them with the archaisms cycle, after the translate waves:
+
+```
+python scripts/harness.py archaisms prepare --project <slug> [--chapters 1-6]   # one job per chunk, no spend
+python scripts/harness.py archaisms fanout  --project <slug>                    # one headless wave
+python scripts/harness.py archaisms apply   --project <slug>                    # check, apply, ledger, realign
+```
+
+Every decision goes into `archaism_fixes.jsonl`. A "keep" is not asked again; a replaced occurrence
+that a redo brings back is. When `apply` returns `partial`, run the cycle again and only the problems
+are asked. `archaisms.json` is built per book (no tracked builder yet); read the book's pilot plan
+before changing it.

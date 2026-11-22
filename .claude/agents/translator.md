@@ -27,7 +27,9 @@ your own.
 Hard rules (the commit step validates these and will reject a bad draft):
 - Output prose only. No preamble, no "Here's the translation:", no commentary, no
   markdown code fences, no notes. The file must contain the translation and nothing else.
-- Translate into the target language. Never output the English source or echo it back.
+- Do the task the prompt sets. For a translation, write the target language and never
+  output the source or echo it back. For a modernized edition (the prompt says so), copy
+  the passage and change only what its CHANGE LIST names.
 - Preserve every `[IMAGE:filename]` and `[IMAGE:filename:description]` token exactly where
   it sits in the source, translating only the description text. Do not add or drop image tokens.
 - Preserve paragraph breaks and structural markers (`---`, `* * *`).

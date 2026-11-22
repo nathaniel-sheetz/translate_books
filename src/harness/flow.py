@@ -282,6 +282,8 @@ def setup(
     title: str | None = None,
     author: str | None = None,
     language_code: str | None = None,
+    task: str | None = None,
+    source_language_code: str | None = None,
     always_include_dialogue: bool | None = None,
     always_include_image_instructions: bool | None = None,
     front_matter_titles: list[str] | None = None,
@@ -298,6 +300,12 @@ def setup(
     ``groups`` joins the book to existing book groups (``prompts/book_groups.json``)
     so its siblings pre-fill the style guide, address map and glossary. The
     result lists the groups there are, so the agent can ask about any not named.
+
+    ``task="modernize"`` makes a modernize book (:mod:`src.modernize.mode`): the
+    source is in the target language, so ``source_language_code`` defaults to
+    the target's ``language_code`` and the dialogue block goes on every chunk
+    (the old raya dialogue is not detected as dialogue, and every chunk needs
+    the rules). Either can still be given explicitly.
 
     Chunking is deferred to ``chunk`` so it can use the glossary-informed
     difficulty score. Wipes any prior ``.harness/`` working state for a clean run.
@@ -356,9 +364,21 @@ def setup(
         "language_code": language_code,
         "always_include_dialogue": always_include_dialogue,
         "always_include_image_instructions": always_include_image_instructions,
+        "task": task,
+        "source_language_code": source_language_code,
     }.items():
         if value is not None:
             cfg[key] = value
+    if task == "modernize":
+        from src.modernize.mode import language_name
+        code = source_language_code or cfg.get("language_code") or "es"
+        cfg["source_language_code"] = code
+        cfg["source_language"] = language_name(code)
+        if always_include_dialogue is None:
+            cfg["always_include_dialogue"] = True
+    elif source_language_code is not None:
+        from src.modernize.mode import language_name
+        cfg["source_language"] = language_name(source_language_code)
     for key, value in (("title", md_title), ("author", md_author)):
         if value is not None and not cfg.get(key):
             cfg[key] = value
@@ -1540,6 +1560,11 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     # extractor. Mirrors the GUI route; falls back to raw source.txt only if
     # neither exists. See FRICTION_LOG_5 #27 (151-vs-200 candidate gap).
     source, _, source_kind = load_clean_source_text(project_dir)
+    from src.modernize import mode as modernize_mode
+    if modernize_mode.is_modernize(cfg):
+        return _modernize_glossary_prepare(
+            project_dir, hdir, cfg, source, source_kind, max_candidates=max_candidates
+        )
     with _quiet_stdout():
         report = extract_candidates(source, max_candidates=max_candidates, verbose=False)
     candidates = [c.model_dump() for c in report.candidates]
@@ -1622,6 +1647,65 @@ def glossary_prepare(project: str, *, max_candidates: int = 500) -> dict:
     }
 
 
+def _modernize_glossary_prepare(project_dir: Path, hdir: Path, cfg: dict, source: str,
+                                source_kind: str, *, max_candidates: int) -> dict:
+    """``glossary prepare`` for a modernize book (:mod:`src.modernize.glossary`).
+
+    The candidates are what the dictionary checker flags in the spelling-fixed
+    source. The house lexicon and sibling glossaries are keyed by English
+    forms, so nothing is pre-filled.
+    """
+    from src.glossary_bootstrap import build_glossary_prompt
+    from src.modernize import glossary as mglossary
+    from src.modernize import mode as modernize_mode
+
+    text = modernize_mode.prompt_source(cfg, source)
+    candidates = mglossary.candidates(text, max_candidates=max_candidates)
+    carryforward, guidance = _glossary_carryforward(hdir, {c["term"] for c in candidates})
+    candidates.extend(carryforward)
+    mglossary.save_candidates(hdir, candidates)
+    (hdir / "glossary_prefill.json").write_text(
+        json.dumps({"prefilled": [], "divergence": []}), encoding="utf-8"
+    )
+    style_path = project_dir / "style.json"
+    style_guide = _read(style_path) if style_path.exists() else ""
+    prompt = build_glossary_prompt(
+        candidates, "", style_guide, cfg["target_language"], glossary_guidance=guidance,
+        context_mode="modernize", book_title=cfg.get("title") or project_dir.name,
+    )
+    prompt_path = hdir / "glossary_prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    draft_path = hdir / "glossary_draft.json"
+    defects_path = hdir / mglossary.DEFECTS_DRAFT
+    # A defect list left by an earlier prepare would be reported at commit as
+    # if the agent had just drafted it.
+    defects_path.unlink(missing_ok=True)
+    return {
+        "prompt_path": str(prompt_path),
+        "candidate_count": len(candidates),
+        "carryforward_count": len(carryforward),
+        "house_candidates_added": 0,
+        "prefilled": [],
+        "divergence": [],
+        "source_kind": source_kind,
+        "style_guide_loaded": bool(style_guide),
+        "draft_path": str(draft_path),
+        "defects_draft_path": str(defects_path),
+        "accent_pairs": sorted({c["term"] for c in candidates if c.get("accent_pair")}),
+        "sections": _prompt_sections(prompt, {"style_guide": style_guide}),
+        "instructions": (
+            "Modernize book: the candidates are the words the dictionary checker flags in "
+            "the spelling-fixed source. Read prompt_path and sort every candidate. Write the "
+            "entries as a JSON array of {english, translation, type, context} (note / aliases "
+            "only where needed, alternatives empty) to draft_path, and the defects as a JSON "
+            "array of {form, fix, kind, why} to defects_draft_path. At the gate, show the "
+            "defects next to the entries: the ocr/accent ones are fixed in the source (OCR "
+            "fixes or the spelling pass), never by an entry. Then run `glossary commit`."
+            + _SECTIONS_HINT
+        ),
+    }
+
+
 def glossary_commit(project: str, *, draft: str | None = None,
                     reason: str | None = None) -> dict:
     """Guard, build, save, and validate the agent-drafted glossary -> glossary.json."""
@@ -1675,12 +1759,25 @@ def glossary_commit(project: str, *, draft: str | None = None,
         prefilled, [{"english": t.english, "translation": t.spanish} for t in glossary.terms]
     )
 
+    # A modernize book's draft comes with a defect list, and its entries can
+    # hide the source's accent slips (src/modernize/glossary.py).
+    from src.modernize import mode as modernize_mode
+    defects: list[dict] = []
+    if modernize_mode.is_modernize(cfg):
+        from src.modernize import glossary as mglossary
+        defects, problems = mglossary.load_defects(hdir)
+        warnings.extend(problems)
+        warnings.extend(mglossary.accent_slip_warnings(
+            glossary.terms, mglossary.load_candidates(hdir)))
+
     return {
         "glossary_path": str(out),
         "term_count": len(glossary.terms),
         "house_departures": departures,
         "house_check": write_report(project_dir),
         "warnings": warnings,
+        "defects": defects,
+        "rescored": _rescore_dictionary(project_dir, glossary),
         "terms": [
             {"english": t.english, "translation": t.spanish, "type": t.type, "context": t.context,
              "note": t.note, "aliases": t.aliases}
@@ -1689,14 +1786,54 @@ def glossary_commit(project: str, *, draft: str | None = None,
     }
 
 
+def _rescore_dictionary(project_dir: Path, glossary) -> dict:
+    """Re-run the dictionary checker on every committed chunk against ``glossary``.
+
+    Its findings were scored against the glossary the chunk was committed
+    with; a glossary committed later (a mid-book entry, or a modernize book
+    that ran without one) leaves them stale. Machine-triage verdicts live in
+    their own file and survive. Never raises: the glossary is already saved.
+    """
+    chunks_dir = project_dir / "chunks"
+    if not chunks_dir.is_dir():
+        return {"chunks": 0}
+    from src.utils.file_io import load_chunk
+    try:
+        from web_ui.evaluations import evaluate_and_persist_chunk
+    except Exception as exc:  # pragma: no cover - import trouble only
+        return {"chunks": 0, "error": str(exc)}
+    done, failed = 0, []
+    for cp in sorted(chunks_dir.glob("*.json")):
+        try:
+            chunk = load_chunk(cp)
+        except Exception:
+            continue  # not a chunk file
+        if not chunk.translated_text:
+            continue
+        try:
+            evaluate_and_persist_chunk(project_dir, chunk, glossary=glossary,
+                                       enabled_evals=("dictionary",))
+            done += 1
+        except Exception as exc:
+            failed.append(f"{chunk.id}: {exc}")
+    out: dict = {"chunks": done}
+    if failed:
+        out["failed"] = failed
+    return out
+
+
 def _unmatched_key_warnings(project_dir: Path, glossary) -> list[str]:
     """One ``REVIEW:`` line naming the keys no chunk of the source would ship."""
     from src.house import read_source
+    from src.modernize import mode as modernize_mode
     from src.utils.file_io import unmatched_glossary_terms
 
     source = read_source(project_dir)
     if not source:
         return []
+    # A modernize prompt carries the spelling-fixed source, so the keys are
+    # matched against that («Ilíada», where the old text has «Iliada»).
+    source = modernize_mode.prompt_source(state.load_config(project_dir), source)
     unmatched = unmatched_glossary_terms(glossary, source)
     if not unmatched:
         return []
@@ -2490,6 +2627,12 @@ def translate_prepare(
     # House rules: global ones in the shared preamble, triggered ones per chunk.
     from src.house.prompt import load_translator_house
     house = load_translator_house(project_dir)
+    # Modernize books render their own template over the spelling-fixed source;
+    # for a translation every one of these is the historical value.
+    from src.modernize import mode as modernize_mode
+    modernize = modernize_mode.is_modernize(cfg)
+    template = modernize_mode.template_path(cfg)
+    source_lang = modernize_mode.source_language(cfg)
     # Shared cacheable prefix for headless fan-out. Written once from the first
     # chunk that yields a non-empty prefix; later chunks must match byte-for-byte
     # or they fall back to the full prompt.txt (no --system-prompt-file).
@@ -2508,28 +2651,47 @@ def translate_prepare(
                 prev_source = chunk.source_text
                 prev_translated = chunk.translated_text
                 continue
-            prev_context = (
-                extract_previous_chapter_context(
-                    prev_source,
-                    previous_translated_text=prev_translated,
-                    context_language="both",
-                    source_language="English",
-                    target_language=target_lang,
+            if modernize:
+                # The modernized predecessor alone: its old text differs from it
+                # by a few words, and two near-copies would only crowd the prompt.
+                prev_context = (
+                    extract_previous_chapter_context(
+                        modernize_mode.prompt_source(cfg, prev_source),
+                        previous_translated_text=prev_translated,
+                        context_language="translation" if prev_translated else "source",
+                        source_language=source_lang,
+                        target_language="modernized " + target_lang,
+                    )
+                    if prev_source else ""
                 )
-                if prev_source else ""
-            )
+                prompt_chunk = chunk.model_copy(
+                    update={"source_text": modernize_mode.prompt_source(cfg, chunk.source_text)}
+                )
+            else:
+                prev_context = (
+                    extract_previous_chapter_context(
+                        prev_source,
+                        previous_translated_text=prev_translated,
+                        context_language="both",
+                        source_language=source_lang,
+                        target_language=target_lang,
+                    )
+                    if prev_source else ""
+                )
+                prompt_chunk = chunk
             prefix, suffix = build_translation_prompt_parts(
-                chunk,
+                prompt_chunk,
                 glossary=glossary,
                 style_guide=style_guide,
                 project_name=title,
-                source_language="English",
+                source_language=source_lang,
                 target_language=target_lang,
                 previous_chapter_context=prev_context,
                 always_include_dialogue=always_include_dialogue,
                 always_include_image_instructions=book_has_images,
                 always_include_quote_instructions=book_quotes,
                 house=house,
+                template_path=template,
             )
             prompt = prefix + suffix
             prompt_path = translate_dir / f"{chunk.id}.prompt.txt"
@@ -2856,10 +3018,21 @@ def translate_commit(
         doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return {"error": f"manifest unreadable (truncated write?): {exc}", "committed": []}
-    worker_model = worker_model or doc.get("worker_model") or _default_worker_model(
-        state.load_config(project_dir)
-    )
+    cfg = state.load_config(project_dir)
+    worker_model = worker_model or doc.get("worker_model") or _default_worker_model(cfg)
     entries = doc.get("entries", [])
+    # Modernize books: spelling pass on the draft, the over-edit guard in place
+    # of the echo guard, then the book's literal archaism list (src.modernize).
+    from src.modernize import archaisms as modernize_archaisms
+    from src.modernize import mode as modernize_mode
+    modernize = modernize_mode.is_modernize(cfg)
+    archaism_list = modernize_archaisms.load_list(project_dir) if modernize else []
+    if archaism_list:
+        from src.modernize import guided as modernize_guided
+        guided_done = modernize_guided.decided_keys(project_dir)
+    guard_warnings: dict[str, list[str]] = {}
+    archaism_swaps: dict[str, int] = {}
+    guided_pending: dict[str, int] = {}
     allow_subs = [s.lower() for s in (allow_problems or []) if s.strip()]
 
     committed: list[str] = []
@@ -2893,7 +3066,18 @@ def translate_commit(
             missing.append(entry["chunk_id"])
             continue
         prose = draft_path.read_text(encoding="utf-8")
-        problems = guard_translation_draft(chunk, prose)
+        if modernize:
+            prose = modernize_mode.fix_draft(cfg, prose)
+            warns: list[str] = []
+            problems = guard_translation_draft(
+                chunk, prose,
+                modernize_reference=modernize_mode.prompt_source(cfg, chunk.source_text),
+                warnings=warns,
+            )
+            if warns:
+                guard_warnings[entry["chunk_id"]] = warns
+        else:
+            problems = guard_translation_draft(chunk, prose)
         if problems and allow_subs:
             kept = [p for p in problems if not any(s in p.lower() for s in allow_subs)]
             waived_here = [p for p in problems if p not in kept]
@@ -2919,6 +3103,24 @@ def translate_commit(
             chunk_id=chunk.id,
             project_slug=project_slug,
         )
+        if archaism_list:
+            # After the prompt log, so the log keeps the draft before the literal
+            # archaism swaps (already spelling-fixed); each swap is in
+            # archaism_fixes.jsonl.
+            prose, swaps = modernize_archaisms.apply_literal(prose, archaism_list)
+            modernize_archaisms.log_changes(project_dir, chunk.id, swaps,
+                                            writer=f"harness:{worker_model}")
+            if swaps:
+                archaism_swaps[entry["chunk_id"]] = len(swaps)
+            # Occurrences already decided (a redo of a reviewed chunk) are not pending.
+            hits = [
+                h for h in modernize_archaisms.guided_hits(prose, archaism_list)
+                if modernize_guided.occurrence_key(
+                    chunk.id, h["id"], prose, h["offset"], h["offset"] + len(h["old"])
+                ) not in guided_done
+            ]
+            if hits:
+                guided_pending[entry["chunk_id"]] = len(hits)
         apply_translation(chunk, prose, log_path=log_path, project_dir=project_dir,
                           writer=f"harness:{worker_model}")
         save_chunk(chunk, cp)
@@ -3004,7 +3206,7 @@ def translate_commit(
             "book is done."
         )
 
-    return {
+    result = {
         "committed": committed,
         "failed": failed,
         "missing": missing,
@@ -3026,6 +3228,17 @@ def translate_commit(
         "house_check": _house_check_after(project_dir, committed),
         "instructions": instructions,
     }
+    if modernize:
+        result["modernize"] = {
+            # Committed anyway: paragraphs or chunks changed more than the pilot did.
+            "over_edit_warnings": guard_warnings,
+            "archaism_swaps": archaism_swaps,
+            "archaism_swaps_total": sum(archaism_swaps.values()),
+            # Guided entries still in the text, for a model pass (one per hit).
+            "guided_pending": guided_pending,
+            "archaism_list": len(archaism_list),
+        }
+    return result
 
 
 def _house_check_after(project_dir: Path, committed: list) -> dict | None:
@@ -4005,6 +4218,12 @@ def translate(
     """
     project_dir = state.resolve_project_dir(project)
     cfg = state.load_config(project_dir)
+    from src.modernize.mode import is_modernize
+    if is_modernize(cfg):
+        # scripts/translate_book.py renders prompts/translation.txt over the raw
+        # source, with the echo guard: wrong on every count for this book.
+        return {"error": "a modernize book runs on the headless backend only: "
+                         "`translate-prepare`, `translate-fanout`, `translate-commit`"}
     if not yes:
         print(
             "Refusing to translate without --yes. The cost estimate must be approved by the "
@@ -4327,7 +4546,16 @@ def footnotes_translate_prepare(project: str, *, retranslate: bool = False) -> d
     ``batch_NN.draft.txt``) and runs ``footnotes translate-commit``. A clean no-op when no
     footnotes were imported or all are already translated.
     """
+    from src.modernize.mode import is_modernize
+
     project_dir = state.resolve_project_dir(project)
+    if is_modernize(state.load_config(project_dir)):
+        # The footnote prompts translate from English; a modernize book's notes
+        # are already Spanish and have no modernize path yet.
+        return {"command": "footnotes", "exit_code": 1,
+                "stage": "footnotes-translate-prepare",
+                "error": "footnotes translate is for translation books; this is a "
+                         "modernize book"}
     sidecar = project_dir / "footnotes.json"
     if not sidecar.exists():
         return {"command": "footnotes", "exit_code": 0,
@@ -4750,7 +4978,7 @@ def align(
     from src.sentence_aligner import align_chapter_chunks
     from src.utils.file_io import load_chunk
 
-    source_lang_code = source_lang_code or "en"
+    source_lang_code = source_lang_code or cfg.get("source_language_code") or "en"
     target_lang_code = target_lang_code or cfg.get("language_code") or "es"
 
     all_discovered = discover_chapters(chunks_dir)
@@ -5662,6 +5890,52 @@ def runs(project: str, *, run_id: str | None = None) -> dict:
         "beats": beat_summary,
     }
 
+
+def _modernize_project(project: str) -> tuple[Path, dict | None]:
+    project_dir = state.resolve_project_dir(project)
+    from src.modernize.mode import is_modernize
+    if not is_modernize(state.load_config(project_dir)):
+        return project_dir, {"status": "error",
+                             "error": "archaisms is for modernize books (setup --task modernize)"}
+    return project_dir, None
+
+
+def archaisms_prepare(project: str, *, chapters: str | None = None,
+                      worker_model: str | None = None, cli: str | None = None) -> dict:
+    """Modernize books: one job per chunk with guided archaism occurrences (no spend)."""
+    from scripts.translate_book import parse_chapter_range
+    from src.modernize import guided
+
+    project_dir, err = _modernize_project(project)
+    if err:
+        return err
+    wanted = None
+    if chapters:
+        wanted = {int(c.split("_")[1]) for c in parse_chapter_range(chapters)}
+    return guided.prepare(project_dir, chapters=wanted, worker_model=worker_model, cli=cli)
+
+
+def archaisms_fanout(project: str, *, concurrency: int | None = None,
+                     effort: str | None = None) -> dict:
+    """Run the prepared archaism jobs as one headless wave."""
+    from src.modernize import guided
+
+    project_dir, err = _modernize_project(project)
+    if err:
+        return err
+    return guided.fanout(project_dir, concurrency=concurrency, effort=effort)
+
+
+def archaisms_apply(project: str, *, no_realign: bool = False) -> dict:
+    """Check the answers, apply the replacements, record every decision, realign."""
+    from src.modernize import guided
+
+    project_dir, err = _modernize_project(project)
+    if err:
+        return err
+    return guided.apply(project_dir, no_realign=no_realign)
+
+
 # ── output schemas (self-documenting last_output.json) ────────────────────────
 #
 # Friction-log #19: the JSON each command writes to ``.harness/last_output.json``
@@ -5778,6 +6052,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         ),
         "style_guide_loaded": "whether style.json was fed into the prompt",
         "draft_path": "path to write the drafted proposals JSON to",
+        "defects_draft_path": "modernize books only: path to write the defect list to, a JSON array of {form, fix, kind: ocr|accent|modernizer|other, why}",
+        "accent_pairs": "modernize books only: flagged candidates that differ from another flagged form only by accents (one spelling is usually a slip)",
         "instructions": "what to do next",
     },
     "glossary commit": {
@@ -5787,6 +6063,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "warnings": "advisory, non-blocking flags for the approval gate: accent-stripping, REVIEW: alternatives-convention violations, and up to two address-map cast lines (stale names the rename will fix, and sites it will flag but not rewrite); empty when clean",
         "terms": "list of {english, translation, type, context}",
         "house_check": "{counts, report_path} from scripts/house_check.py: style, address, glossary, sibling-usage, committed-text, drift and promotion-candidate counts, with the full report at reports/house_check.md; {error} if the check failed (never blocks the commit)",
+        "defects": "modernize books only (else []): the drafted defect list, {form, fix, kind, why}. Show at the gate; ocr/accent ones are fixed in the source, never by an entry. Warnings add a REVIEW: line for each flagged form an entry hides by accents alone",
+        "rescored": "{chunks, failed?}: committed chunks whose dictionary findings were re-scored against the new glossary (machine-triage verdicts survive)",
     },
     "address-map precheck": {
         "chapters_scored": "chapters whose English source was scored for dialogue",
@@ -6133,6 +6411,37 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "epub_path": "path to the rebuilt EPUB (present when any footnote was applied)",
         "note": "present when there was nothing to apply (no footnotes.json)",
         "error": "present only on failure (scraped from the wrapped script's last ERROR line)",
+    },
+    "archaisms prepare": {
+        "status": "'ok' or 'error'",
+        "jobs": "headless jobs written (one per chunk with pending occurrences)",
+        "occurrences": "guided-entry occurrences not yet decided",
+        "by_entry": "{entry id: occurrences}",
+        "manifest_path": "the wave manifest under .harness/archaisms/",
+        "effective": "the resolved headless profile",
+        "instructions": "next step",
+        "error": "present only on failure",
+    },
+    "archaisms fanout": {
+        "wrote": "job ids whose drafts were written this wave",
+        "failed": "list of {id, error}; re-run fanout for these",
+        "skipped": "job ids whose draft already exists",
+        "counts": "{wrote, failed, skipped, todo}",
+        "effective": "what the wave ran as",
+        "usage": "what the wave consumed",
+        "instructions": "next step",
+        "error": "present only on failure",
+    },
+    "archaisms apply": {
+        "status": "'ok', 'partial' (some answers failed their check) or 'error'",
+        "replaced": "list of {chunk_id, id, old, before, after, reason}",
+        "kept": "list of {chunk_id, id, old, reason}",
+        "problems": "answers that failed their check; not recorded, asked again next prepare",
+        "missing_drafts": "chunk ids with no answer yet",
+        "chapters_edited": "chapters whose chunks changed",
+        "chapters_realigned": "chapters recombined and realigned",
+        "instructions": "next step",
+        "error": "present only on failure",
     },
     "footnotes drop": {
         "command": "the harness command ('footnotes')",

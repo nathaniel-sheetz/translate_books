@@ -174,16 +174,7 @@ class DictionaryEvaluator(BaseEvaluator):
         case_sensitive = context.get("case_sensitive", False)
         apply_morphology = context.get("apply_morphology", True)
 
-        # Replace image placeholders with equal-length whitespace before tokenizing
-        # (e.g. [IMAGE:images/i010.jpg]) — preserves character offsets for all subsequent words
-        text_to_check = strip_image_placeholders(chunk.translated_text)
-        # Blank the [CAPTION] marker too (offsets preserved) so it is not
-        # tokenized as an unknown word. The caption's own prose is still checked.
-        text_to_check = blank_caption_markers(text_to_check)
-        text_to_check = blank_quote_markers(text_to_check)
-        # And [FOOTNOTE:N], for the same reason: without this, "FOOTNOTE" is
-        # reported as an unknown word once per footnote reference in the book.
-        text_to_check = blank_footnote_markers(text_to_check)
+        text_to_check = self._checkable_text(chunk.translated_text)
 
         # Tokenize and get word positions
         words_with_positions = self._tokenize_with_positions(text_to_check)
@@ -271,6 +262,39 @@ class DictionaryEvaluator(BaseEvaluator):
         }
 
         return self.create_result(chunk, issues, score, metadata)
+
+    def classify_words(self, text: str) -> dict[str, dict]:
+        """The words this evaluator would flag in ``text``, without a glossary.
+
+        ``{word: {"kind": "english" | "unknown", "count": n}}``, keyed by the
+        surface form. A modernize book's glossary beat drafts its candidates
+        from this: the source is already in the target language, so what the
+        checker would flag in it is exactly what an entry has to cover.
+        """
+        flagged: dict[str, dict] = {}
+        for word, _ in self._tokenize_with_positions(self._checkable_text(text)):
+            if word in flagged:
+                flagged[word]["count"] += 1
+                continue
+            if self._is_special_case(word) or self._check_spanish_word(word):
+                continue
+            kind = "english" if self._check_english_word(word) else "unknown"
+            flagged[word] = {"kind": kind, "count": 1}
+        return flagged
+
+    @staticmethod
+    def _checkable_text(text: str) -> str:
+        """``text`` with the pipeline's markers blanked, character offsets kept."""
+        # Replace image placeholders with equal-length whitespace before tokenizing
+        # (e.g. [IMAGE:images/i010.jpg]) — preserves character offsets for all subsequent words
+        text = strip_image_placeholders(text)
+        # Blank the [CAPTION] marker too (offsets preserved) so it is not
+        # tokenized as an unknown word. The caption's own prose is still checked.
+        text = blank_caption_markers(text)
+        text = blank_quote_markers(text)
+        # And [FOOTNOTE:N], for the same reason: without this, "FOOTNOTE" is
+        # reported as an unknown word once per footnote reference in the book.
+        return blank_footnote_markers(text)
 
     def _tokenize_with_positions(self, text: str) -> list[tuple[str, int]]:
         """

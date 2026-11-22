@@ -158,6 +158,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title", default=None)
     sp.add_argument("--author", default=None)
     sp.add_argument("--language-code", dest="language_code", default=None)
+    sp.add_argument("--task", choices=["translate", "modernize"], default=None,
+                    help="translate (default) or modernize: bring an old text in the "
+                         "target language up to current spelling, grammar and "
+                         "vocabulary (renders prompts/modernize.txt, swaps the echo "
+                         "guard for an over-edit guard, applies archaisms.json at "
+                         "commit). Modernize implies --source-lang = the target's code "
+                         "and --always-dialogue unless given.")
+    sp.add_argument("--source-lang", dest="source_language_code", default=None,
+                    help="Source language code (default en; es for a modernize book)")
     sp.add_argument("--always-dialogue", dest="always_include_dialogue",
                     action=argparse.BooleanOptionalAction, default=None,
                     help="Put the DIALOGUE FORMATTING block on every chunk (not just "
@@ -744,6 +753,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicit no-op form of the default behaviour",
     )
 
+    # archaisms <action> (modernize books: the guided archaism entries) -------
+    arc = sub.add_parser(
+        "archaisms",
+        help="Modernize books: a model applies the guided entries of archaisms.json "
+             "to committed chunks (prepare -> fanout -> apply)",
+    )
+    arc_sub = arc.add_subparsers(dest="action", required=True)
+    arp = arc_sub.add_parser("prepare", help="Find pending occurrences; one job per chunk (no spend)")
+    add_project(arp)
+    add_chapters(arp)
+    arp.add_argument("--worker-model", dest="worker_model", default=None)
+    arp.add_argument("--cli", dest="cli", default=None, choices=list(state.HEADLESS_CLIS))
+    arf = arc_sub.add_parser("fanout", help="Run the prepared jobs as one headless wave")
+    add_project(arf)
+    arf.add_argument("--concurrency", type=int, default=None)
+    arf.add_argument("--effort", default=None,
+                     choices=["low", "medium", "high", "xhigh", "default"])
+    ara = arc_sub.add_parser("apply", help="Check the answers, apply the replacements, realign")
+    add_project(ara)
+    ara.add_argument("--no-realign", dest="no_realign", action="store_true")
+
     # --schema on every leaf subcommand. The blocks cost real tokens on every
     # call (status alone is ~2KB), so they are opt-in on success — and, per
     # _stamp_schema, automatic on any error, where the caller most needs the
@@ -813,6 +843,7 @@ def _dispatch(args: argparse.Namespace):
             heading_level=args.heading_level, target_language=args.target_language,
             locale=args.locale, provider=args.provider, model=args.model,
             title=args.title, author=args.author, language_code=args.language_code,
+            task=args.task, source_language_code=args.source_language_code,
             always_include_dialogue=args.always_include_dialogue,
             always_include_image_instructions=args.always_include_image_instructions,
             front_matter_titles=args.front_matter_titles,
@@ -994,6 +1025,15 @@ def _dispatch(args: argparse.Namespace):
         return flow.captions(args.project, accept_tiers=args.accept_tiers,
                              accept=args.accept, reject=args.reject,
                              apply=args.apply and not args.dry_run)
+    if cmd == "archaisms":
+        if args.action == "prepare":
+            return flow.archaisms_prepare(args.project, chapters=args.chapters,
+                                          worker_model=args.worker_model, cli=args.cli)
+        if args.action == "fanout":
+            return flow.archaisms_fanout(args.project, concurrency=args.concurrency,
+                                         effort=args.effort)
+        if args.action == "apply":
+            return flow.archaisms_apply(args.project, no_realign=args.no_realign)
     if cmd == "quotes":
         return flow.quotes(args.project, match=args.match, accept=args.accept,
                            reject=args.reject, apply=args.apply and not args.dry_run)

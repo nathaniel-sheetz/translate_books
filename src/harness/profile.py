@@ -88,6 +88,7 @@ USAGE_LOG_RELPATH: dict[str, tuple[str, ...]] = {
     "quotations_scan": (".harness", "quotations", "scan.usage.jsonl"),
     "quotations_map": (".harness", "quotations", "map.usage.jsonl"),
     "quotations_judge": (".harness", "quotations", "judge.usage.jsonl"),
+    "archaisms_guided": (".harness", "archaisms", "usage.jsonl"),
 }
 
 # How the resolved effort actually reaches the model.

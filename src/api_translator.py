@@ -706,6 +706,7 @@ def build_translation_prompt(
     always_include_image_instructions: bool = False,
     always_include_quote_instructions: bool | None = None,
     house: Optional["TranslatorHouse"] = None,
+    template_path: Optional[Path] = None,
 ) -> str:
     """Render the translation prompt for a single chunk.
 
@@ -734,9 +735,12 @@ def build_translation_prompt(
     this chunk only (triggered house rules, the book's chapter-windowed or
     triggered rules, address shifts), matched on its English and its
     ``chapter_id``. ``None`` renders neither.
+
+    ``template_path`` renders another template (a modernize book's
+    ``prompts/modernize.txt``); ``None`` is ``prompts/translation.txt``.
     """
     chunk_glossary = filter_glossary_for_chunk(glossary, chunk.source_text) if glossary else None
-    template = load_prompt_template()
+    template = load_prompt_template(template_path)
     house_rules = house.rules_block() if house else ""
     house_notes = house.notes_block(chunk.source_text, chunk.chapter_id) if house else ""
     variables = {
@@ -829,6 +833,7 @@ def build_translation_prompt_parts(
     always_include_image_instructions: bool = False,
     always_include_quote_instructions: bool | None = None,
     house: Optional["TranslatorHouse"] = None,
+    template_path: Optional[Path] = None,
 ) -> tuple[str, str]:
     """Render the translation prompt split into ``(prefix, suffix)`` for caching.
 
@@ -853,6 +858,7 @@ def build_translation_prompt_parts(
         always_include_image_instructions=always_include_image_instructions,
         always_include_quote_instructions=always_include_quote_instructions,
         house=house,
+        template_path=template_path,
     )
     marker = _CACHE_PREFIX_SPLIT_MARKER
     idx = prompt.find(marker)

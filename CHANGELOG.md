@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.87.0.0] - 2026-11-21
+
+### Added
+- **A modernize mode for the harness: an old Spanish text brought up to current Mexican Spanish with the fewest changes.** `setup --task modernize` makes the book. Its source language defaults to the target's, and the dialogue rules go on every chunk.
+  - **Prompt:** `translate-prepare` renders `prompts/modernize.txt` over the spelling-fixed source (`src/modernize/orthography.py`: «fué», «á», «éste» and the like).
+  - **Commit:** `translate-commit` runs the spelling pass on the draft again. It replaces the echo guard with an over-edit guard (`src/modernize/guard.py`) that rejects rewrites, dropped text and duplicated sentences. It then applies the literal entries of the book's `archaisms.json` and logs every swap to `archaism_fixes.jsonl`.
+  - **Refusals:** `translate`, the dashboard's API translate buttons and `footnotes translate` refuse a modernize book.
+- **The `archaisms prepare / fanout / apply` commands.** They settle the guided archaism entries, the ones a model must judge in context, one occurrence at a time as a headless wave. `apply` checks each answer, applies the replacements with a chunk snapshot, records every decision and realigns. A "keep" is never asked again.
+- **A glossary beat for modernize books.** The candidates are the words the dictionary checker flags in the spelling-fixed source; forms that differ only by case are grouped, and accent variants are paired. The agent sorts each candidate into an entry or a defect (`ocr`, `accent`, `modernizer`, `other`). Commit warns when an entry would hide an accent slip from the checker.
+
+### Changed
+- On every book, `glossary commit` now re-scores the dictionary findings of the chunks already committed, so a glossary added mid-book clears stale name findings at once. The other evaluators and the triage verdicts are kept.
+- `build_translation_prompt` takes an optional template path. Translation books still render `prompts/translation.txt` unchanged.
+
 ## [0.86.1.0] - 2026-11-18
 
 ### Fixed

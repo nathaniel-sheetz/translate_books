@@ -100,6 +100,26 @@ This guards the proposals, builds + saves `glossary.json`, and validates it; it 
 - **Log the outcome:** `log-event --event approval --data '{"beat":"glossary",
   "decision":"approved_first_pass"|"reject_then_redraft"|"approve_with_changes","redrafts":<n>}'`.
 
+## Modernize books (`task: modernize`)
+
+The beat runs for a modernize book too, mainly so the coded dictionary checker stops flagging the
+book's names, and to pin the few names whose modern spelling differs. `prepare` behaves differently:
+
+- **Candidates** are the words the dictionary checker flags in the *spelling-fixed* source
+  (`src/modernize/glossary.py`). They are not the English extractor's. Nothing is pre-filled from the
+  house lexicon or siblings, since those are keyed by English forms.
+- **Three outcomes per candidate.** An *entry* goes to `draft_path`; the key is the source form,
+  usually rendered as itself. A *defect* goes to `defects_draft_path` as `{form, fix, kind, why}`;
+  `kind` is `ocr`, `accent`, `modernizer` (an old vosotros form the modernizer rewrites) or `other`.
+- **An entry must never cover a slip.** Glossary matches ignore accents, so an entry «Zacarías» would
+  hide every bare «Zacarias» from the checker. `accent_pairs` lists these candidates. Commit adds a
+  `REVIEW:` warning for each flagged form an entry hides this way.
+- **At the gate**, show `defects` beside the entries. The `ocr` and `accent` defects are fixed in the
+  source: the book's OCR fixes, or `src/modernize/orthography.py`. Then recommit.
+
+On every book, `commit` re-scores the dictionary findings of chunks already committed (`rescored`).
+A glossary added mid-book therefore clears stale name findings at once, and triage verdicts survive.
+
 > Approving the glossary approves **the glossary only**. It does NOT mean "start translating."
 > After approval you proceed to difficulty scoring + chunking (`references/chunk.md`) and then **stop again** at
 > the cost gate (`references/translate-api.md` / `references/translate-workers.md`). Do not jump to translate here.

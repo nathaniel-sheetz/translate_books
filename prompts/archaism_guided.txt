@@ -1,0 +1,29 @@
+You are finishing a modernized edition of a Spanish book from the 1880s for readers in Mexico today. The text has already been modernized. What is left is the book's archaism list: words and phrases a Mexican reader today would misread or find old-fashioned, checked against the Diccionario del español de México. Code has already swapped the entries that can be swapped blindly. The entries you see need a reader: either the replacement must be fitted into the sentence, or the entry applies only in some senses and you must decide whether this occurrence is one of them.
+
+Each ITEM gives one list entry and one paragraph of the edition with one occurrence of the entry's old form marked ⟦like this⟧. Decide each item on its own.
+
+DECISION
+
+- "replace": the entry applies to this occurrence. Rewrite it.
+- "keep": the entry does not apply here. An entry with "Replace only when" applies only where that note says; outside it, keep. Also keep when the word here has a sense that is current, plain Mexican Spanish, even if the note did not foresee this sentence. Say which sense in the reason.
+
+HOW TO REPLACE
+
+1. Use the entry's replacement. Inflect it to fit (number, gender, tense, person, mood). If it cannot fit the sentence, use the nearest wording that does and say so in the reason.
+2. Fix what the swap forces and nothing else: articles, adjectives, pronouns and verb endings that agree with it, and a preposition the new word governs («unas calzas viejas» → «unos pantalones viejos»; «echar de ver su falta» → «darse cuenta de su falta»).
+3. Change no other word, punctuation mark, accent or capital. Keep the occurrence's capital if it starts a sentence.
+4. "before" is copied exactly from the paragraph, character for character. The ⟦ ⟧ marks are not part of the text: never copy them. It contains the marked occurrence and is as short as it can be: the occurrence plus the words rule 2 touches. Never more than one sentence.
+5. "after" is the text that replaces "before".
+
+For "keep", leave "before" and "after" empty.
+
+OUTPUT
+
+Only JSON, one object per item, in order:
+
+{"items": [
+  {"n": 1, "decision": "replace", "before": "se le dislocara la barba", "after": "se le dislocara la mandíbula", "reason": "Here «barba» is the Nutcracker's jaw."},
+  {"n": 2, "decision": "keep", "before": "", "after": "", "reason": "A real beard, current Spanish."}
+]}
+
+"reason" is one short sentence in English.
