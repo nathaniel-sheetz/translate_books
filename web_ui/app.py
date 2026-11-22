@@ -400,6 +400,22 @@ def _chapter_display_label(chapter_id: str, manifest: dict, chapter_prefix: str)
     return chapter_id.replace("_", " ").title().replace("Chapter", chapter_prefix)
 
 
+def _modernize_refusal(project_dir: Path):
+    """A 400 response for a modernize book, else None.
+
+    The UI's API translate paths render translation.txt over the source as
+    English; a modernize book goes through the harness (spelling pass,
+    over-edit guard, archaism list) instead.
+    """
+    from src.modernize.mode import is_modernize
+
+    if is_modernize(hstate.load_config(project_dir)):
+        return jsonify({"error": "This is a modernize book: run it through the harness "
+                                 "(translate-prepare / fanout / translate-commit), not the "
+                                 "API translate buttons."}), 400
+    return None
+
+
 def _safe_id(value: str) -> bool:
     """Return True only for IDs that are safe filesystem names.
 
@@ -6088,6 +6104,9 @@ def project_translate_realtime(project_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _resolve_project_dir(project_id)
+    refusal = _modernize_refusal(project_dir)
+    if refusal:
+        return refusal
     data = request.json or {}
     chunk_id = data.get("chunk_id", "")
 
@@ -6173,6 +6192,9 @@ def project_translate_batch(project_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _resolve_project_dir(project_id)
+    refusal = _modernize_refusal(project_dir)
+    if refusal:
+        return refusal
     data = request.json or {}
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")
@@ -6488,6 +6510,9 @@ def batch_api_submit(project_id):
         return jsonify({"error": "Bad request"}), 400
 
     project_dir = _resolve_project_dir(project_id)
+    refusal = _modernize_refusal(project_dir)
+    if refusal:
+        return refusal
     data = request.json or {}
     chapter_ids = data.get("chapter_ids", [])
     provider = data.get("provider", "anthropic")

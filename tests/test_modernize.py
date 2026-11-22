@@ -375,6 +375,162 @@ class TestGuidedRoundTrip:
         assert res["status"] == "partial" and len(res["problems"]) == 1
         assert G.prepare(book)["occurrences"] == 1
 
+    # Paragraphs far enough apart that an edit in one leaves the other's key window alone.
+    LONG = ("Tenía la barba sujeta con una cinta roja que le había regalado su madrina.\n\n"
+            "Mucho tiempo después, su barba blanca le sentaba bien.")
+
+    def _long_book(self, tmp_path):
+        from src.utils.file_io import load_chunk, save_chunk
+
+        book = self._book(tmp_path)
+        path = book / "chunks" / "chapter_01_chunk_001.json"
+        save_chunk(load_chunk(path).model_copy(update={"translated_text": self.LONG}), path)
+        return book, path
+
+    def _draft(self, book, items):
+        from src.modernize import guided as G
+
+        (G.pass_dir(book) / "chapter_01_chunk_001.draft.json").write_text(
+            json.dumps({"items": items}), encoding="utf-8")
+
+    def _ledger(self, book):
+        lines = (book / archaisms.LOG_NAME).read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
+
+    def test_second_cycle_on_the_same_chunk(self, tmp_path):
+        """The re-ask cycle: .applied.json from cycle 1 must not stop cycle 2."""
+        from src.modernize import guided as G
+        from src.utils.file_io import load_chunk
+
+        book, path = self._long_book(tmp_path)
+        G.prepare(book)
+        self._draft(book, [{"n": 1, "decision": "replace", "before": "nada de esto", "after": "x"},
+                           {"n": 2, "decision": "keep", "reason": "beard"}])
+        assert G.apply(book, no_realign=True)["status"] == "partial"
+        assert G.prepare(book)["occurrences"] == 1
+        self._draft(book, [{"n": 1, "decision": "replace", "before": "la barba sujeta",
+                            "after": "la mandíbula sujeta", "reason": "jaw"}])
+        res = G.apply(book, no_realign=True)
+        assert res["status"] == "ok" and len(res["replaced"]) == 1
+        assert "la mandíbula sujeta" in load_chunk(path).translated_text
+        assert [r["decision"] for r in self._ledger(book)] == ["keep", "replace"]
+        assert (G.pass_dir(book) / "chapter_01_chunk_001.draft.applied.json").exists()
+
+    def test_redo_brings_a_replaced_occurrence_back(self, tmp_path):
+        """A replace is not a decision about the old text: a redo that restores it is asked again."""
+        from src.modernize import guided as G
+        from src.utils.file_io import load_chunk, save_chunk
+
+        book, path = self._long_book(tmp_path)
+        G.prepare(book)
+        self._draft(book, [{"n": 1, "decision": "replace", "before": "la barba sujeta",
+                            "after": "la mandíbula sujeta", "reason": "jaw"},
+                           {"n": 2, "decision": "keep", "reason": "beard"}])
+        assert G.apply(book, no_realign=True)["status"] == "ok"
+        assert G.prepare(book)["occurrences"] == 0
+        save_chunk(load_chunk(path).model_copy(update={"translated_text": self.LONG}), path)
+        assert G.prepare(book)["occurrences"] == 1
+        items = json.loads((G.pass_dir(book) / "items.json").read_text(encoding="utf-8"))
+        assert [i["offset"] for i in items] == [self.LONG.index("barba")]
+
+    def test_before_span_changed_since_prepare(self, tmp_path):
+        """An edit inside «before» (not the old form itself) since prepare is refused."""
+        from src.modernize import guided as G
+        from src.utils.file_io import load_chunk, save_chunk
+
+        book, path = self._long_book(tmp_path)
+        G.prepare(book)
+        # Same length, so the other occurrence's offset still holds.
+        edited = self.LONG.replace("la barba sujeta", "la barba ligada")
+        save_chunk(load_chunk(path).model_copy(update={"translated_text": edited}), path)
+        self._draft(book, [{"n": 1, "decision": "replace", "before": "la barba sujeta",
+                            "after": "la mandíbula sujeta", "reason": "jaw"},
+                           {"n": 2, "decision": "keep", "reason": "beard"}])
+        res = G.apply(book, no_realign=True)
+        assert [p["error"] for p in res["problems"]] == ["the chunk changed since prepare"]
+        assert load_chunk(path).translated_text == edited
+
+
+# ── the modernize branch of the harness flow ─────────────────────────────────
+
+LITERAL = {"id": "l001", "old": "empero", "replacement": "pero", "mode": "literal"}
+COMMIT_SRC = "Fué á casa, empero no halló la barba del muñeco en ningún lado.\n\n" + PASSAGE
+
+
+class TestModernizeFlow:
+    def _book(self, tmp_path, monkeypatch):
+        from src.harness import state
+        from src.utils.file_io import save_chunk
+
+        book = tmp_path / "book"
+        (book / "chunks").mkdir(parents=True)
+        state.save_config(book, {"task": "modernize", "title": "T", "target_language": "Spanish",
+                                 "source_language_code": "es", "language_code": "es"})
+        (book / archaisms.LIST_NAME).write_text(
+            json.dumps({"entries": [LITERAL, GUIDED]}), encoding="utf-8")
+        cid = "chapter_01_chunk_001"
+        cp = book / "chunks" / f"{cid}.json"
+        save_chunk(_chunk(COMMIT_SRC).model_copy(update={"id": cid}), cp)
+        tdir = book / ".harness" / "translate"
+        tdir.mkdir(parents=True)
+        draft = tdir / f"{cid}.draft.txt"
+        draft.write_text(COMMIT_SRC, encoding="utf-8")  # the model changed nothing
+        (tdir / "manifest.json").write_text(json.dumps({"entries": [{
+            "chunk_id": cid, "chapter_id": "chapter_01", "chunk_path": str(cp),
+            "draft_path": str(draft), "prompt_path": str(tdir / f"{cid}.prompt.txt"),
+        }]}), encoding="utf-8")
+        return book, cp, cid
+
+    def test_translate_commit_spelling_swaps_and_pending(self, tmp_path, monkeypatch):
+        from src.harness import flow
+        from src.modernize import guided as G
+        from src.utils.file_io import load_chunk, save_chunk
+
+        book, cp, cid = self._book(tmp_path, monkeypatch)
+        res = flow.translate_commit(str(book), worker_model="claude-sonnet-5-5")
+        assert res["committed"] == [cid], res
+        text = load_chunk(cp).translated_text
+        assert text.startswith("Fue a casa, pero no halló")
+        assert res["modernize"]["archaism_swaps"] == {cid: 1}
+        assert res["modernize"]["guided_pending"] == {cid: 1}
+        swaps = (book / archaisms.LOG_NAME).read_text(encoding="utf-8").splitlines()
+        assert [json.loads(s)["id"] for s in swaps] == ["l001"]
+
+        # A redo of a chunk whose guided occurrence was already kept: not pending.
+        start = text.index("barba")
+        with (book / archaisms.LOG_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"decision": "keep", "key": G.occurrence_key(
+                cid, GUIDED["id"], text, start, start + len("barba"))}) + "\n")
+        save_chunk(load_chunk(cp).model_copy(update={"translated_text": None}), cp)
+        res = flow.translate_commit(str(book), worker_model="claude-sonnet-5-5")
+        assert res["committed"] == [cid] and res["modernize"]["guided_pending"] == {}
+
+    def test_footnotes_translate_refuses_a_modernize_book(self, tmp_path, monkeypatch):
+        from src.harness import flow
+
+        book, _cp, _cid = self._book(tmp_path, monkeypatch)
+        (book / "footnotes.json").write_text("[]", encoding="utf-8")
+        out = flow.footnotes_translate_prepare(str(book))
+        assert out["exit_code"] == 1 and "modernize" in out["error"]
+        assert not (book / ".harness" / "footnotes").exists()
+
+    def test_setup_modernize_defaults_and_translate_refusal(self, tmp_path):
+        from src.harness import flow, state
+
+        book = tmp_path / "oldbook"
+        book.mkdir()
+        body = (PASSAGE + "\n\n") * 4
+        (book / "source.txt").write_text(f"CHAPTER I\n\n{body}CHAPTER II\n\n{body}",
+                                         encoding="utf-8")
+        flow.setup(str(book), url="", target_language="Spanish", language_code="es",
+                   title="Historia", task="modernize")
+        cfg = state.load_config(book)
+        assert cfg["task"] == "modernize"
+        assert cfg["source_language_code"] == "es" and cfg["source_language"] == "Spanish"
+        assert cfg["always_include_dialogue"] is True
+        out = flow.translate(str(book), yes=True)
+        assert isinstance(out, dict) and "headless backend only" in out["error"]
+
 
 # ── the glossary beat ────────────────────────────────────────────────────────
 
@@ -407,6 +563,34 @@ class TestModernizeGlossary:
         assert by["Fritz"]["detection_reasons"] == ["dictionary_english"]
         assert "levitón" in by["levitón"]["contexts"][0][1] and len(by["levitón"]["contexts"]) == 2
         assert MG.candidates(GLOSS_TEXT, classify=_fake_classify, max_candidates=2)[1]["term"] == "levitón"
+
+    def test_accent_pair_names_a_case_group_like_its_term(self):
+        from src.modernize import glossary as MG
+
+        def classify(_text):
+            return {"ZACARIAS": {"kind": "unknown", "count": 1},
+                    "Zacarias": {"kind": "unknown", "count": 1},
+                    "Zacarías": {"kind": "unknown", "count": 1}}
+
+        by = {c["term"]: c for c in MG.candidates("x", classify=classify)}
+        assert "Zacarias" in by
+        assert by["Zacarías"]["accent_pair"] == ["Zacarias ×2"]
+
+    def test_prepare_clears_a_stale_defects_draft(self, tmp_path):
+        from src.harness import flow, state
+        from src.modernize import glossary as MG
+
+        book = tmp_path / "book"
+        (book / "chapters").mkdir(parents=True)
+        (book / "source.txt").write_text(GLOSS_TEXT, encoding="utf-8")
+        (book / "chapters" / "chapter_01.txt").write_text(GLOSS_TEXT, encoding="utf-8")
+        state.save_config(book, {"task": "modernize", "title": "T", "target_language": "Spanish",
+                                 "source_language_code": "es", "language_code": "es"})
+        stale = book / ".harness" / MG.DEFECTS_DRAFT
+        stale.write_text(json.dumps([{"form": "viejo", "fix": "x", "kind": "ocr"}]),
+                         encoding="utf-8")
+        prep = flow.glossary_prepare(str(book))
+        assert Path(prep["defects_draft_path"]) == stale and not stale.exists()
 
     def test_format_shows_the_accent_line(self):
         from src.modernize import glossary as MG

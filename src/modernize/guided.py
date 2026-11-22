@@ -72,7 +72,10 @@ def decided_keys(project_dir: Path) -> set[str]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(row, dict) and row.get("key"):
+        # Only keeps: a replaced occurrence is gone from the text, and its key
+        # (the window around the old form) must not hide it if a redo brings
+        # the old form back.
+        if isinstance(row, dict) and row.get("key") and row.get("decision") == "keep":
             keys.add(row["key"])
     return keys
 
@@ -302,8 +305,16 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
         by_chunk.setdefault(item["chunk_id"], []).append(item)
 
     replaced, kept, problems, missing = [], [], [], []
-    rows: list[dict] = []
     chapters: list[str] = []
+
+    def record(rows: list[dict]) -> None:
+        # Per chunk, right after its text is saved: a failure on a later chunk
+        # must not leave saved edits with no ledger rows.
+        if not rows:
+            return
+        with (project_dir / archaisms.LOG_NAME).open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps({"at": stamp, "writer": writer, **row}, ensure_ascii=False) + "\n")
     from web_ui.evaluations import mark_evaluation_stale
 
     for chunk_id, batch in by_chunk.items():
@@ -321,6 +332,7 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
         text = chunk.translated_text or ""
         edits: list[tuple[dict, dict, dict]] = []
         keeps: list[tuple[dict, dict]] = []
+        rows: list[dict] = []
         for item in batch:
             answer = answers.get(item["n"])
             entry = entries.get(item["id"])
@@ -337,6 +349,10 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
                 problems.append({**base, "error": problem, "answer": answer})
             elif edit is None:
                 keeps.append((item, {**base, "reason": reason}))
+            elif text[edit["start"]: edit["end"]] != edit["before"]:
+                # «before» was checked against the paragraph as prepared; an edit
+                # inside its span since then would send the swap to a later twin.
+                problems.append({**base, "error": "the chunk changed since prepare"})
             else:
                 edits.append((item, edit, {**base, "reason": reason}))
         # Overlapping edits: the first one (by position) wins, the other is asked again.
@@ -381,12 +397,10 @@ def apply(project_dir: Path, *, no_realign: bool = False) -> dict[str, Any]:
             rows.append({**base, "mode": "guided", "decision": "keep", "new": None,
                          "key": occurrence_key(chunk_id, item["id"], text, start, end),
                          "context": text[max(0, start - 60): end + 60]})
-        draft.rename(draft.with_suffix(".applied.json"))
-
-    if rows:
-        with (project_dir / archaisms.LOG_NAME).open("a", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps({"at": stamp, "writer": writer, **row}, ensure_ascii=False) + "\n")
+        record(rows)
+        # replace, not rename: a second cycle on the same chunk finds the first
+        # cycle's .applied.json already there, and rename fails on Windows.
+        draft.replace(draft.with_suffix(".applied.json"))
 
     realigned = []
     if chapters and not no_realign:

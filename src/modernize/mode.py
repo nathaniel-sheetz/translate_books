@@ -17,14 +17,12 @@ stay byte-identical.
 """
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 from typing import Optional
 
 from src.modernize.orthography import modernize_spelling
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TASKS = ("translate", "modernize")
 DEFAULT_TEMPLATES = {"modernize": "prompts/modernize.txt"}
 
 
@@ -49,18 +47,14 @@ def source_language(cfg: dict) -> str:
     return cfg.get("source_language") or "English"
 
 
-def source_language_code(cfg: dict) -> str:
-    return cfg.get("source_language_code") or "en"
-
-
 def prompt_source(cfg: dict, text: str) -> str:
     """The source text as the prompt shows it: spelling fixed for modernize."""
     return modernize_spelling(text) if is_modernize(cfg) else text
 
 
-def fix_draft(cfg: dict, text: str, counts: Optional[Counter] = None) -> str:
+def fix_draft(cfg: dict, text: str) -> str:
     """The spelling pass on a modernize draft (a no-op on text already fixed)."""
-    return modernize_spelling(text, counts=counts) if is_modernize(cfg) else text
+    return modernize_spelling(text) if is_modernize(cfg) else text
 
 
 _LANGUAGE_NAMES = {"en": "English", "es": "Spanish", "fr": "French", "de": "German",

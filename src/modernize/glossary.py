@@ -55,6 +55,11 @@ def _excerpts(text: str, form: str, limit: int = _EXCERPTS) -> list[str]:
     return out
 
 
+def _name_form(forms: dict[str, int]) -> str:
+    """The form that names a case group: most frequent, capitals over all caps."""
+    return max(forms, key=lambda f: (forms[f], not f.isupper(), f))
+
+
 def candidates(
     text: str,
     *,
@@ -88,9 +93,9 @@ def candidates(
     out: list[dict] = []
     for key, g in groups.items():
         forms = g["forms"]
-        term = max(forms, key=lambda f: (forms[f], not f.isupper(), f))
+        term = _name_form(forms)
         pair = sorted(
-            max(groups[k]["forms"], key=groups[k]["forms"].get)
+            _name_form(groups[k]["forms"])
             for k in by_fold[fold(key)] if k != key
         )
         frequency = sum(forms.values())

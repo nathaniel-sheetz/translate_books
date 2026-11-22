@@ -1677,6 +1677,9 @@ def _modernize_glossary_prepare(project_dir: Path, hdir: Path, cfg: dict, source
     prompt_path.write_text(prompt, encoding="utf-8")
     draft_path = hdir / "glossary_draft.json"
     defects_path = hdir / mglossary.DEFECTS_DRAFT
+    # A defect list left by an earlier prepare would be reported at commit as
+    # if the agent had just drafted it.
+    defects_path.unlink(missing_ok=True)
     return {
         "prompt_path": str(prompt_path),
         "candidate_count": len(candidates),
@@ -3024,6 +3027,9 @@ def translate_commit(
     from src.modernize import mode as modernize_mode
     modernize = modernize_mode.is_modernize(cfg)
     archaism_list = modernize_archaisms.load_list(project_dir) if modernize else []
+    if archaism_list:
+        from src.modernize import guided as modernize_guided
+        guided_done = modernize_guided.decided_keys(project_dir)
     guard_warnings: dict[str, list[str]] = {}
     archaism_swaps: dict[str, int] = {}
     guided_pending: dict[str, int] = {}
@@ -3098,14 +3104,21 @@ def translate_commit(
             project_slug=project_slug,
         )
         if archaism_list:
-            # After the prompt log, so the log keeps what the model wrote; each
-            # swap is in archaism_fixes.jsonl.
+            # After the prompt log, so the log keeps the draft before the literal
+            # archaism swaps (already spelling-fixed); each swap is in
+            # archaism_fixes.jsonl.
             prose, swaps = modernize_archaisms.apply_literal(prose, archaism_list)
             modernize_archaisms.log_changes(project_dir, chunk.id, swaps,
                                             writer=f"harness:{worker_model}")
             if swaps:
                 archaism_swaps[entry["chunk_id"]] = len(swaps)
-            hits = modernize_archaisms.guided_hits(prose, archaism_list)
+            # Occurrences already decided (a redo of a reviewed chunk) are not pending.
+            hits = [
+                h for h in modernize_archaisms.guided_hits(prose, archaism_list)
+                if modernize_guided.occurrence_key(
+                    chunk.id, h["id"], prose, h["offset"], h["offset"] + len(h["old"])
+                ) not in guided_done
+            ]
             if hits:
                 guided_pending[entry["chunk_id"]] = len(hits)
         apply_translation(chunk, prose, log_path=log_path, project_dir=project_dir,
@@ -4533,7 +4546,16 @@ def footnotes_translate_prepare(project: str, *, retranslate: bool = False) -> d
     ``batch_NN.draft.txt``) and runs ``footnotes translate-commit``. A clean no-op when no
     footnotes were imported or all are already translated.
     """
+    from src.modernize.mode import is_modernize
+
     project_dir = state.resolve_project_dir(project)
+    if is_modernize(state.load_config(project_dir)):
+        # The footnote prompts translate from English; a modernize book's notes
+        # are already Spanish and have no modernize path yet.
+        return {"command": "footnotes", "exit_code": 1,
+                "stage": "footnotes-translate-prepare",
+                "error": "footnotes translate is for translation books; this is a "
+                         "modernize book"}
     sidecar = project_dir / "footnotes.json"
     if not sidecar.exists():
         return {"command": "footnotes", "exit_code": 0,
@@ -5868,18 +5890,7 @@ def runs(project: str, *, run_id: str | None = None) -> dict:
         "beats": beat_summary,
     }
 
-# ── output schemas (self-documenting last_output.json) ────────────────────────
-#
-# Friction-log #19: the JSON each command writes to ``.harness/last_output.json``
-# had undocumented keys, so the agent guessed wrong field names and burned
-# round-trips introspecting with ``python -c``. ``harness.py`` stamps the matching
-# entry below into every artifact under ``_schema`` (and into the printed JSON), so
-# the keys are self-describing at the point of use. Keep this in sync with the
-# return dicts above; ``tests/test_harness_pipeline.py`` guards the core commands.
-#
-# Each value maps a top-level result key to a one-line description; nested shapes
-# are noted inline in the description text. Commands with sub-actions are keyed
-# ``"<command> <action>"`` (e.g. ``"glossary commit"``).
+
 def _modernize_project(project: str) -> tuple[Path, dict | None]:
     project_dir = state.resolve_project_dir(project)
     from src.modernize.mode import is_modernize
@@ -5925,6 +5936,18 @@ def archaisms_apply(project: str, *, no_realign: bool = False) -> dict:
     return guided.apply(project_dir, no_realign=no_realign)
 
 
+# ── output schemas (self-documenting last_output.json) ────────────────────────
+#
+# Friction-log #19: the JSON each command writes to ``.harness/last_output.json``
+# had undocumented keys, so the agent guessed wrong field names and burned
+# round-trips introspecting with ``python -c``. ``harness.py`` stamps the matching
+# entry below into every artifact under ``_schema`` (and into the printed JSON), so
+# the keys are self-describing at the point of use. Keep this in sync with the
+# return dicts above; ``tests/test_harness_pipeline.py`` guards the core commands.
+#
+# Each value maps a top-level result key to a one-line description; nested shapes
+# are noted inline in the description text. Commands with sub-actions are keyed
+# ``"<command> <action>"`` (e.g. ``"glossary commit"``).
 OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
     "setup": {
         "project_dir": "absolute path to the project directory",
