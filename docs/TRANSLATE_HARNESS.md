@@ -248,6 +248,18 @@ makes it idempotent.
 | `captions` | no | Find image captions still rendering as body prose and mark them `[CAPTION]`. Dry-run unless `--apply` |
 | `quotes` | no | Pre-translation: list set-off passages in `source.txt` (indented blocks, plus any block containing a `--match` phrase) and mark the `--accept`ed ones `[QUOTE]`. Dry-run unless `--apply`; refused once any chunk is translated; re-run `setup` afterwards |
 
+### Hand edits
+
+| Verb | Spends? | What it does |
+|---|---|---|
+| `sentence-edit` | no | Edit translated sentences the way the reader's Save and **Apply corrections** do: the chunk is patched on the sentence's exact span, then the edit is archived in `corrections_applied.jsonl`, a `.chunk_edits/` snapshot is taken, the evaluation is marked stale, the chapter is recombined and realigned, and notes are re-anchored. `--file` takes a JSON list of `{chapter, find, replace}` or `{chapter, es_idx, new}`. `--dry-run` writes nothing. Refused while the reader has queued Saves in the chapter, unless `--include-pending` |
+| `chunk-edit` | no | The fallback, for what no single sentence holds, such as a dropped heading, a paragraph split or an edit across sentences. Replaces `{find, replace}` spans in one chunk with the chunk editor's guards: image tokens and overlap regions are left untouched. It then purges the chunk's queued Saves (only with `--purge-pending`), realigns, re-runs the coded evaluators and archives each span |
+
+Rows from both verbs carry `source: "harness:chat"`. They are the agent's edits, approved
+by the user in chat, so the authorship facts count them as model fixes and not as reader
+Saves. A finding that an edit fixes (`finding: {eval_name, chunk_id, issue_index}`) gets the
+machine label `applied`, never `resolved`. Neither verb needs the web UI to be running.
+
 ### Inspection and state
 
 | Verb | What it does |

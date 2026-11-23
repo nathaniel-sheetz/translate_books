@@ -480,3 +480,50 @@ def drain_corrections(project_dir: Path, unapplied: list[dict]) -> int:
         os.fsync(f.fileno())
     os.replace(tmp_path, corrections_path)
     return len(unapplied)
+
+
+def purge_chunk_corrections(project_dir: Path, chunk_id: str) -> int:
+    """Remove all pending corrections for a chunk from corrections.jsonl.
+
+    A whole-chunk edit makes every queued row on that chunk stale (its
+    ``original_es`` was read from the text being replaced), so the chunk
+    editor drops them. Returns the number of corrections removed.
+    """
+    corrections_path = Path(project_dir) / CORRECTIONS_FILENAME
+    if not corrections_path.exists():
+        return 0
+    try:
+        lines = corrections_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+
+    kept = []
+    removed = 0
+    for line in lines:
+        line_s = line.strip()
+        if not line_s:
+            continue
+        try:
+            record = json.loads(line_s)
+        except json.JSONDecodeError:
+            kept.append(line)
+            continue
+        if record.get("chunk_id") == chunk_id:
+            removed += 1
+        else:
+            kept.append(line)
+
+    if removed > 0:
+        if kept:
+            # Write-then-rename, as drain_corrections does: a crash mid-write
+            # must not truncate the user's queue.
+            tmp_path = corrections_path.with_name(corrections_path.name + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(kept) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, corrections_path)
+        else:
+            corrections_path.unlink(missing_ok=True)
+
+    return removed

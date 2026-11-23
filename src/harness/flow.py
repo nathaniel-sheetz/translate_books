@@ -5936,6 +5936,99 @@ def archaisms_apply(project: str, *, no_realign: bool = False) -> dict:
     return guided.apply(project_dir, no_realign=no_realign)
 
 
+# ── sentence-edit / chunk-edit (hand fixes, as the web UI lands them) ─────────
+
+
+def _read_edits_file(path: str) -> tuple[object, dict | None]:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8")), None
+    except FileNotFoundError:
+        return None, {"status": "error", "error": f"no such file: {path}"}
+    except (OSError, ValueError) as exc:
+        return None, {"status": "error", "error": f"cannot read {path} as JSON: {exc}"}
+
+
+def sentence_edit(
+    project: str,
+    *,
+    file: str | None = None,
+    chapter: str | None = None,
+    find: str | None = None,
+    replace: str | None = None,
+    es_idx: int | None = None,
+    new: str | None = None,
+    dry_run: bool = False,
+    include_pending: bool = False,
+    reader_host: str = "localhost",
+    reader_port: int = 5000,
+) -> dict:
+    """Edit sentences as the reader's Save + Apply corrections does (see src/harness/text_edit.py)."""
+    from src.harness import text_edit
+
+    project_dir = state.resolve_project_dir(project)
+    inline = any(v is not None for v in (chapter, find, replace, es_idx, new))
+    if bool(file) == inline:
+        return {"status": "error",
+                "error": "give --file <edits.json>, or one inline edit (--chapter with "
+                         "--find/--replace or --es-idx/--new), not both"}
+    if file:
+        edits, err = _read_edits_file(file)
+        if err:
+            return err
+        if isinstance(edits, dict) and isinstance(edits.get("edits"), list):
+            edits = edits["edits"]
+    else:
+        edit: dict = {"chapter": chapter}
+        if find is not None or replace is not None:
+            edit.update(find=find, replace=replace)
+        if new is not None:
+            edit["new"] = new
+        if es_idx is not None:
+            edit["es_idx"] = es_idx
+        edits = [edit]
+    return text_edit.sentence_edit(
+        project_dir, edits, dry_run=dry_run, include_pending=include_pending,
+        reader_host=reader_host, reader_port=reader_port,
+    )
+
+
+def chunk_edit(
+    project: str,
+    *,
+    chunk_id: str,
+    file: str | None = None,
+    find: str | None = None,
+    replace: str | None = None,
+    dry_run: bool = False,
+    purge_pending: bool = False,
+    reader_host: str = "localhost",
+    reader_port: int = 5000,
+) -> dict:
+    """Replace spans of one chunk as the chunk editor does (see src/harness/text_edit.py)."""
+    from src.harness import text_edit
+
+    project_dir = state.resolve_project_dir(project)
+    inline = find is not None or replace is not None
+    if bool(file) == inline:
+        return {"status": "error",
+                "error": "give --file <spans.json>, or one inline span (--find and --replace), "
+                         "not both"}
+    finding = reason = None
+    if file:
+        spans, err = _read_edits_file(file)
+        if err:
+            return err
+        if isinstance(spans, dict):
+            finding, reason = spans.get("finding"), spans.get("reason")
+            spans = spans.get("spans")
+    else:
+        spans = [{"find": find, "replace": replace}]
+    return text_edit.chunk_edit(
+        project_dir, chunk_id, spans, dry_run=dry_run, purge_pending=purge_pending,
+        finding=finding, reason=reason, reader_host=reader_host, reader_port=reader_port,
+    )
+
+
 # ── output schemas (self-documenting last_output.json) ────────────────────────
 #
 # Friction-log #19: the JSON each command writes to ``.harness/last_output.json``
@@ -6440,6 +6533,54 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "missing_drafts": "chunk ids with no answer yet",
         "chapters_edited": "chapters whose chunks changed",
         "chapters_realigned": "chapters recombined and realigned",
+        "instructions": "next step",
+        "error": "present only on failure",
+    },
+    "sentence-edit": {
+        "status": "'ok', 'partial' (an edit did not land, or the realign failed) or 'error' (nothing written)",
+        "dry_run": "true when --dry-run: nothing was written; read `planned`",
+        "write": "whether anything was written",
+        "planned": "--dry-run only: list of {chapter_id, chunk_id, es_idx, en, before, after, edits, save_check?, findings?, finding_problems?}; show each pair to the user",
+        "chapters": "--dry-run: chapters the batch touches",
+        "applied": "the same shape, for what landed; each is a corrections_applied.jsonl row with source 'harness:chat'",
+        "failed": "edits that did not land, with the reason",
+        "refused": "on error: {n, edit, error, candidates?} per edit that could not be placed (n is its index in the file); nothing was written",
+        "pending": "on error: the reader's queued Saves in the edited chapters; ask the user, or re-run with --include-pending",
+        "pending_included": "--dry-run with --include-pending: queued Saves that would be applied",
+        "pending_applied": "queued reader Saves applied in this batch (--include-pending)",
+        "pending_unplaced": "queued reader Saves that did not land and stay queued",
+        "save_check_warnings": "{chapter_id, es_idx, id, hits} per landed write the save-time check flagged; the reader shows each on its sentence",
+        "backups": "pre-edit chunk snapshots under .chunk_edits/",
+        "stale_marked": "chunks whose evaluation was stamped stale",
+        "findings_marked": "how many findings got the machine 'applied' mark",
+        "chapters_realigned": "chapters recombined and realigned",
+        "chapters_pending_realign": "chapters whose realign failed; run `align` for them",
+        "realign_errors": "{chapter_id, error} per failed realign",
+        "reader_links": "reader URL per edited chapter",
+        "instructions": "next step",
+        "error": "present only on failure",
+    },
+    "chunk-edit": {
+        "status": "'ok', 'partial' (the realign failed) or 'error' (nothing written)",
+        "dry_run": "true when --dry-run: nothing was written",
+        "write": "whether anything was written",
+        "chunk_id": "the edited chunk",
+        "chapter_id": "its chapter",
+        "spans": "list of {before, after, chunk_offset_start}; each landed span is a corrections_applied.jsonl row with source 'harness:chat', kind 'chunk', es_idx null",
+        "save_check": "{find, hits} per span the save-time rule layer flagged (reported only)",
+        "pending": "on error: the reader's queued Saves blocking the edit",
+        "pending_to_purge": "--dry-run with --purge-pending: queued Saves on this chunk that would be discarded (without the flag the dry-run refuses with `pending`)",
+        "expected": "on the image-token error: the chunk's [IMAGE:…] tokens",
+        "got": "on that error: the tokens after the spans",
+        "find": "on a non-unique span: the clipped find",
+        "backup": "the pre-edit chunk snapshot under .chunk_edits/",
+        "corrections_purged": "queued Saves discarded (--purge-pending)",
+        "findings_marked": "1 when the file's finding got the 'applied' mark",
+        "finding_problem": "why a named finding was not marked, or null",
+        "chapters_realigned": "the chapter, once recombined and realigned",
+        "realign_errors": "{chapter_id, error} if the realign failed",
+        "evaluation_error": "the coded evaluators' error, if re-running them failed",
+        "reader_link": "reader URL for the chapter",
         "instructions": "next step",
         "error": "present only on failure",
     },

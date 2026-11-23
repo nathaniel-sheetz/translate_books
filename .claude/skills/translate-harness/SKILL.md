@@ -163,6 +163,7 @@ needed. **Redoing chapters that already have translations is NOT a re-run of the
 | Build the EPUB / refresh `chapters/*.txt` | `stage: fully-translated` with no `.epub`, **or `status.combine_stale` non-empty** | `references/epub.md` |
 | Review the book's judge findings for systemic problems (judge sweep + coded detectors) | `status.book_review.due` set (canary after the first wave; new translations on a finished book) | `references/book-review.md` |
 | Review a translated wave | translated chapters exist | `references/reviews.md` |
+| Fix a sentence / apply a hand fix the user approved (a `manual` judge finding, a dropped heading, a word change) | translated chapters exist | `references/edits.md` (`sentence-edit`, fallback `chunk-edit`; never POST to the web UI) |
 | Redo / re-translate chapters that **already** have translations | user says redo / re-translate / start over **and** `status` shows `partial`/`fully-translated` | `references/retranslate.md` |
 | Add a stage/backend/processor/judge | — | `references/EXTENDING.md` |
 

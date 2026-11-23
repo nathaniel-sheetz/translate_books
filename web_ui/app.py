@@ -89,7 +89,6 @@ from web_ui.evaluations import (
     JUDGE_STATUS_GROUPS,
     REVIEW_CODED_TYPES,
     REVIEW_JUDGE_TYPES,
-    SUGGESTION_USED,
     REVIEW_TYPES,
     IgnoreHits,
     append_feedback,
@@ -98,6 +97,7 @@ from web_ui.evaluations import (
     build_triaged,
     chapter_id_from_chunk_id,
     chapter_judge_status_detail,
+    clean_from_finding,
     count_ignored_hits,
     current_chunk_sha,
     editorial_unadjudicated,
@@ -118,6 +118,7 @@ from web_ui.evaluations import (
     load_project_ignored_terms,
     load_project_summary,
     merge_llm_judge_result,
+    resolve_issue,
     rollup_group_state,
     row_containing_offset,
     run_coded_evaluators,
@@ -3200,40 +3201,9 @@ def quotation_footnotes_approve(project_id):
     return jsonify(quotation_footnotes.build(project_dir))
 
 
-_FROM_FINDING_TEXT_KEYS = ("eval_name", "chunk_id", "issue_key", "category", "suggestion")
-_FROM_FINDING_MODES = frozenset({"apply", "edit"})
-_FROM_FINDING_MAX_CHARS = 2000
-
-
-def _clean_from_finding(raw) -> Optional[dict]:
-    """The finding a reader Save came from, reduced to the fields worth keeping.
-
-    Set when the Save was reached through a finding's Apply or Edit button. It
-    rides on the correction row under its own key and deliberately not as
-    ``source: "judge:..."``: that prefix means ``run_judges.py apply`` spliced a
-    suggestion in unread, and the splice guards in ``src/judges/fixes.py`` are
-    calibrated on exactly those rows. This one a person previewed and could
-    rewrite, so it must stay tellable apart.
-
-    Returns ``None`` for anything that does not name a finding; a malformed
-    value never costs the translator the Save it rode in on.
-    """
-    if not isinstance(raw, dict):
-        return None
-    out = {
-        key: raw[key][:_FROM_FINDING_MAX_CHARS]
-        for key in _FROM_FINDING_TEXT_KEYS
-        if isinstance(raw.get(key), str) and raw[key]
-    }
-    if not out.get("eval_name"):
-        return None
-    mode = raw.get("mode")
-    if isinstance(mode, str) and mode in _FROM_FINDING_MODES:
-        out["mode"] = mode
-    used = raw.get("suggestion_used")
-    if isinstance(used, str) and used in SUGGESTION_USED:
-        out["suggestion_used"] = used
-    return out
+# Moved to web_ui/evaluations.py so the harness's sentence-edit verb records the
+# finding the same way; re-bound under its original private name.
+_clean_from_finding = clean_from_finding
 
 
 @app.route("/api/correction", methods=["POST"])
@@ -3382,18 +3352,8 @@ def _save_check_hits(project_dir: Path, en: str, before: str, after: str) -> lis
         enabled, disabled_rules = _save_check_settings()
         if not enabled:
             return []
-        glossary_path = project_dir / "glossary.json"
-        glossary = load_glossary(glossary_path) if glossary_path.exists() else None
-        from src.house.mechanical import book_mechanical_rules
-
-        return save_check.check_write(
-            en, before, after,
-            vocabulary=save_check.book_vocabulary.counts(project_dir),
-            glossary=save_check.glossary_words(glossary),
-            ignored=load_project_ignored_terms(project_dir),
-            disabled_rules=disabled_rules,
-            speller=save_check.default_speller(),
-            house_fixers=book_mechanical_rules(project_dir),
+        return save_check.check_project_write(
+            project_dir, en, before, after, disabled_rules=disabled_rules,
         )
     except Exception:
         app.logger.exception("save check failed")
@@ -7218,44 +7178,9 @@ def _reanchor_annotations_after_realign(
     return reanchor.reanchor_chapter(project_dir, chapter_id, old_es_map).newly_orphaned
 
 
-def _purge_chunk_corrections(project_dir: Path, chunk_id: str) -> int:
-    """Remove all pending corrections for a chunk from corrections.jsonl.
-
-    Returns the number of corrections removed.
-    """
-    corrections_path = project_dir / "corrections.jsonl"
-    if not corrections_path.exists():
-        return 0
-    try:
-        lines = corrections_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-
-    kept = []
-    removed = 0
-    for line in lines:
-        line_s = line.strip()
-        if not line_s:
-            continue
-        try:
-            record = json.loads(line_s)
-        except json.JSONDecodeError:
-            kept.append(line)
-            continue
-        if record.get("chunk_id") == chunk_id:
-            removed += 1
-        else:
-            kept.append(line)
-
-    if removed > 0:
-        if kept:
-            corrections_path.write_text(
-                "\n".join(kept) + "\n", encoding="utf-8",
-            )
-        else:
-            corrections_path.unlink(missing_ok=True)
-
-    return removed
+# Moved to src/corrections_apply.py so the harness's chunk-edit verb shares it;
+# re-bound under its original private name for the call site below.
+from src.corrections_apply import purge_chunk_corrections as _purge_chunk_corrections  # noqa: E402
 
 
 def _apply_chunk_edits(
@@ -7583,31 +7508,8 @@ def project_chunk_evaluation_llm_judge(project_id, chunk_id):
     return jsonify({"ok": True, "llm_judge": result_dict})
 
 
-def _resolve_issue(
-    project_dir: Path, chunk_id: str, eval_name: str, issue_index: int
-) -> Optional[dict]:
-    """The stored finding at ``(eval_name, issue_index)``, or None."""
-    try:
-        payload = load_chunk_evaluation(project_dir, chunk_id)
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    issues = None
-    for result in payload.get("results") or []:
-        if isinstance(result, dict) and result.get("eval_name") == eval_name:
-            issues = result.get("issues") or []
-            break
-    if issues is None:
-        judge = (payload.get("judges") or {}).get(eval_name)
-        if isinstance(judge, dict):
-            issues = judge.get("issues") or []
-    if not issues or issue_index < 0 or issue_index >= len(issues):
-        return None
-
-    issue = issues[issue_index]
-    return issue if isinstance(issue, dict) else None
+# Moved to web_ui/evaluations.py (the harness edit verbs mark findings too).
+_resolve_issue = resolve_issue
 
 
 def _resolve_issue_key(
