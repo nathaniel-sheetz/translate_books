@@ -273,6 +273,36 @@ def check_write(
     return hits
 
 
+def check_project_write(
+    project_dir: Path, en: str, before: str, after: str,
+    *, disabled_rules: Iterable[str] = (),
+) -> list[dict]:
+    """:func:`check_write` with the book's own vocabulary, glossary, ignores and house rules.
+
+    The one place a write to a book is checked: the reader's Save and sentence
+    replace call it through ``web_ui.app._save_check_hits``, and the harness's
+    ``sentence-edit`` calls it directly. Call it before the write lands, while
+    the book's vocabulary does not yet hold the new sentence. It may raise; the
+    callers decide what a failed check costs.
+    """
+    from src.house.mechanical import book_mechanical_rules
+    from src.utils.file_io import load_glossary
+    from web_ui.evaluations import load_project_ignored_terms
+
+    project_dir = Path(project_dir)
+    glossary_path = project_dir / "glossary.json"
+    glossary = load_glossary(glossary_path) if glossary_path.exists() else None
+    return check_write(
+        en, before, after,
+        vocabulary=book_vocabulary.counts(project_dir),
+        glossary=glossary_words(glossary),
+        ignored=load_project_ignored_terms(project_dir),
+        disabled_rules=disabled_rules,
+        speller=default_speller(),
+        house_fixers=book_mechanical_rules(project_dir),
+    )
+
+
 # --- configuration ----------------------------------------------------------
 
 _OFF_WORDS = frozenset({"false", "no", "off", "0"})

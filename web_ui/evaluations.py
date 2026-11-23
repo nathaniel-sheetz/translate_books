@@ -1092,6 +1092,69 @@ def mark_evaluation_stale(
     return path
 
 
+_FROM_FINDING_TEXT_KEYS = ("eval_name", "chunk_id", "issue_key", "category", "suggestion")
+_FROM_FINDING_MODES = frozenset({"apply", "edit"})
+_FROM_FINDING_MAX_CHARS = 2000
+
+
+def clean_from_finding(raw) -> Optional[dict]:
+    """The finding a reader Save came from, reduced to the fields worth keeping.
+
+    Set when the Save was reached through a finding's Apply or Edit button. It
+    rides on the correction row under its own key and deliberately not as
+    ``source: "judge:..."``: that prefix means ``run_judges.py apply`` spliced a
+    suggestion in unread, and the splice guards in ``src/judges/fixes.py`` are
+    calibrated on exactly those rows. This one a person previewed and could
+    rewrite, so it must stay tellable apart.
+
+    Returns ``None`` for anything that does not name a finding; a malformed
+    value never costs the translator the Save it rode in on.
+    """
+    if not isinstance(raw, dict):
+        return None
+    out = {
+        key: raw[key][:_FROM_FINDING_MAX_CHARS]
+        for key in _FROM_FINDING_TEXT_KEYS
+        if isinstance(raw.get(key), str) and raw[key]
+    }
+    if not out.get("eval_name"):
+        return None
+    mode = raw.get("mode")
+    if isinstance(mode, str) and mode in _FROM_FINDING_MODES:
+        out["mode"] = mode
+    used = raw.get("suggestion_used")
+    if isinstance(used, str) and used in SUGGESTION_USED:
+        out["suggestion_used"] = used
+    return out
+
+
+def resolve_issue(
+    project_dir: Path, chunk_id: str, eval_name: str, issue_index: int
+) -> Optional[dict]:
+    """The stored finding at ``(eval_name, issue_index)``, or None."""
+    try:
+        payload = load_chunk_evaluation(project_dir, chunk_id)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    issues = None
+    for result in payload.get("results") or []:
+        if isinstance(result, dict) and result.get("eval_name") == eval_name:
+            issues = result.get("issues") or []
+            break
+    if issues is None:
+        judge = (payload.get("judges") or {}).get(eval_name)
+        if isinstance(judge, dict):
+            issues = judge.get("issues") or []
+    if not issues or issue_index < 0 or issue_index >= len(issues):
+        return None
+
+    issue = issues[issue_index]
+    return issue if isinstance(issue, dict) else None
+
+
 def append_feedback(
     project_dir: Path,
     chunk_id: str,
@@ -2357,6 +2420,8 @@ def evaluate_and_persist_chunk(
 
 
 __all__ = [
+    "clean_from_finding",
+    "resolve_issue",
     "CODED_EVAL_NAMES",
     "JUDGE_STATUS_GROUPS",
     "save_chunk_evaluation",

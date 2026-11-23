@@ -38,9 +38,12 @@ API path auto-aligns; still offer review once chapters are readable.
    judges here. Hand it the project slug and the chapter set just translated;
    follow that skill's ROUTER / setup precheck (address map, etc.).
 
-3. **Apply fixes** the user approves — a redo (`references/retranslate.md`), a
-   chunk edit, or a glossary tweak — then re-align affected chapters if needed.
-   `translate-commit` refreshes `chapters/*.txt` on its own; an out-of-band edit
+3. **Apply fixes** the user approves. A fix can be one of three things:
+   - **a redo**, as in `references/retranslate.md`;
+   - **a hand edit**, using `sentence-edit` (prefer several sentence edits over one `chunk-edit`), as in `references/edits.md`. These verbs realign on their own, and they also cover judge findings that `run_judges apply` withheld as `manual`;
+   - **a glossary tweak.**
+
+   `translate-commit` refreshes `chapters/*.txt` on its own. An out-of-band edit
    may leave it stale, which `status` reports as `combine_stale` (fix: `combine`).
 
 4. **Repeat** for the next wave, or continue the pipeline

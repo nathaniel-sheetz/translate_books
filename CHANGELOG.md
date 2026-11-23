@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.88.0.0] - 2026-11-22
+
+### Added
+- **The harness can now make hand edits the user approves, `sentence-edit` and `chunk-edit`, without the web UI running.** Before this, the agent had to POST to the web UI or edit `chunks/*.json` by hand, and both skipped the audit row, the snapshot and the realign.
+  - **`sentence-edit`** works like the reader's Save followed by **Apply corrections**. It takes a JSON batch of `{chapter, find, replace}` or `{chapter, es_idx, new}` edits; each edit lands on its sentence's exact span. It then writes an audit row (`source: "harness:chat"`), takes a `.chunk_edits/` snapshot, marks the evaluation stale, runs the save-time check, gives a named finding the `applied` mark, and runs one realign per chapter.
+  - **Batches are all or nothing.** One edit that can't be placed refuses the whole file, and an ambiguous `find` lists its candidates. `--dry-run` shows each before/after pair with its English.
+  - **The reader's queued Saves:** the verb refuses while Saves are queued in the chapter, unless `--include-pending` applies them in the same batch.
+  - **`chunk-edit`** is the fallback for what no single sentence holds: a dropped heading, a paragraph split, an edit across sentences. It replaces `{find, replace}` spans in one chunk with the chunk editor's guards (image tokens and overlap regions stay untouched). With `--purge-pending` it discards the chunk's queued Saves. It then realigns and re-runs the coded evaluators.
+  - **Authorship:** rows from both verbs count as model fixes in the KDP authorship facts, not as reader Saves.
+- **The `expect` field on a sentence edit.** It holds text the sentence must contain, or the edit is refused. This guards an `es_idx` read before a realign renumbered the rows.
+- **The `translate-harness` routing table and `references/edits.md`** now send approved fixes, including `manual` judge findings, through these verbs.
+
+### Changed
+- **Shared code moved out of `web_ui/app.py`, so the harness and the web UI use the same functions.**
+  - `clean_from_finding` and `resolve_issue` are now in `web_ui/evaluations.py`.
+  - `purge_chunk_corrections` is now in `src/corrections_apply.py`.
+  - The save-time check with the book's own vocabulary is now `save_check.check_project_write`.
+  - The web UI's behavior is unchanged.
+- **`purge_chunk_corrections` writes to a temp file and renames it**, as `drain_corrections` does, so a crash can no longer truncate the reader's queue.
+
+### Fixed
+- **Line breaks in merged dialogue rows are kept.** A `sentence-edit` on an alignment row that joins two dialogue lines now applies the edit to the chunk's own text. Before, an edit that changed the number of words turned the line break into a space.
+- **`sentence-edit` refuses a chapter whose alignment is older than its chunks**, where the fallback search could land on the wrong copy of a repeated phrase.
+- **Ids are validated with `safe_chunk_id`:** both the `chunk-edit` id and the `chunk_id` of each queued Save. A Windows drive-relative id such as `D:x_chunk_000` used to get past the slash check.
+
 ## [0.87.0.0] - 2026-11-21
 
 ### Added

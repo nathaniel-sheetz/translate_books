@@ -774,6 +774,53 @@ def _build_parser() -> argparse.ArgumentParser:
     add_project(ara)
     ara.add_argument("--no-realign", dest="no_realign", action="store_true")
 
+    # sentence-edit / chunk-edit (hand fixes, landed as the web UI lands them) --
+    sep = sub.add_parser(
+        "sentence-edit",
+        help="Edit translated sentences as the reader's Save + Apply corrections does: "
+             "exact-span patch, corrections_applied.jsonl row, snapshot, realign. The "
+             "primary way to fix a slip; see references/edits.md",
+    )
+    add_project(sep)
+    sep.add_argument("--file", default=None,
+                     help="JSON list of edits: {chapter, find, replace} or {chapter, es_idx, "
+                          "new}; optional chunk_id, es_idx (to scope a find), expect (text "
+                          "the sentence must contain), finding "
+                          "{eval_name, chunk_id, issue_index}, reason. Write it with the "
+                          "Write tool")
+    sep.add_argument("--chapter", default=None, help="One edit inline: the chapter id")
+    sep.add_argument("--find", default=None, help="One edit inline: text inside one sentence")
+    sep.add_argument("--replace", default=None, help="One edit inline: what replaces --find")
+    sep.add_argument("--es-idx", dest="es_idx", type=int, default=None,
+                     help="One edit inline: the sentence's es_idx (with --new, or to scope --find)")
+    sep.add_argument("--new", default=None, help="One edit inline: the whole new sentence")
+    sep.add_argument("--dry-run", dest="dry_run", action="store_true",
+                     help="Resolve and check every edit; write nothing")
+    sep.add_argument("--include-pending", dest="include_pending", action="store_true",
+                     help="Also apply the reader's queued Saves in the edited chapters, as "
+                          "its Apply corrections button would (refused without this)")
+    sep.add_argument("--reader-host", dest="reader_host", default="localhost")
+    sep.add_argument("--reader-port", dest="reader_port", type=int, default=5000)
+
+    cep_ = sub.add_parser(
+        "chunk-edit",
+        help="Fallback: replace spans of one chunk's text as the chunk editor does, for what "
+             "no single sentence holds (a dropped heading, a paragraph split, an edit across "
+             "sentences). Prefer several sentence-edits",
+    )
+    add_project(cep_)
+    cep_.add_argument("--chunk-id", dest="chunk_id", required=True)
+    cep_.add_argument("--file", default=None,
+                      help="JSON: a list of {find, replace} spans, or {spans, finding, reason}")
+    cep_.add_argument("--find", default=None, help="One span inline: text occurring once")
+    cep_.add_argument("--replace", default=None, help="One span inline: its replacement")
+    cep_.add_argument("--dry-run", dest="dry_run", action="store_true")
+    cep_.add_argument("--purge-pending", dest="purge_pending", action="store_true",
+                      help="Discard the reader's queued Saves on this chunk, as the chunk "
+                           "editor does (refused without this)")
+    cep_.add_argument("--reader-host", dest="reader_host", default="localhost")
+    cep_.add_argument("--reader-port", dest="reader_port", type=int, default=5000)
+
     # --schema on every leaf subcommand. The blocks cost real tokens on every
     # call (status alone is ~2KB), so they are opt-in on success — and, per
     # _stamp_schema, automatic on any error, where the caller most needs the
@@ -1037,6 +1084,19 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "quotes":
         return flow.quotes(args.project, match=args.match, accept=args.accept,
                            reject=args.reject, apply=args.apply and not args.dry_run)
+    if cmd == "sentence-edit":
+        return flow.sentence_edit(
+            args.project, file=args.file, chapter=args.chapter, find=args.find,
+            replace=args.replace, es_idx=args.es_idx, new=args.new, dry_run=args.dry_run,
+            include_pending=args.include_pending,
+            reader_host=args.reader_host, reader_port=args.reader_port,
+        )
+    if cmd == "chunk-edit":
+        return flow.chunk_edit(
+            args.project, chunk_id=args.chunk_id, file=args.file, find=args.find,
+            replace=args.replace, dry_run=args.dry_run, purge_pending=args.purge_pending,
+            reader_host=args.reader_host, reader_port=args.reader_port,
+        )
     raise SystemExit(f"unknown command: {cmd}")
 
 
