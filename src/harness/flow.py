@@ -6638,7 +6638,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "dry_run": "true when --dry-run: nothing was written",
         "write": "whether anything was written",
         "planned": "dry-run: list of {id, chunk_id, chapter_id, en_context, es_context, en_insert, es_insert}: the paragraph each figure goes after, on each side, and the blocks inserted",
-        "refused": "list of {id, why}: figures that cannot be placed (no captions_es, anchor not unique, no aligned Spanish, already inserted)",
+        "refused": "list of {id, why}: figures that cannot be placed (no captions_es, anchor not unique in the chapter or in source.txt, no aligned Spanish, a stale alignment, already inserted)",
         "inserted": "ids inserted",
         "backups": "pre-edit chunk snapshots under .chunk_edits/",
         "chapters_realigned": "chapters recombined and realigned (reader notes re-anchored)",
@@ -6648,6 +6648,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "error": "present only on failure",
     },
     "figures remove": {
+        "status": "'ok', 'partial' (the realign failed) or 'error' (unknown or not-inserted ids; nothing written)",
         "removed": "ids taken out (status back to draft)",
         "chunks": "chunks rewritten",
         "found": "dry-run: {id: [chunk_id]} where each figure is",

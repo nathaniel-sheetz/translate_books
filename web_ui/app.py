@@ -3131,6 +3131,9 @@ def figures_board_save(project_id, fid):
     if "captions_es" in edit and not (isinstance(edit["captions_es"], list)
                                       and all(isinstance(c, str) for c in edit["captions_es"])):
         return jsonify({"error": "captions_es must be a list of strings"}), 400
+    if any(not (isinstance(edit[k], str) or (k in ("chapter_id", "anchor_en") and edit[k] is None))
+           for k in ("alt_es", "chapter_id", "anchor_en", "status") if k in edit):
+        return jsonify({"error": "alt_es, chapter_id, anchor_en and status must be strings"}), 400
     done = figures.set_fields(project_dir, [{"id": fid, **edit}])
     if done["refused"]:
         return jsonify({"error": done["refused"][0]["why"]}), 400

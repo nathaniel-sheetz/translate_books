@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.0.0] - 2026-11-24
+
+### Added
+- **A book whose text came without its pictures can take them later, captions and all, in the English source and the translation together (`src/figures.py`).** The plates come from a scan, cut out and captioned by ocr_texts' `ocrt plates`. The plan lives in the book's `figures.json`.
+  - **`harness figures import --plates`** reads `plates.json` and suggests a chapter and paragraph for each figure: the chapter whose heading names the subject, otherwise the one that names it most, after the first paragraph there that names it. Re-importing refreshes the picture and English captions and keeps the translation, the place and the status.
+  - **`harness figures set --file`** takes the Spanish captions and alt text, the place and the approval. A figure can't be approved before it has a Spanish caption for each English one.
+  - **The `/figures/<id>` board** shows every figure with its picture, captions, chapter and paragraph, and a preview of where it lands on each side. Edits save straight to `figures.json`; the board never edits the book.
+  - **`harness figures apply`** inserts the approved figures. Every figure is planned before anything is written, and one that can't be placed stops the batch with the reason: no Spanish caption, an anchor that isn't unique in the chapter or in `source.txt`, no aligned Spanish, a stale alignment, the reader's unapplied Saves. The Spanish side goes after the paragraph holding the last Spanish sentence aligned to the English paragraph, since the translation splits dialogue paragraphs. The pictures are copied first, then the chunks are snapshotted and written, then `source.txt`, then the chapter is recombined and realigned so reader notes re-anchor. `--dry-run` shows each place.
+  - **`harness figures remove`** takes inserted figures out of the chunks, `source.txt` and `images/`, and sets them back to draft. **`harness figures status`** lists the plan.
+- **The EPUB keeps every caption of a picture in its one `<figcaption>`**, a line each, so a plate of two or three birds stays together across a page break.
+
 ## [0.88.0.0] - 2026-11-22
 
 ### Added

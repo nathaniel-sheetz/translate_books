@@ -17,8 +17,9 @@ The plan lives in ``<project>/figures.json``, one entry per figure:
     captions_es   their translation, same count; the agent drafts them, the board edits them
     alt_en/alt_es the short names for the image's alt text
     chapter_id    the chapter it goes in
-    anchor_en     the opening of the English paragraph it goes after (unique in its chunk)
-    status        draft -> approved -> inserted (``removed`` after a remove)
+    anchor_en     the opening of the English paragraph it goes after (unique in its
+                  chapter, and in source.txt)
+    status        draft -> approved -> inserted (back to ``draft`` after a remove)
 
 Placement goes after a paragraph, never inside one. In the chunk, the English
 side is found by ``anchor_en``; the Spanish side is the paragraph holding the
@@ -28,9 +29,9 @@ carry over). Every figure is planned before anything is written, and a figure
 that cannot be placed stops the batch with the reason.
 
 Writes, per chunk touched: a ``.chunk_edits/`` snapshot, ``source_text`` and
-``translated_text``, the evaluation's stale stamp; then ``source.txt``, the image
-under ``images/``, the chapter's recombine and realign (which re-anchors reader
-notes), and the plan's ``inserted`` status. ``remove`` takes a figure out again
+``translated_text``; then ``source.txt``, the image under ``images/``, the plan's
+``inserted`` status, and last the evaluation's stale stamp and the chapter's
+realign (which re-anchors reader notes). ``remove`` takes a figure out again
 the same way. Image blocks and their captions are the format ingest writes:
 ``[IMAGE:images/<file>:<alt>]`` then one ``[CAPTION]`` block per caption.
 """
@@ -39,12 +40,11 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 PLAN_FILE = "figures.json"
 PREFIX = "plate_"
@@ -74,6 +74,12 @@ def save_plan(project_dir: Path, plan: dict) -> Path:
     tmp.write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def _by_id(plan: dict) -> dict[str, dict]:
@@ -211,10 +217,10 @@ def suggest_place(project_dir: Path, captions_en: list[str],
             continue
         ci = headed if headed is not None else counts.index(top)
         chapter, chunks = book[ci]
-        for chunk_id, text in chunks:
+        for n, (chunk_id, text) in enumerate(chunks):
             hit = None
             for k, (_, _, blk) in enumerate(blocks(text)):
-                if k == 0 or blk.startswith("[") or (chapter, _anchor_of(blk)) in (taken or ()):
+                if (n == 0 and k == 0) or blk.startswith("[")                         or (chapter, _anchor_of(blk)) in (taken or ()):
                     continue  # the heading; an image or caption; another figure's place
                 if any(p.search(blk) for p in pats):
                     hit = blk
@@ -366,7 +372,7 @@ def _es_positions(translated: str, rows: list[dict]) -> dict[int, int]:
 
 
 def _figure_block(fig: dict, side: str) -> str:
-    alt = (fig.get(f"alt_{side}") or "").replace("]", ")").replace(":", " -")
+    alt = " ".join((fig.get(f"alt_{side}") or "").split()).replace("]", ")").replace(":", " -")
     caps = fig.get(f"captions_{side}") or []
     parts = [f"[IMAGE:{fig['image']}" + (f":{alt}" if alt else "") + "]"]
     parts += ["[CAPTION] " + " ".join(c.split()) for c in caps if c.strip()]
@@ -404,6 +410,10 @@ def plan_insert(project_dir: Path, fig: dict, captions: bool = True) -> dict:
     src, tgt = chunk.get("source_text") or "", chunk.get("translated_text") or ""
     if not tgt.strip():
         return no(f"{path.stem} is not translated")
+    from src.quotations.apply import alignment_is_stale
+    if alignment_is_stale(project_dir, fig["chapter_id"]):
+        return no(f"the alignment of {fig['chapter_id']} is missing or older than its chunks; "
+                  "run `harness align` for the chapter")
     ov_s, ov_e = meta.get("overlap_start") or 0, meta.get("overlap_end") or 0
     if en_end < ov_s or (ov_e and en_start >= len(src) - ov_e):
         return no("the paragraph is in the overlap with the next or previous chunk; "
@@ -497,6 +507,7 @@ def _after_write(project_dir: Path, chunk_ids: set[str], reason: str) -> dict:
 def apply(project_dir: Path, ids: Optional[list[str]] = None, dry_run: bool = False) -> dict:
     """Insert the approved figures (or the ones named). All are planned first;
     if one cannot be placed, nothing is written."""
+    from src.image_pass.apply import copy_atomic
     from src.quotations.apply import _write_chunk_snapshot
     from src.utils.file_io import load_chunk, save_chunk
 
@@ -514,6 +525,15 @@ def apply(project_dir: Path, ids: Optional[list[str]] = None, dry_run: bool = Fa
     planned = [plan_insert(project_dir, f) for f in figs]
     refused = [p for p in planned if not p["ok"]]
     ok = [p for p in planned if p["ok"]]
+    fig_by = _by_id(plan)
+    source_path = project_dir / "source.txt"
+    source = source_path.read_text(encoding="utf-8") if source_path.exists() else None
+    if source is not None:
+        for p in list(ok):
+            source, err = _source_insert(source, fig_by[p["id"]]["anchor_en"], p["en_insert"])
+            if err:
+                ok.remove(p)
+                refused.append({"ok": False, "id": p["id"], "why": err})
     if refused or dry_run:
         return {"status": "error" if refused and not dry_run else "ok", "dry_run": dry_run,
                 "write": False, "planned": ok, "refused": refused,
@@ -527,19 +547,19 @@ def apply(project_dir: Path, ids: Optional[list[str]] = None, dry_run: bool = Fa
                          "would hide; press Apply corrections in the reader first",
                 "chapters": sorted({r.get('chapter_id') for r in pending})}
 
-    source_path = project_dir / "source.txt"
-    source = source_path.read_text(encoding="utf-8") if source_path.exists() else None
-    fig_by = _by_id(plan)
+    # The pictures first: a copy that fails leaves the text untouched.
+    (project_dir / "images").mkdir(exist_ok=True)
+    try:
+        for p in ok:
+            fig = fig_by[p["id"]]
+            copy_atomic(Path(fig["src"]), project_dir / fig["image"])
+    except OSError as exc:
+        return {"status": "error", "write": False,
+                "error": f"copying the pictures failed ({exc}); no text was written"}
     # Within a chunk, insert from the end so earlier offsets stay good.
     by_chunk: dict[str, list[dict]] = {}
     for p in ok:
         by_chunk.setdefault(p["chunk_id"], []).append(p)
-    if source is not None:
-        for p in ok:
-            source, err = _source_insert(source, fig_by[p["id"]]["anchor_en"], p["en_insert"])
-            if err:
-                return {"status": "error", "write": False,
-                        "error": f"{p['id']}: {err}; nothing was written"}
     ts = time.strftime("%Y%m%dT%H%M%S")
     backups = []
     for cid, ps in by_chunk.items():
@@ -555,12 +575,10 @@ def apply(project_dir: Path, ids: Optional[list[str]] = None, dry_run: bool = Fa
         chunk.source_text, chunk.translated_text = src, tgt
         save_chunk(chunk, path)
     if source is not None:
-        source_path.write_text(source, encoding="utf-8")
-    (project_dir / "images").mkdir(exist_ok=True)
+        _write_atomic(source_path, source)
     stamp = datetime.now().isoformat(timespec="seconds")
     for p in ok:
         fig = fig_by[p["id"]]
-        shutil.copyfile(fig["src"], project_dir / fig["image"])
         fig.update({"status": "inserted", "inserted_at": stamp, "chunk_id": p["chunk_id"]})
     save_plan(project_dir, plan)
     after = _after_write(project_dir, set(by_chunk), "figures inserted by harness figures apply")
@@ -580,6 +598,9 @@ def remove(project_dir: Path, ids: list[str], dry_run: bool = False) -> dict:
     figs = [have[i] for i in ids if i in have]
     if len(figs) != len(ids):
         return {"status": "error", "error": f"no such figure(s): {sorted(set(ids) - set(have))}"}
+    not_in = [f["id"] for f in figs if f.get("status") != "inserted"]
+    if not_in:
+        return {"status": "error", "error": f"not inserted: {not_in}; nothing to remove"}
     touched: set[str] = set()
     found = {}
     for path in _chunk_paths(project_dir):
@@ -610,7 +631,7 @@ def remove(project_dir: Path, ids: list[str], dry_run: bool = False) -> dict:
         s = source_path.read_text(encoding="utf-8")
         for f in figs:
             s = _strip_figure(s, f["image"])
-        source_path.write_text(s, encoding="utf-8")
+        _write_atomic(source_path, s)
     for f in figs:
         img = project_dir / f["image"]
         if img.exists():
@@ -620,7 +641,8 @@ def remove(project_dir: Path, ids: list[str], dry_run: bool = False) -> dict:
     save_plan(project_dir, plan)
     after = _after_write(project_dir, touched, "figures removed by harness figures remove") \
         if touched else {}
-    return {"status": "ok", "removed": [f["id"] for f in figs], "chunks": sorted(touched), **after}
+    return {"status": "partial" if after.get("realign_errors") else "ok",
+            "removed": [f["id"] for f in figs], "chunks": sorted(touched), **after}
 
 
 def status(project_dir: Path) -> dict:
@@ -655,14 +677,14 @@ def paragraphs(project_dir: Path, chapter_id: str) -> list[dict]:
     for chapter, chunks in chapters_en(project_dir):
         if chapter != chapter_id:
             continue
-        for chunk_id, text in chunks:
+        for n, (chunk_id, text) in enumerate(chunks):
             bs = blocks(text)
             seen: dict[str, int] = {}
             for _, _, blk in bs:
                 seen[_anchor_of(blk)] = seen.get(_anchor_of(blk), 0) + 1
             for k, (_, _, blk) in enumerate(bs):
                 a = _anchor_of(blk)
-                if k == 0 or blk.startswith("[") or seen[a] > 1:
+                if (n == 0 and k == 0) or blk.startswith("[") or seen[a] > 1:
                     continue
                 out.append({"anchor": a, "chunk_id": chunk_id, "text": blk[:400]})
     return out

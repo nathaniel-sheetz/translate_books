@@ -78,12 +78,34 @@
             const i = state.figures.findIndex((f) => f.id === fid);
             if (i >= 0) state.figures[i] = data;
             const old = board.querySelector(`[data-fid="${CSS.escape(fid)}"]`);
-            if (old) old.replaceWith(card(data));
+            if (old) replaceCard(old, card(data));
             updateBar();
             setSave(S.saved);
         } catch (e) {
             setSave(fmt(S.save_failed, { error: e.message }), true);
         }
+    }
+
+    // Rebuild a card without losing a field the user is typing in: the save of
+    // one caption lands while they are already in the next one.
+    function replaceCard(old, fresh) {
+        const act = document.activeElement;
+        const typing = act && old.contains(act) && act.matches("textarea, input[type=text]");
+        if (!typing) {
+            old.replaceWith(fresh);
+            return;
+        }
+        const at = [...old.querySelectorAll("textarea, input[type=text]")].indexOf(act);
+        const typed = act.value;
+        const start = act.selectionStart;
+        const end = act.selectionEnd;
+        old.replaceWith(fresh);
+        const twin = fresh.querySelectorAll("textarea, input[type=text]")[at];
+        if (!twin || twin.disabled) return;
+        // Focus before setting the value, so leaving the field still fires its change.
+        twin.focus();
+        twin.value = typed;
+        try { twin.setSelectionRange(start, end); } catch (_) { /* not a text field */ }
     }
 
     function anchorSelect(f) {
@@ -97,6 +119,11 @@
             filled = true;
             const paras = await paragraphsFor(f.chapter_id);
             sel.textContent = "";
+            if (!paras.some((p) => p.anchor === f.anchor_en)) {
+                // Keep what is saved selected, so picking the first paragraph is a change.
+                sel.append(el("option", { value: f.anchor_en || "", text: clip(f.anchor_en, 110) || "—",
+                    selected: true }));
+            }
             for (const p of paras) {
                 sel.append(el("option", { value: p.anchor, text: clip(p.text, 110),
                     selected: p.anchor === f.anchor_en }));
@@ -109,6 +136,10 @@
     function chapterSelect(f) {
         const sel = el("select", { class: "fb-chapter", "aria-label": S.chapter,
             disabled: f.status === "inserted" });
+        if (!state.chapters.some((c) => c.chapter_id === f.chapter_id)) {
+            // An unplaced figure: a blank first option, so any chapter picked is a change.
+            sel.append(el("option", { value: "", text: "—", selected: true, disabled: true }));
+        }
         for (const c of state.chapters) {
             sel.append(el("option", { value: c.chapter_id, text: clip(c.heading, 70),
                 selected: c.chapter_id === f.chapter_id }));
@@ -149,7 +180,7 @@
                 loading: "lazy" }));
         const approve = el("label", { class: "fb-approve" },
             el("input", { type: "checkbox", checked: f.status === "approved" || f.status === "inserted",
-                disabled: f.status === "inserted" || !!f.problem || !!f.missing_es,
+                disabled: f.status === "inserted" || (f.status !== "approved" && (!!f.problem || !!f.missing_es)),
                 onchange: (e) => save(f.id, { status: e.target.checked ? "approved" : "draft" }) }),
             f.status === "inserted" ? S.inserted : (f.status === "approved" ? S.approved : S.approve));
         const alt = el("input", { type: "text", class: "fb-alt", value: f.alt_es || "",
@@ -185,10 +216,13 @@
         const status = document.getElementById("fb-status");
         try {
             const r = await fetch(api);
-            state = await r.json();
-            if (!r.ok) throw new Error(state.error || r.status);
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || r.status);
+            state = data;
         } catch (e) {
-            if (status) status.textContent = fmt(S.save_failed, { error: e.message });
+            const msg = fmt(S.save_failed, { error: e.message });
+            if (status) status.textContent = msg;
+            else setSave(msg, true);
             return;
         }
         board.textContent = "";

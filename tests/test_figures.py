@@ -196,3 +196,90 @@ def test_a_reimport_keeps_the_translation_and_place(project):
     fig = figures.load_plan(project)["figures"][0]
     assert fig["captions_es"] == ["LUPITA SALTAPARED. Es el reyezuelo."]
     assert fig["anchor_en"] == "Jenny Wren was too busy"
+
+
+# ── review fixes (ship-lite 2026-11-24) ─────────────────────────────────────
+
+
+def test_a_failed_picture_copy_writes_no_text(project, monkeypatch):
+    _import(project)
+    _translate(project, status="approved")
+
+    def boom(source, target):
+        raise OSError("disk gone")
+    monkeypatch.setattr("src.image_pass.apply.copy_atomic", boom)
+    out = figures.apply(project)
+    assert out["status"] == "error" and "no text was written" in out["error"]
+    chunk = load_chunk(project / "chunks" / f"{K2}.json")
+    assert chunk.source_text == EN2 and chunk.translated_text == ES2
+    assert (project / "source.txt").read_text(encoding="utf-8") == EN1 + "\n\n" + EN2 + "\n"
+    assert figures.load_plan(project)["figures"][0]["status"] == "approved"
+
+
+def test_a_dry_run_refuses_an_anchor_doubled_in_source_txt(project):
+    _import(project)
+    _translate(project, status="approved")
+    # Unique in the chunks, but source.txt carries the paragraph twice.
+    (project / "source.txt").write_text(
+        EN1 + "\n\n" + EN2 + "\n\n\"Hello, Jenny Wren!\" cried Peter. \"When did you come?\"\n",
+        encoding="utf-8")
+    out = figures.apply(project, dry_run=True)
+    assert out["planned"] == []
+    assert out["refused"][0]["id"] == "leaf035_1"
+    assert "source.txt" in out["refused"][0]["why"]
+
+
+def test_a_stale_alignment_is_refused(project):
+    import os
+    _import(project)
+    _translate(project)
+    align = project / "alignments" / f"{C2}.json"
+    chunk = project / "chunks" / f"{K2}.json"
+    later = align.stat().st_mtime + 60
+    os.utime(chunk, (later, later))
+    p = figures.plan_insert(project, figures.load_plan(project)["figures"][0])
+    assert not p["ok"] and "harness align" in p["why"]
+
+
+def test_a_later_chunk_s_first_paragraph_is_a_place(project):
+    c3 = "chapter_03"
+    save_chunk(_chunk(f"{c3}_chunk_000", c3, "CHAPTER III. Up the Hill.\n\nPeter climbed.", "x"),
+               project / "chunks" / f"{c3}_chunk_000.json")
+    save_chunk(_chunk(f"{c3}_chunk_001", c3, "Sammy Jay screamed at him.\n\nPeter ran.", "y"),
+               project / "chunks" / f"{c3}_chunk_001.json")
+    anchors = [p["anchor"] for p in figures.paragraphs(project, c3)]
+    assert "CHAPTER III. Up the Hill." not in anchors
+    assert anchors == ["Peter climbed.", "Sammy Jay screamed at him.", "Peter ran."]
+    place = figures.suggest_place(project, ["SAMMY JAY. A noisy fellow."])
+    assert place["chapter_id"] == c3 and place["chunk_id"] == f"{c3}_chunk_001"
+    assert place["anchor_en"] == "Sammy Jay screamed at him."
+
+
+def test_remove_refuses_a_figure_that_is_not_inserted(project):
+    _import(project)
+    _translate(project, status="approved")
+    out = figures.remove(project, ["leaf035_1"])
+    assert out["status"] == "error" and "not inserted" in out["error"]
+    assert figures.load_plan(project)["figures"][0]["status"] == "approved"
+
+
+def test_remove_reports_a_failed_realign_as_partial(project, monkeypatch):
+    _import(project)
+    _translate(project, status="approved")
+    assert figures.apply(project)["status"] == "ok"
+
+    def fail(project_dir, chapter_id, *a, **k):
+        raise RuntimeError("aligner down")
+    monkeypatch.setattr("src.corrections_apply.realign_chapter", fail)
+    out = figures.remove(project, ["leaf035_1"])
+    assert out["status"] == "partial" and out["realign_errors"][0]["chapter_id"] == C2
+    assert load_chunk(project / "chunks" / f"{K2}.json").translated_text == ES2
+
+
+def test_an_alt_text_newline_keeps_the_image_block_on_one_line():
+    fig = {"image": "images/plate_x.jpg", "alt_es": "Lupita\nSaltapared: la reina",
+           "captions_es": ["UNO."]}
+    block = figures._figure_block(fig, "es")
+    first = block.split("\n\n")[0]
+    assert first == "[IMAGE:images/plate_x.jpg:Lupita Saltapared - la reina]"
+    assert figures._IMAGE_RE.match(first)
