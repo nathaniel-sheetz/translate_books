@@ -814,12 +814,18 @@ def _render_body_blocks(body: str, links: Optional[str] = None) -> List[str]:
             # A caption directly below the image is emitted as one <figure> so
             # the reader keeps the pair together across a page break
             # (page-break-inside: avoid); margin tuning alone cannot do that.
-            if i + 1 < len(blocks) and is_caption_block(blocks[i + 1]):
-                caption = _render_inline(strip_caption_marker(blocks[i + 1]), links)
+            # A plate of two or three birds has a caption for each: all of
+            # them go in the one figcaption, a line apiece.
+            j = i + 1
+            while j < len(blocks) and is_caption_block(blocks[j]):
+                j += 1
+            if j > i + 1:
+                caption = "<br/>".join(_render_inline(strip_caption_marker(b), links)
+                                       for b in blocks[i + 1:j])
                 out.append(
                     f'<figure>{img_tag}<figcaption>{caption}</figcaption></figure>'
                 )
-                i += 2
+                i = j
                 continue
 
             out.append(f'<div class="image">{img_tag}</div>')

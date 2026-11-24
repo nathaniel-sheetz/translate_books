@@ -5992,6 +5992,43 @@ def sentence_edit(
     )
 
 
+def figures(
+    project: str,
+    *,
+    action: str,
+    plates: str | None = None,
+    file: str | None = None,
+    ids: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Pictures with captions added to a book after its text (see src/figures.py)."""
+    from src import figures as fig
+
+    project_dir = state.resolve_project_dir(project)
+    id_list = [i.strip() for i in ids.split(",") if i.strip()] if ids else None
+    if action == "import":
+        result = fig.import_figures(project_dir, Path(plates))
+        result["instructions"] = (
+            "Draft captions_es (and alt_es) for every figure with the book's glossary names, "
+            "write them with `figures set --file`, then show the user the board at "
+            f"/figures/{project_dir.name} to check places and approve.")
+        return result
+    if action == "set":
+        edits, err = _read_edits_file(file)
+        if err:
+            return err
+        if isinstance(edits, dict):
+            edits = edits.get("figures") or []
+        return fig.set_fields(project_dir, edits)
+    if action == "apply":
+        return fig.apply(project_dir, id_list, dry_run=dry_run)
+    if action == "remove":
+        return fig.remove(project_dir, id_list or [], dry_run=dry_run)
+    if action == "status":
+        return fig.status(project_dir)
+    return {"status": "error", "error": f"unknown figures action: {action}"}
+
+
 def chunk_edit(
     project: str,
     *,
@@ -6583,6 +6620,46 @@ OUTPUT_SCHEMAS: dict[str, dict[str, str]] = {
         "reader_link": "reader URL for the chapter",
         "instructions": "next step",
         "error": "present only on failure",
+    },
+    "figures import": {
+        "plan": "path to the book's figures.json",
+        "added": "ids added, each with a suggested chapter_id / anchor_en / subject",
+        "refreshed": "ids already planned whose picture and English captions were refreshed (place, translation and status kept)",
+        "unplaced": "ids no chapter could be suggested for: set chapter_id and anchor_en by hand",
+        "figures": "figures in the plan",
+        "instructions": "next step",
+    },
+    "figures set": {
+        "changed": "ids changed",
+        "refused": "list of {id, why}: unknown id, an inserted figure, a field that is not editable",
+    },
+    "figures apply": {
+        "status": "'ok', 'partial' (the realign failed) or 'error' (nothing written)",
+        "dry_run": "true when --dry-run: nothing was written",
+        "write": "whether anything was written",
+        "planned": "dry-run: list of {id, chunk_id, chapter_id, en_context, es_context, en_insert, es_insert}: the paragraph each figure goes after, on each side, and the blocks inserted",
+        "refused": "list of {id, why}: figures that cannot be placed (no captions_es, anchor not unique, no aligned Spanish, already inserted)",
+        "inserted": "ids inserted",
+        "backups": "pre-edit chunk snapshots under .chunk_edits/",
+        "chapters_realigned": "chapters recombined and realigned (reader notes re-anchored)",
+        "realign_errors": "{chapter_id, error} if a realign failed",
+        "evaluation_errors": "{chunk_id, error} if re-running the coded evaluators failed",
+        "instructions": "next step",
+        "error": "present only on failure",
+    },
+    "figures remove": {
+        "removed": "ids taken out (status back to draft)",
+        "chunks": "chunks rewritten",
+        "found": "dry-run: {id: [chunk_id]} where each figure is",
+        "chapters_realigned": "chapters recombined and realigned",
+        "realign_errors": "{chapter_id, error} if a realign failed",
+        "evaluation_errors": "{chunk_id, error} if re-running the coded evaluators failed",
+    },
+    "figures status": {
+        "plan": "path to figures.json",
+        "source": "the plates file last imported",
+        "counts": "{status: n}",
+        "figures": "list of {id, status, chapter_id, subject, captions_en, captions_es, anchor_en}",
     },
     "footnotes drop": {
         "command": "the harness command ('footnotes')",

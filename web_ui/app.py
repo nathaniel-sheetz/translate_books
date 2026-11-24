@@ -3065,6 +3065,95 @@ def book_review_approve(project_id):
 
 
 # ---------------------------------------------------------------------------
+# Figures board (/figures/<id>): pictures with captions added to a book after
+# its text (src.figures). The page edits only figures.json: the Spanish
+# captions, each figure's chapter and paragraph, and its approval. It shows
+# where each one would land, on both sides, from a dry run on the chunks as
+# they are. Inserting stays with `harness figures apply`.
+# ---------------------------------------------------------------------------
+
+def _figures_project(project_id: str):
+    if not _safe_id(project_id):
+        return None, (jsonify({"error": "Bad request"}), 400)
+    project_dir = _resolve_project_dir(project_id)
+    if not project_dir.exists():
+        return None, (jsonify({"error": "Project not found"}), 404)
+    return project_dir, None
+
+
+@app.route("/figures/<project_id>")
+def figures_board_page(project_id):
+    """Every planned figure: its picture, captions, place and approval."""
+    if not _safe_id(project_id):
+        return "Bad request", 400
+    if not _resolve_project_dir(project_id).exists():
+        return "Project not found", 404
+    return render_template("figures_board.html", t=_reader_strings(), lang=_get_ui_lang(),
+                           project_id=project_id, project_title=_project_title(project_id))
+
+
+@app.route("/api/project/<project_id>/figures", methods=["GET"])
+def figures_board_state(project_id):
+    from src import figures
+
+    project_dir, err = _figures_project(project_id)
+    if err:
+        return err
+    return jsonify(figures.board_state(project_dir))
+
+
+@app.route("/api/project/<project_id>/figures/paragraphs", methods=["GET"])
+def figures_board_paragraphs(project_id):
+    from src import figures
+
+    project_dir, err = _figures_project(project_id)
+    if err:
+        return err
+    chapter = request.args.get("chapter", "")
+    if not _safe_id(chapter):
+        return jsonify({"error": "Bad request"}), 400
+    return jsonify({"chapter_id": chapter, "paragraphs": figures.paragraphs(project_dir, chapter)})
+
+
+@app.route("/api/project/<project_id>/figures/<fid>", methods=["POST"])
+def figures_board_save(project_id, fid):
+    """Save one figure's fields; the reply is its row rebuilt, with the new preview."""
+    from src import figures
+
+    project_dir, err = _figures_project(project_id)
+    if err:
+        return err
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not _safe_id(fid):
+        return jsonify({"error": "Missing required fields"}), 400
+    allowed = {"captions_es", "alt_es", "chapter_id", "anchor_en", "status"}
+    edit = {k: v for k, v in data.items() if k in allowed}
+    if "captions_es" in edit and not (isinstance(edit["captions_es"], list)
+                                      and all(isinstance(c, str) for c in edit["captions_es"])):
+        return jsonify({"error": "captions_es must be a list of strings"}), 400
+    done = figures.set_fields(project_dir, [{"id": fid, **edit}])
+    if done["refused"]:
+        return jsonify({"error": done["refused"][0]["why"]}), 400
+    row = next((r for r in figures.board_state(project_dir)["figures"] if r["id"] == fid), None)
+    return jsonify(row or {})
+
+
+@app.route("/api/project/<project_id>/figures/<fid>/picture", methods=["GET"])
+def figures_board_picture(project_id, fid):
+    from src import figures
+
+    project_dir, err = _figures_project(project_id)
+    if err:
+        return err
+    if not _safe_id(fid):
+        return "Bad request", 400
+    path = figures.picture_path(project_dir, fid)
+    if path is None:
+        return "Not found", 404
+    return send_from_directory(str(path.parent), path.name)
+
+
+# ---------------------------------------------------------------------------
 # Quotation board (/quotations/<id>): every Bible quotation the quotation pass
 # found, with its proposed NBLA wording, reference fix and echo edits. The
 # state, the live diff (on in-memory chunk copies) and the one file the page
