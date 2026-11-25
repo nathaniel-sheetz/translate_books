@@ -1849,6 +1849,21 @@ class TestCaptionRendering:
         assert '<div class="image">' not in xhtml
         assert "[CAPTION]" not in xhtml
 
+    def test_a_plate_of_two_birds_keeps_both_captions_in_the_figure(self):
+        text = (
+            "CHAPTER I\n\nTitle\n\n"
+            "[IMAGE:images/p.jpg:Two sparrows]\n\n"
+            "[CAPTION] BRAVUCÓN, el gorrión de todas las calles.\n\n"
+            "[CAPTION] CHIPI, el más pequeño de la familia.\n\n"
+            "Cuerpo normal."
+        )
+        xhtml = chapter_text_to_xhtml(text, 1)
+        assert (
+            "<figcaption>BRAVUCÓN, el gorrión de todas las calles.<br/>"
+            "CHIPI, el más pequeño de la familia.</figcaption></figure>"
+        ) in xhtml
+        assert '<p class="caption">' not in xhtml
+
     def test_uncaptioned_image_still_renders_as_div(self):
         text = "CHAPTER I\n\nTitle\n\n[IMAGE:images/a.jpg]\n\nCuerpo."
         xhtml = chapter_text_to_xhtml(text, 1)

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ t.figures_title }} — {{ project_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}?v=7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='book_review_board.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='figures_board.css') }}?v=1">
+</head>
+<body>
+<script>(function(){var t=localStorage.getItem('reader_theme');if(t)document.documentElement.dataset.theme=t;})()</script>
+
+{#- The shell only. The cards are drawn by figures_board.js from
+    /api/project/<id>/figures; each card's preview is a dry run on the chunks
+    as they are. The page writes figures.json and nothing else. -#}
+<div class="nav-page br-page fb-page">
+    <div class="nav-header">
+        <h1>{{ t.figures_title }}</h1>
+        <div class="nav-header-actions">
+            <button type="button" class="br-refresh" id="fb-refresh">{{ t.figures_js.refresh }}</button>
+            <a class="btn-new-project" href="/read/{{ project_id }}">{{ project_title }}</a>
+        </div>
+    </div>
+
+    <p class="br-subtitle">{{ t.figures_subtitle }}</p>
+
+    {#- Single-quoted, because `tojson` escapes `'` but not `"`. -#}
+    <div class="fb-board" id="fb-board"
+         data-project="{{ project_id }}"
+         data-strings='{{ t.figures_js | tojson }}'>
+        <p class="br-status" id="fb-status">{{ t.figures_js.loading }}</p>
+    </div>
+</div>
+
+<div class="fb-bar" id="fb-bar" hidden>
+    <span class="fb-bar-count" id="fb-bar-count"></span>
+    <span class="fb-bar-save" id="fb-bar-save" aria-live="polite"></span>
+</div>
+
+<script src="{{ url_for('static', filename='figures_board.js') }}?v=1"></script>
+</body>
+</html>

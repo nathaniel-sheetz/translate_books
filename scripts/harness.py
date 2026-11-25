@@ -774,6 +774,35 @@ def _build_parser() -> argparse.ArgumentParser:
     add_project(ara)
     ara.add_argument("--no-realign", dest="no_realign", action="store_true")
 
+    # figures <action> (pictures with captions added to a book after its text) --
+    fig = sub.add_parser(
+        "figures",
+        help="Add pictures with captions to a book after its text (plates cut from a scan "
+             "by ocr_texts' `ocrt plates`): import -> set/board -> apply",
+    )
+    fig_sub = fig.add_subparsers(dest="action", required=True)
+    fgi = fig_sub.add_parser("import", help="Add figures from a plates.json, each with a "
+                                            "suggested chapter and paragraph (no text written)")
+    add_project(fgi)
+    fgi.add_argument("--plates", required=True,
+                     help="ocr_texts' out/plates.json, or a list of {name, image, captions}")
+    fgs = fig_sub.add_parser("set", help="Change figures' captions_es, alt_es, place or status")
+    add_project(fgs)
+    fgs.add_argument("--file", required=True,
+                     help="JSON list of {id, captions_es?, alt_es?, alt_en?, chapter_id?, "
+                          "anchor_en?, status? (draft|approved)}")
+    fga = fig_sub.add_parser("apply", help="Insert the approved figures (all planned first; "
+                                           "one that cannot be placed stops the batch)")
+    add_project(fga)
+    fga.add_argument("--ids", default=None, help="Comma-separated ids (default: every approved)")
+    fga.add_argument("--dry-run", dest="dry_run", action="store_true")
+    fgr = fig_sub.add_parser("remove", help="Take inserted figures out again")
+    add_project(fgr)
+    fgr.add_argument("--ids", required=True, help="Comma-separated ids")
+    fgr.add_argument("--dry-run", dest="dry_run", action="store_true")
+    fgt = fig_sub.add_parser("status", help="The plan: each figure's place, captions and status")
+    add_project(fgt)
+
     # sentence-edit / chunk-edit (hand fixes, landed as the web UI lands them) --
     sep = sub.add_parser(
         "sentence-edit",
@@ -1084,6 +1113,10 @@ def _dispatch(args: argparse.Namespace):
     if cmd == "quotes":
         return flow.quotes(args.project, match=args.match, accept=args.accept,
                            reject=args.reject, apply=args.apply and not args.dry_run)
+    if cmd == "figures":
+        return flow.figures(args.project, action=args.action, plates=getattr(args, "plates", None),
+                            file=getattr(args, "file", None), ids=getattr(args, "ids", None),
+                            dry_run=getattr(args, "dry_run", False))
     if cmd == "sentence-edit":
         return flow.sentence_edit(
             args.project, file=args.file, chapter=args.chapter, find=args.find,

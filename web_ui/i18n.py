@@ -493,6 +493,34 @@ STRINGS = {
             "save_failed": "Not saved: {error}",
             "back": "Back to the quotations",
         },
+        # Figures board (/figures/<id>): pictures with captions added after the text.
+        "figures_title": "Figures",
+        "figures_subtitle": "Pictures to add to the book, each with its printed caption. Check "
+                            "the Spanish caption and where it goes, then approve. Nothing is "
+                            "written into the book until the agent inserts the approved ones.",
+        "figures_js": {
+            "loading": "Loading…",
+            "empty": "No figures planned. Run `harness figures import` first.",
+            "refresh": "Refresh",
+            "caption_en": "Printed caption",
+            "caption_es": "Spanish caption",
+            "doubtful": "the readers disagreed on this caption: check it against the picture",
+            "alt_es": "Alt text (Spanish)",
+            "chapter": "Chapter",
+            "after": "After the paragraph",
+            "lands_en": "English: after",
+            "lands_es": "Spanish: after",
+            "approve": "Approve",
+            "approved": "Approved",
+            "inserted": "Inserted",
+            "missing_es": "Needs its Spanish caption",
+            "problem": "Cannot be placed: {why}",
+            "saving": "Saving…",
+            "saved": "Saved",
+            "save_failed": "Not saved: {error}",
+            "count": "{approved} of {total} approved · {inserted} inserted",
+            "facing": "Plate faces page {page}",
+        },
         "quotations_title": "Bible quotations",
         "quotations_link": "Bible quotations",
         "quotations_subtitle": "Every Bible quotation the pass found, with the NBLA "
@@ -1430,6 +1458,35 @@ STRINGS = {
             "saved": "Guardado",
             "save_failed": "No se guardó: {error}",
             "back": "Volver a las citas",
+        },
+
+        # Ilustraciones (/figures/<id>)
+        "figures_title": "Ilustraciones",
+        "figures_subtitle": "Imágenes que se añadirán al libro, cada una con su pie impreso. "
+                            "Revisa el pie en español y dónde va, y apruébala. Nada se escribe "
+                            "en el libro hasta que el agente inserte las aprobadas.",
+        "figures_js": {
+            "loading": "Cargando…",
+            "empty": "No hay ilustraciones planeadas. Ejecuta primero `harness figures import`.",
+            "refresh": "Actualizar",
+            "caption_en": "Pie impreso",
+            "caption_es": "Pie en español",
+            "doubtful": "los lectores no coincidieron en este pie: compáralo con la imagen",
+            "alt_es": "Texto alternativo (español)",
+            "chapter": "Capítulo",
+            "after": "Después del párrafo",
+            "lands_en": "Inglés: después de",
+            "lands_es": "Español: después de",
+            "approve": "Aprobar",
+            "approved": "Aprobada",
+            "inserted": "Insertada",
+            "missing_es": "Falta el pie en español",
+            "problem": "No se puede colocar: {why}",
+            "saving": "Guardando…",
+            "saved": "Guardado",
+            "save_failed": "No se guardó: {error}",
+            "count": "{approved} de {total} aprobadas · {inserted} insertadas",
+            "facing": "La lámina está frente a la página {page}",
         },
 
         # Citas bíblicas (/quotations/<id>)
