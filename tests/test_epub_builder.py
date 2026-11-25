@@ -891,6 +891,38 @@ class TestBuildEpub:
             names = zf.namelist()
             assert any('cover.jpg' in n for n in names)
 
+    @staticmethod
+    def _cover_xhtml(output):
+        with zipfile.ZipFile(output) as zf:
+            name = next(n for n in zf.namelist() if n.endswith('cover.xhtml'))
+            return zf.read(name)
+
+    def test_cover_page_title_and_alt_in_spanish(self, tmp_path):
+        project = self._make_project(tmp_path)
+        (project / "images" / "cover.jpg").write_bytes(b'\xff\xd8\xff\xe0' + b'\x00' * 100)
+
+        output = build_epub(project_path=project, title="Test Book", author="Test Author")
+        content = self._cover_xhtml(output).decode("utf-8")
+
+        assert "<title>Portada de «Test Book»</title>" in content
+        assert 'alt="Portada de «Test Book»"' in content
+        assert ">Cover<" not in content
+        assert 'alt="Cover"' not in content
+
+    def test_cover_page_title_is_escaped(self, tmp_path):
+        from lxml import etree
+
+        project = self._make_project(tmp_path)
+        (project / "images" / "cover.jpg").write_bytes(b'\xff\xd8\xff\xe0' + b'\x00' * 100)
+
+        output = build_epub(project_path=project, title="Tom & Jerry", author="Test Author")
+        raw = self._cover_xhtml(output)
+
+        root = etree.fromstring(raw)  # well-formed XML
+        img = root.find('.//{http://www.w3.org/1999/xhtml}img')
+        assert img.get("alt") == "Portada de «Tom & Jerry»"
+        assert 'alt="Portada de «Tom &amp; Jerry»"' in raw.decode("utf-8")
+
     def test_custom_output_path(self, tmp_path):
         project = self._make_project(tmp_path)
         custom_output = tmp_path / "custom" / "book.epub"

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.0.1] - 2026-11-25
+
+### Fixed
+- **The EPUB's cover page is titled in Spanish.** EbookLib called it "Cover" and used that word as the cover image's alt text, so readers and screen readers met English on the first page of a Spanish book. Both now read `Portada de «<title>»`.
+
 ## [0.89.0.0] - 2026-11-24
 
 ### Added

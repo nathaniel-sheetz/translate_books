@@ -1677,6 +1677,11 @@ def _new_book(
 
     if cover_path:
         book.set_cover(f'images/{cover_path.name}', cover_path.read_bytes())
+        # EbookLib titles the cover page "Cover" and reuses the title as the
+        # image's alt text; the books are in Spanish, so say it in Spanish.
+        cover_page = book.get_item_with_id('cover')
+        if cover_page is not None:
+            cover_page.title = f'Portada de «{title}»'
         logger.info(f"Cover image: {cover_path.name}")
     return book, css_item
 
