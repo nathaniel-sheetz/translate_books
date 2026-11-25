@@ -1045,12 +1045,21 @@ def test_call_openai_api_success():
 def test_call_openai_api_rate_limit():
     """Test rate limit error handling."""
     openai = pytest.importorskip("openai")
+    # openai 3.59+ scrubs auth headers off the error's request/response, so
+    # a Mock response no longer works: build a real one with whichever httpx
+    # the installed openai uses (httpx2 from 3.x, httpx before that).
+    import openai._exceptions as openai_exceptions
+    httpx_mod = getattr(openai_exceptions, "httpx2", None) or openai_exceptions.httpx
 
     with patch('openai.OpenAI') as mock_openai_class:
         mock_client = Mock()
-        mock_response = Mock()
-        mock_response.status_code = 429
-        mock_response.headers = {}
+        mock_response = httpx_mod.Response(
+            429,
+            request=httpx_mod.Request(
+                "POST", "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": "Bearer test-key"},
+            ),
+        )
         mock_client.chat.completions.create.side_effect = openai.RateLimitError(
             "Rate limit exceeded", response=mock_response, body={}
         )
