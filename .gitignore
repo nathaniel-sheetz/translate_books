@@ -136,6 +136,9 @@ CLAUDE.md
 # ...but track project-local skills and agents (they ship with the repo)
 !.claude/skills/
 !.claude/agents/
+# ...and the shared project settings (the compact-hint hooks); per-user settings
+# stay in the ignored settings.local.json
+!.claude/settings.json
 .gstack/
 # Per-machine links that point other agent CLIs at .claude/skills (absolute paths)
 .agents/
