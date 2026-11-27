@@ -145,6 +145,13 @@ needed. **Redoing chapters that already have translations is NOT a re-run of the
 3. Consult the ROUTER table; **Read only the matching reference file(s)**.
 4. Never hand-roll a loop over `chunks/*.json` — `status` / `translate-prepare` answer
    what's left. Past runs: `runs --project <slug>`.
+5. **After a compaction**, re-run steps 1–2 before anything else. The summary's memory
+   of the stage, the gate or a pending decision is not the record; `status` and the
+   files on disk are. The user is told when to compact by a hook
+   (`scripts/hooks/compact_hint.py`, which prints a ready-to-paste `/compact` line at the
+   translate gate, after the canary, before the book review and before the drafting beats
+   when the context is past 150k). Don't suggest compacting yourself; you can't see
+   the context size.
 
 ## ROUTER
 
