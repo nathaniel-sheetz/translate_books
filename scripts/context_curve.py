@@ -172,10 +172,14 @@ def parse(path: Path) -> Session:
     last_ts: datetime | None = None
     pending_gap: dict | None = None
 
-    for line in path.open(encoding="utf-8"):
+    with path.open(encoding="utf-8") as f:
+        lines = f.readlines()
+    for line in lines:
         try:
             e = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(e, dict):
             continue
         kind = e.get("type")
         ts = _ts(e.get("timestamp"))
@@ -199,7 +203,9 @@ def parse(path: Path) -> Session:
         if ts:
             last_ts = ts
 
-        msg = e.get("message") or {}
+        msg = e.get("message")
+        if not isinstance(msg, dict):
+            msg = {}
         if kind == "user":
             content = msg.get("content")
             if isinstance(content, str):

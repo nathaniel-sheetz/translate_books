@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +13,7 @@ import pytest
 from src.harness import compact_hint as ch
 
 REPO = Path(__file__).resolve().parents[1]
+_REAL_LOG = ch._log  # the `book` fixture stubs it out
 
 
 def _assistant(ctx: int, command: str | None = None, mid: str = "m") -> dict:
@@ -78,6 +81,15 @@ def test_translated_book_with_review_due():
     assert ch.boundary(_status("fully-translated", review=done), "epub") is None
 
 
+def test_book_review_hint_is_quiet_once_the_review_started():
+    # `due` stays set until signals records the review, so the verb tells the two apart
+    st = _status("fully-translated", review={"due": "never reviewed", "last_review": None})
+    for verb in ("translate", "translate-commit", "status"):
+        assert ch.boundary(st, verb) == "before_book_review"
+    for verb in ("judge", "prepare", "apply", "fanout", "sentence-edit"):
+        assert ch.boundary(st, verb) is None
+
+
 def test_message_carries_the_context_and_a_paste_line():
     msg = ch.message("translate_gate", project="my-book", ctx=353_400)
     assert "353k" in msg
@@ -118,9 +130,27 @@ def test_a_compaction_after_the_last_turn_means_no_context(tmp_path):
 def test_tail_drops_the_cut_first_line(tmp_path):
     rows = [_assistant(100_000 + i, None, str(i)) for i in range(50)]
     p = _transcript(tmp_path, rows)
-    tail = ch._tail_entries(p, tail_bytes=600)
-    assert tail and all(r["type"] == "assistant" for r in tail)
+    # a cut that lands exactly on a row's start: that row parses, and is still dropped
+    last3 = "\n".join(json.dumps(r) for r in rows[-3:]) + "\n"
+    tail = ch._tail_entries(p, tail_bytes=len(last3.encode("utf-8")))
+    assert [r["message"]["id"] for r in tail] == ["48", "49"]
     assert ch.last_context(tail) == 100_049
+
+
+def test_odd_rows_mid_transcript_are_skipped(tmp_path):
+    p = tmp_path / "session.jsonl"
+    good = [_assistant(150_000, "python scripts/harness.py chunk --project projects/a", "1"),
+            _assistant(220_000, "python scripts/harness.py status --project projects/a", "2")]
+    p.write_text("\n".join([
+        json.dumps(good[0]), "[1, 2]", "null", '"str"',
+        json.dumps({"type": "assistant", "message": "not an object"}),
+        '{"type": "assistant", "mess',  # broken
+        json.dumps(good[1]), "42",
+    ]) + "\n", encoding="utf-8")
+    rows = ch._tail_entries(p)
+    assert all(isinstance(r, dict) for r in rows)
+    assert ch.last_context(rows) == 220_000
+    assert ch.last_harness_command(rows) == ("status", "projects/a")
 
 
 # ── on_stop ─────────────────────────────────────────────────────────────────
@@ -171,6 +201,14 @@ def test_on_stop_needs_a_harness_command(book):
     assert ch.on_stop({"transcript_path": str(p)}) is None
 
 
+def test_a_bad_config_does_not_cost_the_hint(book, monkeypatch):
+    monkeypatch.setattr(ch, "_log", _REAL_LOG)
+    (book["dir"] / ".harness" / "config.json").write_text("{not json", encoding="utf-8")
+    msg = _stop(book, 300_000)
+    assert msg and "300k" in msg
+    assert "translate_gate" in ch.shown(book["dir"])
+
+
 def test_on_precompact_logs_the_compaction(book):
     p = _transcript(book["tmp"], [_assistant(
         246_000, f"python scripts/harness.py chunk --project {book['dir']}", "1")])
@@ -188,5 +226,23 @@ def test_on_precompact_logs_the_compaction(book):
 def test_hook_never_fails_and_prints_nothing(stdin, mode):
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "hooks" / "compact_hint.py"), mode],
                        input=stdin, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0
+    assert r.stdout == ""
+
+
+def _hook_commands() -> list[str]:
+    hooks = json.loads((REPO / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
+    return [h["command"] for event in hooks.values() for group in event for h in group["hooks"]
+            if "compact_hint.py" in h["command"]]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash, as Claude Code's hooks do")
+@pytest.mark.parametrize("command", _hook_commands())
+def test_settings_command_survives_a_missing_script(command, tmp_path):
+    # e.g. an older branch checked out mid-session: python exits 2, which a Stop hook
+    # would read as "block" on every turn
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": tmp_path.as_posix()}
+    r = subprocess.run([shutil.which("bash"), "-c", command], input="{}", capture_output=True,
+                       text=True, timeout=60, env=env)
     assert r.returncode == 0
     assert r.stdout == ""

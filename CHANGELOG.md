@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.90.0.0] - 2026-11-27
+
+### Added
+- **A translate-harness session tells you when to compact.** A `Stop` hook (`scripts/hooks/compact_hint.py`, logic in `src/harness/compact_hint.py`) reads the last turn's context from the session transcript. When it is past 150k (`COMPACT_HINT_MIN_TOKENS`) and the book sits at a phase boundary, it shows one line with a ready-to-paste `/compact`. The boundaries are the translate gate, past the canary, before the book review, and before the drafting beats when a session is already large at `setup`. Each boundary fires once per book (`.harness/compact_hints.json`). A `PreCompact` hook logs every compaction to the run log, so `harness.py runs` shows whether a hint was taken. Both hooks are best-effort: an error, a malformed transcript or a missing script leaves the turn alone.
+- **`scripts/context_curve.py`** shows how the context grows across past harness sessions, from the transcripts Claude Code already keeps: per-beat growth, phases, compactions and what each one saved, and idle gaps past the cache TTL. `--all` aggregates every session in the project. The boundaries above come from its run over 15 book sessions.
+- **The translate-harness skill re-runs `status` after a compaction** and leaves the compaction advice to the hook, since the agent can't see its own context size.
+- **`.claude/settings.json` is tracked**, carrying the two hooks and a `python -m pytest` permission. Per-user settings stay in the ignored `settings.local.json`.
+
 ## [0.89.0.1] - 2026-11-25
 
 ### Fixed

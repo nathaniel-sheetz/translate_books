@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -X utf8 \"$CLAUDE_PROJECT_DIR/scripts/hooks/compact_hint.py\" stop",
+            "command": "python -X utf8 \"$CLAUDE_PROJECT_DIR/scripts/hooks/compact_hint.py\" stop || exit 0",
             "timeout": 20
           }
         ]
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -X utf8 \"$CLAUDE_PROJECT_DIR/scripts/hooks/compact_hint.py\" precompact",
+            "command": "python -X utf8 \"$CLAUDE_PROJECT_DIR/scripts/hooks/compact_hint.py\" precompact || exit 0",
             "timeout": 20
           }
         ]

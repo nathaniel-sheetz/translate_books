@@ -70,6 +70,17 @@ def test_canary_review_is_split_from_the_final_review():
         "translate", "canary-review", "translate", "review"]
 
 
+def test_rows_that_are_not_objects_are_skipped(tmp_path):
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join([
+        json.dumps(_turn("1", "2026-11-24T00:00:00Z", 80_000, f"{H} setup --project p")),
+        "[1]", "null", "{broken", json.dumps({"type": "assistant", "message": "a string"}),
+        json.dumps(_turn("2", "2026-11-24T00:01:00Z", 95_000, f"{H} chunk --project p")),
+    ]), encoding="utf-8")
+    r = cc.session_report(cc.parse(p))
+    assert [b["label"] for b in r["beats"]] == ["setup", "chunk"]
+
+
 def test_paths_and_imports_are_not_beats():
     assert cc._beat_label("cat scripts/harness.py src/x") is None
     assert cc._beat_label("python scripts/harness.py style-guide commit --project p") == "style-guide commit"

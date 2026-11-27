@@ -49,6 +49,9 @@ _PROJECT_RE = re.compile(r"--project[= ]+[\"']?([^\s\"']+)")
 _SETUP_COMMANDS = {"setup", "split", "split-preview", "group", "precedent", "status",
                    "config-set", "config-get", "log-event"}
 
+# Commands that end a translate wave: the book review has not started yet.
+_END_OF_TRANSLATION_COMMANDS = {"translate", "translate-commit", "status"}
+
 # Claude Code puts "Stop says:" before every line of a hook's message, so the
 # message is one line: why now, then the /compact to paste, last so it is easy
 # to select. `reason` finishes "Good time to compact (197k in context): ...".
@@ -98,9 +101,11 @@ def _tail_entries(transcript_path: str | Path, tail_bytes: int = TAIL_BYTES) -> 
     rows = []
     for line in lines:
         try:
-            rows.append(json.loads(line))
+            obj = json.loads(line)
         except ValueError:
             continue
+        if isinstance(obj, dict):
+            rows.append(obj)
     return rows
 
 
@@ -111,7 +116,10 @@ def last_context(rows: list[dict]) -> int:
             return 0  # compacted since the last turn: nothing to hint
         if e.get("type") != "assistant":
             continue
-        u = (e.get("message") or {}).get("usage") or {}
+        msg = e.get("message")
+        u = msg.get("usage") if isinstance(msg, dict) else None
+        if not isinstance(u, dict):
+            continue
         ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
                + u.get("cache_creation_input_tokens", 0))
         if ctx:
@@ -125,7 +133,11 @@ def last_harness_command(rows: list[dict]) -> Optional[tuple[str, str]]:
     for e in reversed(rows):
         if e.get("type") != "assistant":
             continue
-        for b in reversed((e.get("message") or {}).get("content") or []):
+        msg = e.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for b in reversed(content):
             if not isinstance(b, dict) or b.get("type") != "tool_use":
                 continue
             if b.get("name") not in ("Bash", "PowerShell"):
@@ -163,7 +175,10 @@ def boundary(st: dict, last_command: Optional[str]) -> Optional[str]:
         if review.get("last_review") and not review.get("due") and last_command == "translate-prepare":
             return "canary_reviewed"
         return None
-    if stage == "fully-translated" and review.get("due"):
+    # `due` stays set until the review records at signals, so a book_review verb
+    # (judge, prepare, apply...) means the review is already under way.
+    if (stage == "fully-translated" and review.get("due")
+            and last_command in _END_OF_TRANSLATION_COMMANDS):
         return "before_book_review"
     return None
 
@@ -249,7 +264,11 @@ def on_precompact(payload: dict) -> None:
 
 
 def _log(project_dir: Path, event: str, **fields) -> None:
-    from src.harness import state
-    from src.utils.run_logger import log_run_event
-    log_run_event(run_id=state.load_config(project_dir).get("run_id"),
-                  project=project_dir.name, event=event, **fields)
+    """Best-effort: a bad config or log write must never cost the hint itself."""
+    try:
+        from src.harness import state
+        from src.utils.run_logger import log_run_event
+        log_run_event(run_id=state.load_config(project_dir).get("run_id"),
+                      project=project_dir.name, event=event, **fields)
+    except Exception:
+        pass
